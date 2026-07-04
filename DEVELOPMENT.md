@@ -180,7 +180,7 @@ huawei-elb-controller/
 
 3. **Finalizer-based cleanup** — A finalizer (`huawei-elb.io/finalizer`) ensures the Huawei Cloud ELB is deleted before the CR is removed from the cluster, preventing orphaned cloud resources.
 
-4. **`spec.annotations`-based filtering** — Only CRs with `huawei-elb.io/vpc-id` in `spec.annotations` are processed. Other `LoadBalancerConfig` CRs are invisible to this controller, allowing coexistence with other ELB management solutions. This also enables users to create LoadBalancerConfig via the OpenEverest UI, which exposes `spec.annotations` as editable fields.
+4. **Annotation-based filtering** — CRs with `huawei-elb.io/vpc-id` in `spec.annotations` (user-specified) or `metadata.annotations` (auto-detected) are processed. CRs without this annotation trigger auto-detection from cluster nodes. CRs using `kubernetes.io/elb.autocreate` are skipped (managed by CCE CCM directly). This allows coexistence with other ELB management solutions and enables users to create LoadBalancerConfig via the OpenEverest UI, which exposes `spec.annotations` as editable fields.
 
 
 ---
@@ -257,8 +257,8 @@ The controller's reconcile loop follows this logic:
                    └───────┬────────┘
                            │
                    ┌───────▼────────┐       ┌──────────────┐
-                   │ Has label      │──No──▶│ Skip (requeue│
-                   │ controlled=true│       │   30s)       │
+                   │ Has vpc-id     │──No──▶│ Auto-detect  │
+                   │ annotation?    │       │ VPC/subnet/AZ│
                    └───────┬────────┘       └──────────────┘
                            │ Yes
                    ┌───────▼────────┐
@@ -300,8 +300,8 @@ The controller's reconcile loop follows this logic:
                    ┌───────▼────────┐
                    │ Requeue based  │
                    │ on state:      │
-                   │ - ACTIVE: 30s  │
-                   │ - creating: 10s│
+                   │ - ACTIVE: 5min │
+                   │ - creating: 30s│
                    │ - perm error:  │
                    │   5min         │
                    │ - trans error: │
@@ -313,8 +313,8 @@ The controller's reconcile loop follows this logic:
 
 | State | Requeue | Reason |
 |---|---|---|
-| ELB ACTIVE and healthy | 30s | Periodic status sync |
-| ELB creating/updating | 10s | Fast feedback during provisioning |
+| ELB ACTIVE and healthy | 5min | Periodic status sync |
+| ELB creating/updating | 30s | Fast feedback during provisioning |
 | Permanent error (bad params, not found) | 5min | Don't hammer API for unfixable errors |
 | Transient error (network, throttling) | 10s | Retry quickly for recoverable errors |
 
@@ -410,7 +410,7 @@ Both the controller and OpenEverest operator may update the CR simultaneously. T
 |---|---|---|---|
 | **Permanent** | Missing required annotations, invalid VPC ID, ELB not found | 5 minutes | `huawei-elb.io/error` set |
 | **Transient** | Network timeout, API throttling, 5xx server error | 10 seconds | `huawei-elb.io/error` set |
-| **Success** | ELB ACTIVE, status synced | 30 seconds | `huawei-elb.io/error` cleared |
+| **Success** | ELB ACTIVE, status synced | 5 minutes | `huawei-elb.io/error` cleared |
 
 ### `errorAnnotation` Mechanism
 
@@ -425,20 +425,25 @@ The controller records the last error message in `metadata.annotations["huawei-e
 
 The controller supports deploying ELBs in different Huawei Cloud regions:
 
-1. **Global region** (default): Set via `REGION` environment variable from the Secret
+1. **Global region** (default): Set via `HUAWEI_CLOUD_REGION` environment variable from the Secret
 2. **Per-CR override**: Set `huawei-elb.io/region` annotation on a specific `LoadBalancerConfig`
 
 When a CR specifies a region different from the global one, the controller creates a dedicated ELB client for that CR (reusing global AK/SK/ProjectID).
 
 ```go
-func (r *LoadBalancerConfigReconciler) getELBClient(ctx context.Context, u *unstructured.Unstructured) (*elb.ElbClient, error) {
+func (r *LoadBalancerConfigReconciler) getELBClient(lbc *unstructured.Unstructured) (*elb.ElbClient, error) {
     // Check for per-CR region override
-    region := getString(u, "metadata", "annotations", regionKey)
+    region := getSpecAnnotation(lbc, "huawei-elb.io/region")
     if region == "" || region == r.Creds.Region {
         return r.ELBClient, nil // Use global client
     }
     // Create region-specific client
-    return huaweicloud.NewELBClient(r.Creds, region)
+    return huaweicloud.NewELBClient(&huaweicloud.Credentials{
+        AK:        r.Creds.AK,
+        SK:        r.Creds.SK,
+        Region:    region,
+        ProjectID: r.Creds.ProjectID,
+    })
 }
 ```
 

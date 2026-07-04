@@ -3,7 +3,7 @@ kind: ClusterRole
 metadata:
   name: huawei-elb-controller
 rules:
-# Watch, get, list LoadBalancerConfig CRs (cluster-scoped)
+# Watch, get, list, update LoadBalancerConfig CRs (cluster-scoped)
   - apiGroups: ["everest.percona.com"]
     resources: ["loadbalancerconfigs"]
     verbs: ["get", "list", "watch", "update", "patch"]
@@ -11,14 +11,6 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
-  # Manage Services for ELB binding
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Update Service status for ELB binding
-  - apiGroups: [""]
-    resources: ["services/status"]
-    verbs: ["get", "update", "patch"]
   # Events for status reporting (optional but good practice)
   - apiGroups: [""]
     resources: ["events"]

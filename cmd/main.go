@@ -19,11 +19,14 @@ import (
 
 func main() {
 	var metricsAddr string
+	var devMode bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081",
 		"Bind address for the metrics endpoint.")
+	flag.BoolVar(&devMode, "zap-dev-mode", false,
+		"Enable zap development mode (verbose, colored logs). Defaults to false for production.")
 	flag.Parse()
 
-	logger := zap.New(zap.UseDevMode(true))
+	logger := zap.New(zap.UseDevMode(devMode))
 	ctrl.SetLogger(logger)
 
 	// 1. Load Huawei Cloud credentials from environment variables.

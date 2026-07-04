@@ -9,6 +9,10 @@ rules:
   - apiGroups: ["everest.percona.com"]
     resources: ["loadbalancerconfigs"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # Read nodes for VPC/subnet auto-detection
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   # Events for status reporting
   - apiGroups: [""]
     resources: ["events"]

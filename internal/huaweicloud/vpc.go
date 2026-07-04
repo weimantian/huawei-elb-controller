@@ -2,6 +2,7 @@ package huaweicloud
 
 import (
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth/basic"
@@ -47,6 +48,7 @@ func DetectVPCSubnet(creds *Credentials, nodeIPs []string) (*VPCSubnetInfo, erro
 			VpcId: &vpcIDs,
 		})
 		if err != nil {
+			log.Printf("warning: listing subnets for VPC %s: %v", v.Id, err)
 			continue
 		}
 		if subnetResp.Virsubnets == nil {

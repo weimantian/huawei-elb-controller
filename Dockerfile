@@ -1,6 +1,14 @@
-# Build stage — uses pre-built binary from the host (faster than in-container Go build)
-FROM gcr.io/distroless/static:nonroot
+# Build stage — compiles the controller binary from source
+FROM golang:1.26 AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /huawei-elb-controller ./cmd/
+
+# Runtime stage — minimal image with CA certificates
+FROM gcr.io/distroless/base:nonroot
 WORKDIR /
-COPY bin/huawei-elb-controller-linux-amd64 /huawei-elb-controller
+COPY --from=builder /huawei-elb-controller /huawei-elb-controller
 USER nonroot:nonroot
 ENTRYPOINT ["/huawei-elb-controller"]

@@ -57,6 +57,23 @@ const (
 
 	// errorAnnotation records the last reconciliation error (empty when healthy).
 	errorAnnotation = "huawei-elb.io/error"
+	// Annotation keys for ELB creation parameters (spec.annotations or metadata.annotations).
+	vpcIDAnnotation               = "huawei-elb.io/vpc-id"
+	subnetIDAnnotation            = "huawei-elb.io/subnet-id"
+	availabilityZonesAnnotation   = "huawei-elb.io/availability-zones"
+	autoDetectedAnnotation        = "huawei-elb.io/auto-detected"
+	regionAnnotation              = "huawei-elb.io/region"
+	publicAnnotation              = "huawei-elb.io/public"
+	bandwidthSizeAnnotation       = "huawei-elb.io/bandwidth-size"
+	bandwidthChargeModeAnnotation = "huawei-elb.io/bandwidth-charge-mode"
+	publicIPNetworkTypeAnnotation = "huawei-elb.io/public-ip-network-type"
+
+	// Annotation keys for controller-written status (metadata.annotations).
+	elbStatusAnnotation = "huawei-elb.io/elb-status"
+	publicIPAnnotation  = "huawei-elb.io/public-ip"
+
+	// CCM annotation for native CCE autocreate (skip reconciliation).
+	ccmAutocreateAnnotation = "kubernetes.io/elb.autocreate"
 
 	// Requeue intervals
 	provisioningRequeue = 30 * time.Second // ELB not yet ACTIVE
@@ -89,8 +106,8 @@ type LoadBalancerConfigReconciler struct {
 
 	// Auto-detection cache. On CCE, all nodes share the same VPC/subnet,
 	// so we only need to detect once and cache the result.
-	detectMu  sync.Mutex
-	detected  *autoDetectedParams
+	detectMu sync.Mutex
+	detected *autoDetectedParams
 }
 
 // autoDetectedParams holds the cluster's VPC/subnet/AZ detected from nodes.
@@ -105,7 +122,7 @@ type autoDetectedParams struct {
 // annotation, a new client is created for that region (using the same
 // AK/SK/ProjectID from the default credentials).
 func (r *LoadBalancerConfigReconciler) getELBClient(lbc *unstructured.Unstructured) (*elb.ElbClient, error) {
-	region := getSpecAnnotation(lbc, "huawei-elb.io/region")
+	region := getSpecAnnotation(lbc, regionAnnotation)
 	if region == "" || region == r.Creds.Region {
 		return r.ELBClient, nil
 	}
@@ -144,7 +161,7 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// the controller figures out the rest, similar to EKS/GKE.
 	if !isControlled(lbc) {
 		// Skip if using CCM autocreate (user chose the native CCE path).
-		if getSpecAnnotation(lbc, "kubernetes.io/elb.autocreate") != "" {
+		if getSpecAnnotation(lbc, ccmAutocreateAnnotation) != "" {
 			return ctrl.Result{}, nil
 		}
 
@@ -196,10 +213,10 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 			if anns == nil {
 				anns = map[string]string{}
 			}
-			anns["huawei-elb.io/vpc-id"] = vpcID
-			anns["huawei-elb.io/subnet-id"] = subnetID
-			anns["huawei-elb.io/availability-zones"] = strings.Join(azs, ",")
-			anns["huawei-elb.io/auto-detected"] = "true"
+			anns[vpcIDAnnotation] = vpcID
+			anns[subnetIDAnnotation] = subnetID
+			anns[availabilityZonesAnnotation] = strings.Join(azs, ",")
+			anns[autoDetectedAnnotation] = "true"
 			anns[readyAnnotation] = "false"
 			latest.SetAnnotations(anns)
 			controllerutil.AddFinalizer(latest, finalizerName)
@@ -313,11 +330,11 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 		if anns == nil {
 			anns = map[string]string{}
 		}
-		anns["huawei-elb.io/elb-status"] = info.ProvisioningStatus
+		anns[elbStatusAnnotation] = info.ProvisioningStatus
 		anns[readyAnnotation] = ready
 		anns[errorAnnotation] = ""
 		if info.PublicIP != "" {
-			anns["huawei-elb.io/public-ip"] = info.PublicIP
+			anns[publicIPAnnotation] = info.PublicIP
 		}
 		latest.SetAnnotations(anns)
 		return nil
@@ -348,7 +365,7 @@ func (r *LoadBalancerConfigReconciler) reconcileDelete(
 		logger.Info("Deleting Huawei Cloud ELB", "elbID", elbID)
 		if err := huaweicloud.DeleteELB(elbClient, elbID); err != nil {
 			// If the ELB is already gone, proceed with finalizer removal.
-			if !strings.Contains(err.Error(), "not found") {
+			if !huaweicloud.IsNotFoundError(err) {
 				return r.handleTransientError(ctx, lbc, logger, fmt.Errorf("deleting ELB %q: %w", elbID, err))
 			}
 			logger.Info("ELB already deleted, proceeding", "elbID", elbID)
@@ -412,13 +429,12 @@ func (r *LoadBalancerConfigReconciler) getLoadBalancerConfig(
 // spec.annotations (user-specified) or metadata.annotations (auto-detected),
 // indicating it should be managed by this controller.
 func isControlled(lbc *unstructured.Unstructured) bool {
-	if getSpecAnnotation(lbc, "huawei-elb.io/vpc-id") != "" {
+	if getSpecAnnotation(lbc, vpcIDAnnotation) != "" {
 		return true
 	}
 	anns := lbc.GetAnnotations()
-	return anns["huawei-elb.io/vpc-id"] != ""
+	return anns[vpcIDAnnotation] != ""
 }
-
 
 // isInUse returns true if the CR has status.inUse == true,
 // indicating it is referenced by a DatabaseCluster.
@@ -426,7 +442,6 @@ func isInUse(lbc *unstructured.Unstructured) bool {
 	inUse, found, _ := unstructured.NestedBool(lbc.Object, "status", "inUse")
 	return found && inUse
 }
-
 
 // autoDetectParams detects VPC ID, Neutron subnet ID, and availability zones
 // from the Kubernetes cluster's nodes. It reads node internal IPs and zone
@@ -504,7 +519,7 @@ func shouldReconcile(obj client.Object) bool {
 		return false
 	}
 	// Skip LBCs using CCM autocreate.
-	if getSpecAnnotation(u, "kubernetes.io/elb.autocreate") != "" {
+	if getSpecAnnotation(u, ccmAutocreateAnnotation) != "" {
 		return false
 	}
 	// Process everything else, including empty LBCs (for auto-detection).
@@ -621,17 +636,17 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 	}
 
 	// Prefer spec.annotations (user-specified), fall back to metadata.annotations (auto-detected).
-	vpcID := specAnns["huawei-elb.io/vpc-id"]
+	vpcID := specAnns[vpcIDAnnotation]
 	if vpcID == "" {
-		vpcID = metaAnns["huawei-elb.io/vpc-id"]
+		vpcID = metaAnns[vpcIDAnnotation]
 	}
-	subnetID := specAnns["huawei-elb.io/subnet-id"]
+	subnetID := specAnns[subnetIDAnnotation]
 	if subnetID == "" {
-		subnetID = metaAnns["huawei-elb.io/subnet-id"]
+		subnetID = metaAnns[subnetIDAnnotation]
 	}
-	azStr := specAnns["huawei-elb.io/availability-zones"]
+	azStr := specAnns[availabilityZonesAnnotation]
 	if azStr == "" {
-		azStr = metaAnns["huawei-elb.io/availability-zones"]
+		azStr = metaAnns[availabilityZonesAnnotation]
 	}
 
 	if vpcID == "" || subnetID == "" || azStr == "" {
@@ -659,15 +674,15 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 
 	// Default to public ELB. Set huawei-elb.io/public: "false" for internal.
 	opt.IsPublic = true
-	if strings.EqualFold(specAnns["huawei-elb.io/public"], "false") {
+	if strings.EqualFold(specAnns[publicAnnotation], "false") {
 		opt.IsPublic = false
 	}
 	if opt.IsPublic {
-		if bw, err := strconv.Atoi(specAnns["huawei-elb.io/bandwidth-size"]); err == nil && bw > 0 {
+		if bw, err := strconv.Atoi(specAnns[bandwidthSizeAnnotation]); err == nil && bw > 0 {
 			opt.BandwidthSize = int32(bw)
 		}
-		opt.BandwidthChargeMode = specAnns["huawei-elb.io/bandwidth-charge-mode"]
-		opt.PublicIPNetworkType = specAnns["huawei-elb.io/public-ip-network-type"]
+		opt.BandwidthChargeMode = specAnns[bandwidthChargeModeAnnotation]
+		opt.PublicIPNetworkType = specAnns[publicIPNetworkTypeAnnotation]
 	}
 
 	return opt, nil

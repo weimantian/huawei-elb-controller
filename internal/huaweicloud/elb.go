@@ -1,6 +1,7 @@
 package huaweicloud
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -118,6 +119,30 @@ func DeleteELB(client *elb.ElbClient, id string) error {
 		return fmt.Errorf("deleting ELB %q: %w", id, err)
 	}
 	return nil
+}
+
+// IsNotFoundError returns true if the error indicates the resource was not
+// found (HTTP 404). This is more robust than string matching as it checks
+// for both typed errors with a StatusCode method and common error message
+// patterns returned by the Huawei Cloud SDK.
+func IsNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for errors that implement StatusCode() int (common in HTTP SDKs).
+	// errors.As unwraps fmt.Errorf %w chains so wrapped SDK errors are found.
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	if errors.As(err, &sc) {
+		return sc.StatusCode() == 404
+	}
+	// Fall back to error message matching for wrapped SDK errors.
+	msg := err.Error()
+	return strings.Contains(msg, "404") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "ItemNotFound")
 }
 
 // loadBalancerToInfo converts a model.LoadBalancer to ELBInfo.
