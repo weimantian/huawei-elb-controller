@@ -6,11 +6,11 @@
 
 ## 概述
 
-`huawei-elb-controller` 是一个 Kubernetes 控制器，为 [Percona Everest](https://docs.percona.com/everest/)（OpenEverest V1）数据库集群自动创建和管理**华为云 ELB**（弹性负载均衡）实例。
+`huawei-elb-controller` 是一个 Kubernetes 控制器，为 [OpenEverest](https://openeverest.io/documentation/current/)（原 Percona Everest）数据库集群自动创建和管理**华为云 ELB**（弹性负载均衡）实例。
 
-**解决的问题**：Percona Everest 的 `LoadBalancerConfig` CR 可以向 Kubernetes Service 注入 annotation，但不会创建华为云 ELB 本身。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
+**解决的问题**：OpenEverest 的 `LoadBalancerConfig` CR 可以向 Kubernetes Service 注入 annotation，但不会创建华为云 ELB 本身。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
 
-**工作原理**：监听 `LoadBalancerConfig` CR，调用华为云 ELB v3 API 自动创建/删除 ELB，并将 ELB ID 写回 CR。Percona Everest 的 operator 随后读取 ELB ID，将其添加到 Service，华为云 CCM 绑定 ELB —— 为你的数据库集群提供外部负载均衡访问入口。
+**工作原理**：监听 `LoadBalancerConfig` CR，调用华为云 ELB v3 API 自动创建/删除 ELB，并将 ELB ID 写回 CR。OpenEverest 的 operator 随后读取 ELB ID，将其添加到 Service，华为云 CCM 绑定 ELB —— 为你的数据库集群提供外部负载均衡访问入口。
 
 ---
 
@@ -38,43 +38,97 @@ Percona Everest operator 创建 LoadBalancer 类型 Service
 
 ### 1. Kubernetes 集群
 
-一个运行中的 Kubernetes 集群（1.26+），需要：
+一个运行中的 Kubernetes 集群，需要：
 - **华为云 CCM**（Cloud Controller Manager）已安装 —— 用于将 ELB 绑定到 Service
 - **StorageClass** 已配置（用于数据库持久化存储）
 
+OpenEverest 已认证的平台：
+
+| 平台 | Kubernetes 版本 |
+|---|---|
+| Google GKE | 1.31 – 1.33 |
+| Amazon EKS | 1.31 – 1.33 |
+| OpenShift | 4.16 – 4.18 |
+
+> 其他平台（AKS、DigitalOcean、原生 kubeadm）可以运行但未完全认证。本地集群（minikube、kind、k3d）因网络限制不推荐使用。
+>
 > **华为云 CCE 集群**：CCM 已预装。如果是华为云 ECS 自建集群，需要单独安装 CCM。
 
-### 2. Percona Everest（OpenEverest V1）
+### 2. OpenEverest（原 Percona Everest）
 
-如果尚未安装 Percona Everest：
+> **注意**：原 "Percona Everest" 项目已改名为 **OpenEverest**。`everest.percona.com/v1alpha1` API group 保持不变。旧的 Percona Helm 仓库仍然可用，但推荐使用新的 OpenEverest 仓库。
+
+如果尚未安装 OpenEverest：
+
+**前提条件**：工作站需安装 Helm v3 和 [yq](https://github.com/mikefarah/yq)。不支持离线环境。
+
+#### 方式 A：Helm（推荐）
 
 ```bash
-# 添加 Percona Helm 仓库
-helm repo add percona https://percona.github.io/percona-helm-charts/
+# 添加 OpenEverest Helm 仓库
+helm repo add openeverest https://openeverest.github.io/helm-charts/
 helm repo update
 
-# 安装 Percona Everest
-helm install everest-core percona/everest \
+# 安装 OpenEverest
+helm install everest-core openeverest/openeverest \
     --namespace everest-system \
     --create-namespace
 ```
 
 这会安装：
 - Everest operator 和 server（`everest-system` 命名空间）
-- 数据库 operator（PostgreSQL、MongoDB、PXC）（`everest` 命名空间）
+- 数据库引擎 operator（PostgreSQL、MongoDB、PXC）（`everest` 命名空间）
 
-验证安装：
+**可选参数**：
+
+| 参数 | 用途 |
+|---|---|
+| `--set dbNamespace.enabled=false` | 不自动创建 `everest` 数据库命名空间 |
+| `--set dbNamespace.namespaceOverride=<name>` | 使用自定义数据库命名空间名 |
+| `--set dbNamespace.pxc=false` | 跳过 PXC operator 安装 |
+| `--set dbNamespace.postgresql=false` | 跳过 PostgreSQL operator 安装 |
+| `--set dbNamespace.psmdb=false` | 跳过 MongoDB operator 安装 |
+| `--set server.tls.enabled=true` | 为 Everest 组件通信启用 TLS |
+
+> ⚠️ 不要使用 `--no-hooks` —— 不支持无 hook 安装。
+
+#### 方式 B：everestctl 命令行工具
+
+```bash
+# 下载 everestctl（macOS Apple Silicon）
+curl -sSL -o everestctl-darwin-arm64 \
+  https://github.com/openeverest/openeverest/releases/latest/download/everestctl-darwin-arm64
+sudo install -m 555 everestctl-darwin-arm64 /usr/local/bin/everestctl
+rm everestctl-darwin-arm64
+
+# 交互式安装
+everestctl install
+
+# 或无头安装
+everestctl install \
+  --namespaces everest \
+  --operator.postgresql=true \
+  --operator.mysql=true \
+  --operator.mongodb=true \
+  --skip-wizard
+```
+
+#### 验证安装
 
 ```bash
 # 检查 Everest pod 运行状态
 kubectl get pods -n everest-system
+
+# 检查数据库引擎 operator 已注册
+kubectl get dbengine -n everest
+# 预期：percona-postgresql-operator、percona-psmdb-operator、percona-pxc-operator
 
 # 获取管理员密码
 kubectl get secret everest-accounts -n everest-system \
   -o jsonpath='{.data.users\.yaml}' | base64 --decode | yq '.admin.passwordHash'
 ```
 
-> 更多详情请参考 [Percona Everest 快速安装指南](https://docs.percona.com/everest/quick-install.html)。
+> 更多详情请参考 [OpenEverest 快速安装指南](https://docs.percona.com/everest/quick-install.html) 或 [OpenEverest 文档](https://openeverest.io/documentation/current/)。
 
 ### 3. 华为云账号
 
@@ -90,17 +144,17 @@ kubectl get secret everest-accounts -n everest-system \
 ### 步骤 1：验证前提条件
 
 ```bash
-# 检查 Percona Everest 运行状态
+# 检查 OpenEverest 运行状态
 kubectl get pods -n everest-system
 # 预期：everest-operator 和 everest-server pod 处于 Running 状态
+
+# 检查数据库引擎 operator 已注册
+kubectl get dbengine -n everest
+# 预期：percona-postgresql-operator、percona-psmdb-operator、percona-pxc-operator
 
 # 检查 CCM 运行状态（华为云）
 kubectl get pods -A | grep cloud-controller
 # 预期：cloud-controller-manager pod 处于 Running 状态
-
-# 检查数据库 operator 已安装
-kubectl get pods -n everest
-# 预期：psql-operator、pxc-operator、psmdb-operator pod 处于 Running 状态
 ```
 
 ### 步骤 2：获取 VPC 和子网信息
@@ -301,12 +355,20 @@ metadata:
 spec:
   engine:
     type: postgresql
+    version: "17.4"
     replicas: 1
+    resources:
+      cpu: "1"
+      memory: 2G
     storage:
       size: 10Gi
       class: csi-disk
   proxy:
+    type: pgbouncer
     replicas: 1
+    resources:
+      cpu: "1"
+      memory: 30M
     storage:
       size: 1Gi
     expose:
@@ -314,6 +376,17 @@ spec:
       loadBalancerConfigName: huawei-internal-elb
 EOF
 ```
+
+> **支持的引擎类型**：`postgresql`、`pxc`（MySQL）、`psmdb`（MongoDB）。支持的代理类型：`pgbouncer`（PostgreSQL）、`haproxy`（MySQL）、`mongos`（MongoDB）。
+>
+> **可选**：在 `expose` 下添加 `ipSourceRanges` 限制仅受信任 IP 访问（CIDR 格式）：
+> ```yaml
+>     expose:
+>       type: LoadBalancer
+>       loadBalancerConfigName: huawei-internal-elb
+>       ipSourceRanges:
+>         - "10.0.0.0/24"
+> ```
 
 ### 步骤 8：验证数据库访问
 

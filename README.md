@@ -6,11 +6,11 @@
 
 ## Overview
 
-`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [Percona Everest](https://docs.percona.com/everest/) (OpenEverest V1) database clusters.
+`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [OpenEverest](https://openeverest.io/documentation/current/) (formerly Percona Everest) database clusters.
 
-**The problem it solves**: Percona Everest's `LoadBalancerConfig` CR can pass annotations to a Kubernetes Service, but it doesn't create the Huawei Cloud ELB itself. Without this controller, you'd have to manually create an ELB in the Huawei Cloud console, copy its ID, and paste it into the CR — every time.
+**The problem it solves**: OpenEverest's `LoadBalancerConfig` CR can pass annotations to a Kubernetes Service, but it doesn't create the Huawei Cloud ELB itself. Without this controller, you'd have to manually create an ELB in the Huawei Cloud console, copy its ID, and paste it into the CR — every time.
 
-**What it does**: Watches `LoadBalancerConfig` CRs, calls the Huawei Cloud ELB v3 API to create/delete ELBs automatically, and writes the ELB ID back into the CR. Percona Everest's operator then picks up the ELB ID, adds it to the Service, and the Huawei Cloud CCM binds the ELB — giving your database cluster an external load-balanced endpoint.
+**What it does**: Watches `LoadBalancerConfig` CRs, calls the Huawei Cloud ELB v3 API to create/delete ELBs automatically, and writes the ELB ID back into the CR. OpenEverest's operator then picks up the ELB ID, adds it to the Service, and the Huawei Cloud CCM binds the ELB — giving your database cluster an external load-balanced endpoint.
 
 ---
 
@@ -38,43 +38,97 @@ You connect to your database via the ELB's IP address
 
 ### 1. Kubernetes Cluster
 
-A running Kubernetes cluster (1.26+) with:
+A running Kubernetes cluster with:
 - **Huawei Cloud CCM** (Cloud Controller Manager) installed — this is what binds the ELB to the Service
 - **StorageClass** configured (for database persistent volumes)
 
+OpenEverest is certified on the following platforms:
+
+| Platform | Kubernetes Version |
+|---|---|
+| Google GKE | 1.31 – 1.33 |
+| Amazon EKS | 1.31 – 1.33 |
+| OpenShift | 4.16 – 4.18 |
+
+> Other platforms (AKS, DigitalOcean, vanilla kubeadm) work but are not fully certified. Local clusters (minikube, kind, k3d) are not recommended due to network limitations.
+>
 > **For Huawei Cloud CCE clusters**: CCM is pre-installed. For self-managed clusters on Huawei Cloud ECS, install CCM separately.
 
-### 2. Percona Everest (OpenEverest V1)
+### 2. OpenEverest (formerly Percona Everest)
 
-If you haven't installed Percona Everest yet:
+> **Note**: The project formerly known as "Percona Everest" has been rebranded to **OpenEverest**. The `everest.percona.com/v1alpha1` API group remains unchanged. The old Percona Helm repo still works, but the new OpenEverest repo is recommended.
+
+If you haven't installed OpenEverest yet:
+
+**Prerequisites**: Helm v3 and [yq](https://github.com/mikefarah/yq) must be installed on your workstation. Air-gapped environments are not supported.
+
+#### Option A: Helm (recommended)
 
 ```bash
-# Add the Percona Helm repository
-helm repo add percona https://percona.github.io/percona-helm-charts/
+# Add the OpenEverest Helm repository
+helm repo add openeverest https://openeverest.github.io/helm-charts/
 helm repo update
 
-# Install Percona Everest
-helm install everest-core percona/everest \
+# Install OpenEverest
+helm install everest-core openeverest/openeverest \
     --namespace everest-system \
     --create-namespace
 ```
 
 This installs:
 - Everest operator and server in `everest-system` namespace
-- Database operators (PostgreSQL, MongoDB, PXC) in `everest` namespace
+- Database engine operators (PostgreSQL, MongoDB, PXC) in `everest` namespace
 
-Verify the installation:
+**Optional flags**:
+
+| Flag | Purpose |
+|---|---|
+| `--set dbNamespace.enabled=false` | Don't auto-provision the `everest` db namespace |
+| `--set dbNamespace.namespaceOverride=<name>` | Use a custom db namespace name |
+| `--set dbNamespace.pxc=false` | Skip PXC operator installation |
+| `--set dbNamespace.postgresql=false` | Skip PostgreSQL operator installation |
+| `--set dbNamespace.psmdb=false` | Skip MongoDB operator installation |
+| `--set server.tls.enabled=true` | Enable TLS for Everest component communication |
+
+> ⚠️ Do NOT use `--no-hooks` — installation without chart hooks is unsupported.
+
+#### Option B: everestctl CLI
+
+```bash
+# Download everestctl (macOS Apple Silicon)
+curl -sSL -o everestctl-darwin-arm64 \
+  https://github.com/openeverest/openeverest/releases/latest/download/everestctl-darwin-arm64
+sudo install -m 555 everestctl-darwin-arm64 /usr/local/bin/everestctl
+rm everestctl-darwin-arm64
+
+# Install interactively
+everestctl install
+
+# Or install headless
+everestctl install \
+  --namespaces everest \
+  --operator.postgresql=true \
+  --operator.mysql=true \
+  --operator.mongodb=true \
+  --skip-wizard
+```
+
+#### Verify installation
 
 ```bash
 # Check Everest pods are running
 kubectl get pods -n everest-system
+
+# Check database engine operators are registered
+kubectl get dbengine -n everest
+# Expected: percona-postgresql-operator, percona-psmdb-operator, percona-pxc-operator
 
 # Get the admin password
 kubectl get secret everest-accounts -n everest-system \
   -o jsonpath='{.data.users\.yaml}' | base64 --decode | yq '.admin.passwordHash'
 ```
 
-> For more details, see the [Percona Everest Quickstart Guide](https://docs.percona.com/everest/quick-install.html).
+> For more details, see the [OpenEverest Quickstart Guide](https://docs.percona.com/everest/quick-install.html) or the [OpenEverest documentation](https://openeverest.io/documentation/current/).
 
 ### 3. Huawei Cloud Account
 
@@ -90,17 +144,17 @@ kubectl get secret everest-accounts -n everest-system \
 ### Step 1: Verify Prerequisites
 
 ```bash
-# Check Percona Everest is running
+# Check OpenEverest is running
 kubectl get pods -n everest-system
 # Expected: everest-operator and everest-server pods Running
+
+# Check database engine operators are registered
+kubectl get dbengine -n everest
+# Expected: percona-postgresql-operator, percona-psmdb-operator, percona-pxc-operator
 
 # Check CCM is running (Huawei Cloud)
 kubectl get pods -A | grep cloud-controller
 # Expected: cloud-controller-manager pods Running
-
-# Check database operators are installed
-kubectl get pods -n everest
-# Expected: psql-operator, pxc-operator, psmdb-operator pods Running
 ```
 
 ### Step 2: Get VPC and Subnet Information
@@ -301,12 +355,20 @@ metadata:
 spec:
   engine:
     type: postgresql
+    version: "17.4"
     replicas: 1
+    resources:
+      cpu: "1"
+      memory: 2G
     storage:
       size: 10Gi
       class: csi-disk
   proxy:
+    type: pgbouncer
     replicas: 1
+    resources:
+      cpu: "1"
+      memory: 30M
     storage:
       size: 1Gi
     expose:
@@ -314,6 +376,17 @@ spec:
       loadBalancerConfigName: huawei-internal-elb
 EOF
 ```
+
+> **Supported engine types**: `postgresql`, `pxc` (MySQL), `psmdb` (MongoDB). Supported proxy types: `pgbouncer` (PostgreSQL), `haproxy` (MySQL), `mongos` (MongoDB).
+>
+> **Optional**: Add `ipSourceRanges` under `expose` to restrict access to trusted IPs (CIDR notation):
+> ```yaml
+>     expose:
+>       type: LoadBalancer
+>       loadBalancerConfigName: huawei-internal-elb
+>       ipSourceRanges:
+>         - "10.0.0.0/24"
+> ```
 
 ### Step 8: Verify Database Access
 
