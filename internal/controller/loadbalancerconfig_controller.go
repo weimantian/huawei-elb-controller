@@ -1,10 +1,12 @@
 // Package controller implements the LoadBalancerConfig reconciler that manages
 // Huawei Cloud ELBs for OpenEverest.
 //
-// This controller watches LoadBalancerConfig CRs (everest.percona.com/v1alpha1)
-// that carry huawei-elb.io/* parameters in spec.annotations. For each such CR, it:
+// This controller watches LoadBalancerConfig CRs (everest.percona.com/v1alpha1).
+// If the CR has huawei-elb.io/* annotations in spec.annotations, it uses those
+// parameters. If the annotations are missing, it auto-detects VPC/subnet/AZ
+// from the cluster's nodes (zero-config, similar to EKS/GKE). For each CR, it:
 //
-//  1. Reads ELB creation parameters from spec.annotations (huawei-elb.io/*).
+//  1. Reads or auto-detects ELB creation parameters (VPC, subnet, AZs).
 //  2. Creates a Huawei Cloud ELB via the ELB v3 API.
 //  3. Writes the ELB ID back into spec.annotations["kubernetes.io/elb.id"] so
 //     that the OpenEverest operator — which reads spec.annotations and puts
@@ -18,12 +20,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -74,6 +79,18 @@ type LoadBalancerConfigReconciler struct {
 	// per-LBC ELB clients when the CR specifies a different region via
 	// the "huawei-elb.io/region" annotation.
 	Creds *huaweicloud.Credentials
+
+	// Auto-detection cache. On CCE, all nodes share the same VPC/subnet,
+	// so we only need to detect once and cache the result.
+	detectMu  sync.Mutex
+	detected  *autoDetectedParams
+}
+
+// autoDetectedParams holds the cluster's VPC/subnet/AZ detected from nodes.
+type autoDetectedParams struct {
+	VPCID    string
+	SubnetID string
+	AZs      []string
 }
 
 // getELBClient returns the ELB client for the given LoadBalancerConfig.
@@ -114,25 +131,62 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// If the LBC is not controlled (no huawei-elb.io/vpc-id) but IS in use
-	// (referenced by a DatabaseCluster), write an error annotation so the
-	// user knows required annotations are missing. Without this feedback, the
-	// user sees a Service stuck in <pending> with no clue why.
+	// If the LBC is not controlled (no huawei-elb.io/vpc-id in spec.annotations),
+	// try to auto-detect VPC/subnet/AZ from cluster nodes. This gives a zero-config
+	// experience on CCE — users just create a LoadBalancerConfig with a name and
+	// the controller figures out the rest, similar to EKS/GKE.
 	if !isControlled(lbc) {
-		if isInUse(lbc) {
-			anns := lbc.GetAnnotations()
-			errMsg := "LoadBalancerConfig is in use but missing required annotations: " +
-				"huawei-elb.io/vpc-id, huawei-elb.io/subnet-id, huawei-elb.io/availability-zones"
-			if anns[errorAnnotation] != errMsg {
-				_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
-			}
-			if anns[readyAnnotation] != "false" {
-				_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
-			}
-			logger.Info("LoadBalancerConfig in use but missing huawei-elb.io annotations",
-				"name", lbc.GetName())
+		// Skip if using CCM autocreate (user chose the native CCE path).
+		if getSpecAnnotation(lbc, "kubernetes.io/elb.autocreate") != "" {
+			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, nil
+
+		// If ELB ID already exists and we have a finalizer, monitor it
+		// (could be a legacy LBC created by an older controller version).
+		if getSpecAnnotation(lbc, huaweicloud.AnnotationELBID) != "" {
+			if controllerutil.ContainsFinalizer(lbc, finalizerName) {
+				return r.reconcileEnsure(ctx, logger, lbc)
+			}
+			return ctrl.Result{}, nil
+		}
+
+		// Auto-detect VPC/subnet/AZ from cluster nodes.
+		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger)
+		if err != nil {
+			logger.Error(err, "auto-detection failed")
+			if isInUse(lbc) {
+				errMsg := fmt.Sprintf("auto-detection failed: %v", err)
+				anns := lbc.GetAnnotations()
+				if anns[errorAnnotation] != errMsg {
+					_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
+				}
+				if anns[readyAnnotation] != "false" {
+					_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
+				}
+			}
+			return ctrl.Result{RequeueAfter: errorRequeue}, nil
+		}
+
+		// Write detected values into spec.annotations so subsequent reconciles
+		// use the explicit path. Also mark as auto-detected for transparency.
+		logger.Info("Auto-detected VPC/subnet/AZ from cluster nodes",
+			"vpc-id", vpcID, "subnet-id", subnetID, "azs", azs)
+
+		if err := r.updateWithRetry(ctx, req.NamespacedName, func(latest *unstructured.Unstructured) error {
+			anns, _, _ := unstructured.NestedStringMap(latest.Object, "spec", "annotations")
+			if anns == nil {
+				anns = map[string]string{}
+			}
+			anns["huawei-elb.io/vpc-id"] = vpcID
+			anns["huawei-elb.io/subnet-id"] = subnetID
+			anns["huawei-elb.io/availability-zones"] = strings.Join(azs, ",")
+			anns["huawei-elb.io/auto-detected"] = "true"
+			return unstructured.SetNestedStringMap(latest.Object, anns, "spec", "annotations")
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("writing auto-detected params: %w", err)
+		}
+
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	logger.Info("Reconciling LoadBalancerConfig", "name", lbc.GetName())
@@ -309,15 +363,6 @@ func isControlled(lbc *unstructured.Unstructured) bool {
 	return getSpecAnnotation(lbc, "huawei-elb.io/vpc-id") != ""
 }
 
-// hasHuaweiELBParams checks if a LoadBalancerConfig has huawei-elb.io/vpc-id
-// in spec.annotations. Used by the event predicate to filter CRs.
-func hasHuaweiELBParams(obj client.Object) bool {
-	u, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		return false
-	}
-	return getSpecAnnotation(u, "huawei-elb.io/vpc-id") != ""
-}
 
 // isInUse returns true if the CR has status.inUse == true,
 // indicating it is referenced by a DatabaseCluster.
@@ -326,14 +371,88 @@ func isInUse(lbc *unstructured.Unstructured) bool {
 	return found && inUse
 }
 
-// isInUseObj checks if a client.Object is an in-use LoadBalancerConfig.
-// Used by the event predicate to filter CRs.
-func isInUseObj(obj client.Object) bool {
+
+// autoDetectParams detects VPC ID, Neutron subnet ID, and availability zones
+// from the Kubernetes cluster's nodes. It reads node internal IPs and zone
+// labels, then calls the Huawei Cloud VPC API to find the matching VPC/subnet.
+// Results are cached since all nodes in a CCE cluster share the same VPC.
+func (r *LoadBalancerConfigReconciler) autoDetectParams(ctx context.Context, logger logr.Logger) (vpcID, subnetID string, azs []string, err error) {
+	r.detectMu.Lock()
+	defer r.detectMu.Unlock()
+
+	// Return cached result if available.
+	if r.detected != nil {
+		return r.detected.VPCID, r.detected.SubnetID, r.detected.AZs, nil
+	}
+
+	// 1. List all nodes.
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		return "", "", nil, fmt.Errorf("listing nodes: %w", err)
+	}
+
+	// 2. Collect node internal IPs and zone labels.
+	var nodeIPs []string
+	azSet := make(map[string]bool)
+	for _, node := range nodeList.Items {
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
+				nodeIPs = append(nodeIPs, addr.Address)
+			}
+		}
+		if az, ok := node.Labels["topology.kubernetes.io/zone"]; ok {
+			azSet[az] = true
+		}
+	}
+
+	if len(nodeIPs) == 0 {
+		return "", "", nil, fmt.Errorf("no node internal IPs found in cluster")
+	}
+
+	// 3. Deduplicate and sort AZs.
+	for az := range azSet {
+		azs = append(azs, az)
+	}
+	sort.Strings(azs)
+
+	if len(azs) == 0 {
+		return "", "", nil, fmt.Errorf("no availability zones found in node labels (topology.kubernetes.io/zone)")
+	}
+
+	// 4. Detect VPC/subnet from node IPs via Huawei Cloud VPC API.
+	info, err := huaweicloud.DetectVPCSubnet(r.Creds, nodeIPs)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	// 5. Cache the result.
+	r.detected = &autoDetectedParams{
+		VPCID:    info.VPCID,
+		SubnetID: info.SubnetID,
+		AZs:      azs,
+	}
+
+	logger.Info("Auto-detected cluster network params from nodes",
+		"vpc-id", info.VPCID, "subnet-id", info.SubnetID,
+		"azs", azs, "node-count", len(nodeIPs))
+
+	return info.VPCID, info.SubnetID, azs, nil
+}
+
+// shouldReconcile returns true if the LBC should be processed by this controller.
+// It skips LBCs that use CCM's autocreate annotation (kubernetes.io/elb.autocreate),
+// as those are managed by CCE's CCM directly.
+func shouldReconcile(obj client.Object) bool {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return false
 	}
-	return isInUse(u)
+	// Skip LBCs using CCM autocreate.
+	if getSpecAnnotation(u, "kubernetes.io/elb.autocreate") != "" {
+		return false
+	}
+	// Process everything else, including empty LBCs (for auto-detection).
+	return true
 }
 
 // getSpecAnnotations returns all annotations from spec.annotations as a map.
@@ -420,7 +539,11 @@ func (r *LoadBalancerConfigReconciler) setAnnotation(
 
 // parseELBOptions reads ELB creation parameters from spec.annotations.
 //
-// Required annotations (in spec.annotations):
+// If the annotations were auto-detected (huawei-elb.io/auto-detected="true"),
+// they are already present in spec.annotations from the auto-detection phase.
+// Users can also set them manually to override auto-detection.
+//
+// Required annotations (in spec.annotations, auto-detected if missing):
 //   - huawei-elb.io/vpc-id
 //   - huawei-elb.io/subnet-id
 //   - huawei-elb.io/availability-zones (comma-separated)
@@ -478,30 +601,26 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 }
 
 // SetupWithManager registers the controller with the manager.
-// A predicate filters events so only CRs with huawei-elb.io/vpc-id in
-// spec.annotations are processed. Delete events are always processed to
-// ensure finalizer cleanup.
+// The predicate skips LBCs that use CCM autocreate (kubernetes.io/elb.autocreate),
+// as those are managed by CCE's CCM directly. All other LBCs are processed,
+// including empty ones — auto-detection fills in VPC/subnet/AZ from cluster nodes.
 func (r *LoadBalancerConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	lbc := &unstructured.Unstructured{}
 	lbc.SetGroupVersionKind(lbcGVR)
 
 	controlledPredicate := predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			return hasHuaweiELBParams(e.Object) || isInUseObj(e.Object)
+			return shouldReconcile(e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			// Process if either old or new object has huawei-elb.io params,
-			// or if the inUse status changed (to catch LBCs referenced by
-			// DatabaseClusters but missing huawei-elb.io annotations).
-			return hasHuaweiELBParams(e.ObjectOld) || hasHuaweiELBParams(e.ObjectNew) ||
-				isInUseObj(e.ObjectOld) || isInUseObj(e.ObjectNew)
+			return shouldReconcile(e.ObjectOld) || shouldReconcile(e.ObjectNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			// Always process deletes to clean up finalizers.
 			return true
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
-			return hasHuaweiELBParams(e.Object) || isInUseObj(e.Object)
+			return shouldReconcile(e.Object)
 		},
 	}
 

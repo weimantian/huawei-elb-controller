@@ -378,6 +378,8 @@ spec:
     huawei-elb.io/public-ip-network-type: "5_bgp"
 EOF
 
+> **Zero-config on CCE**: These annotations are **optional** on CCE — if you leave `spec.annotations` empty, the controller auto-detects VPC/subnet/AZ from cluster nodes. See [Option C](#option-c-zero-config-cce-auto-detection) below.
+
 #### Required Annotations
 
 | Annotation | Description | Example |
@@ -405,6 +407,35 @@ Instead of using `kubectl`, you can create a LoadBalancerConfig from the OpenEve
 6. Click **Save**.
 
 The controller will automatically detect the new CR and create the ELB within a few seconds. You can verify with `kubectl get loadbalancerconfig`.
+
+#### Option C: Zero-config (CCE Auto-Detection)
+
+On Huawei Cloud CCE, you can create a LoadBalancerConfig with **no annotations at all** — the controller automatically detects VPC, subnet, and availability zones from the cluster's nodes:
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-elb
+spec:
+  annotations: {}
+EOF
+```
+
+The controller will:
+
+1. List all nodes and collect their internal IPs and zone labels (`topology.kubernetes.io/zone`)
+2. Call the Huawei Cloud VPC API to find the VPC and subnet containing the node IPs
+3. Write the detected values back into `spec.annotations` (marked with `huawei-elb.io/auto-detected: "true"`)
+4. Create the ELB using the detected parameters
+
+This gives a zero-config experience similar to EKS/GKE — just create the config and the controller figures out the rest.
+
+> **Note**: Auto-detection works on CCE clusters where all nodes are in the same VPC. If nodes span multiple VPCs, the controller reports an error asking you to specify `huawei-elb.io/vpc-id` manually.
+>
+> **Override**: You can still set any annotation manually to override auto-detected values. For example, to create a public ELB, just add `huawei-elb.io/public: "true"`.
+
 
 ### Step 6: Wait for ELB to be Ready
 
@@ -509,12 +540,15 @@ The `EXTERNAL-IP` is the ELB's VIP address — this is what clients connect to.
 
 ### LoadBalancerConfig Annotations
 
-#### Required Annotations
+#### Network Annotations (auto-detected on CCE)
+
+> On CCE, these are **optional** — the controller auto-detects them from cluster nodes if missing. You can set them manually to override.
 
 | Annotation | Description | Example |
 |---|---|---|
-| `huawei-elb.io/vpc-id` | VPC ID where the ELB will be created | `0d60646b-...` |
-| `huawei-elb.io/subnet-id` | Neutron subnet ID (NOT the VPC subnet Resource ID) | `c265b187-...` |
+| `huawei-elb.io/vpc-id` | VPC ID where the ELB will be created. Auto-detected from node IPs. | `0d60646b-...` |
+| `huawei-elb.io/subnet-id` | Neutron subnet ID (NOT the VPC subnet Resource ID). Auto-detected from node IPs. | `c265b187-...` |
+| `huawei-elb.io/availability-zones` | Comma-separated availability zone list. Auto-detected from node labels. | `cn-north-4a,cn-north-4b` |
 | `huawei-elb.io/availability-zones` | Comma-separated availability zone list | `cn-north-4a,cn-north-4b` |
 
 #### Optional Annotations
@@ -633,6 +667,43 @@ If you have multiple Kubernetes (CCE) clusters, **each cluster needs its own dep
 **ELB isolation:** ELBs are not shared across clusters. Each `LoadBalancerConfig` creates its own ELB. Two clusters in the same VPC will have separate ELBs with separate VIPs.
 
 ---
+
+
+---
+
+## Comparison with EKS/GKE
+
+On Amazon EKS and Google GKE, creating a `type: LoadBalancer` Service automatically provisions a cloud load balancer — no controller deployment, no manual VPC/subnet configuration. The cloud's CCM reads VPC/subnet info directly from node metadata.
+
+Huawei Cloud CCE's CCM also supports auto-creation via the `kubernetes.io/elb.autocreate` annotation, but it requires a verbose JSON spec with VPC/subnet/AZ parameters — the user must look up and fill in these values manually.
+
+This controller bridges that gap by adding the auto-detection layer that Huawei Cloud's CCM lacks:
+
+| Feature | EKS / GKE | CCE + autocreate | CCE + this controller |
+|---|---|---|---|
+| Extra controller deployment | Not needed | Not needed | Needed |
+| User fills VPC/subnet/AZ | No | Yes (JSON) | **No (auto-detected)** |
+| Configuration complexity | Zero | High (verbose JSON) | **Zero** |
+| ELB lifecycle management | CCM | CCM | Controller + finalizer |
+| Status visibility | Service events | Service events | LBC annotations (`ready`, `elb-status`, `error`) |
+| Deletion safety | CCM handles | CCM handles | Finalizer ensures ELB deleted before CR |
+| Fine-grained ELB control | Limited | Limited | Full (tags, naming, params) |
+| Error feedback | Service events | Service events | `huawei-elb.io/error` annotation on LBC |
+
+**Architecture difference**:
+
+```
+EKS/GKE:    Service → CCM creates LB (reads VPC from node metadata)
+
+CCE + this controller:
+            LBC → controller detects VPC/subnet/AZ from nodes
+                → controller creates ELB via API
+                → writes elb.id back to LBC
+                → Everest copies elb.id to Service
+                → CCM binds ELB to Service
+```
+
+The user experience is the same: create config → get load balancer → connect. The internal flow has an extra hop (controller creates ELB separately, then CCM binds it), but this gives better control, status reporting, and deletion safety.
 
 ## Development
 

@@ -378,6 +378,8 @@ spec:
 EOF
 ```
 
+> **CCE 零配置**：在 CCE 上这些注解是**可选的** —— 如果 `spec.annotations` 留空，控制器会从集群节点自动探测 VPC/子网/可用区。详见下方[方式 C](#方式-c零配置cce-自动探测)。
+
 #### 必需注解说明
 
 | 注解 | 含义 | 示例值 |
@@ -405,6 +407,35 @@ EOF
 6. 点击 **Save** 保存。
 
 控制器会在几秒内自动检测到新的 CR 并创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
+
+#### 方式 C：零配置（CCE 自动探测）
+
+在华为云 CCE 上，你可以创建一个**不带任何注解**的 LoadBalancerConfig —— 控制器会自动从集群节点探测 VPC、子网和可用区：
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-elb
+spec:
+  annotations: {}
+EOF
+```
+
+控制器会：
+
+1. 列出所有节点，收集内网 IP 和可用区标签（`topology.kubernetes.io/zone`）
+2. 调用华为云 VPC API，根据节点 IP 匹配所在的 VPC 和子网
+3. 将探测到的值写回 `spec.annotations`（标记 `huawei-elb.io/auto-detected: "true"`）
+4. 使用探测到的参数创建 ELB
+
+这提供了与 EKS/GKE 类似的零配置体验 —— 只需创建配置，控制器自动完成其余工作。
+
+> **注意**：自动探测适用于所有节点在同一 VPC 的 CCE 集群。如果节点跨多个 VPC，控制器会报错并要求手动指定 `huawei-elb.io/vpc-id`。
+>
+> **覆盖**：你仍可以手动设置任何注解来覆盖自动探测的值。例如，要创建公网 ELB，只需添加 `huawei-elb.io/public: "true"`。
+
 
 ### 步骤 6：等待 ELB 就绪
 
@@ -509,13 +540,15 @@ my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/T
 
 ### LoadBalancerConfig Annotation
 
-#### 必需 Annotation
+#### 网络 Annotation（CCE 上自动探测）
+
+> 在 CCE 上这些是**可选的** —— 控制器在缺失时会从集群节点自动探测。你也可以手动设置以覆盖。
 
 | Annotation | 说明 | 示例 |
 |---|---|---|
-| `huawei-elb.io/vpc-id` | 创建 ELB 所在的 VPC ID | `0d60646b-...` |
-| `huawei-elb.io/subnet-id` | Neutron 子网 ID（不是 VPC 子网资源 ID） | `c265b187-...` |
-| `huawei-elb.io/availability-zones` | 可用区列表（逗号分隔） | `cn-north-4a,cn-north-4b` |
+| `huawei-elb.io/vpc-id` | 创建 ELB 所在的 VPC ID。从节点 IP 自动探测。 | `0d60646b-...` |
+| `huawei-elb.io/subnet-id` | Neutron 子网 ID（不是 VPC 子网资源 ID）。从节点 IP 自动探测。 | `c265b187-...` |
+| `huawei-elb.io/availability-zones` | 可用区列表（逗号分隔）。从节点标签自动探测。 | `cn-north-4a,cn-north-4b` |
 
 #### 可选 Annotation
 
@@ -633,6 +666,43 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 **ELB 隔离：** ELB 不会跨集群共享。每个 `LoadBalancerConfig` 创建独立的 ELB。同一 VPC 内的两个集群会有各自独立的 ELB 和 VIP。
 
 ---
+
+
+---
+
+## 与 EKS/GKE 对比
+
+在 Amazon EKS 和 Google GKE 上，创建 `type: LoadBalancer` 的 Service 会自动创建云负载均衡器 —— 不需要部署额外控制器，不需要手动配置 VPC/子网。云平台的 CCM 直接从节点元数据读取 VPC/子网信息。
+
+华为云 CCE 的 CCM 也支持通过 `kubernetes.io/elb.autocreate` 注解自动创建 ELB，但需要填写一坨 JSON，包含 VPC/子网/可用区等参数 —— 用户必须自己查询并填写这些值。
+
+本控制器补上了华为云 CCM 缺失的自动探测层：
+
+| 特性 | EKS / GKE | CCE + autocreate | CCE + 本控制器 |
+|---|---|---|---|
+| 额外部署控制器 | 不需要 | 不需要 | 需要 |
+| 用户填 VPC/子网/可用区 | 不用 | 要填 JSON | **不用（自动探测）** |
+| 配置复杂度 | 零 | 高（JSON 冗长） | **零** |
+| ELB 生命周期管理 | CCM | CCM | 控制器 + finalizer |
+| 状态可见性 | Service 事件 | Service 事件 | LBC 注解（`ready`、`elb-status`、`error`） |
+| 删除安全性 | CCM 处理 | CCM 处理 | finalizer 确保 ELB 先于 CR 删除 |
+| ELB 精细控制 | 有限 | 有限 | 完整（标签、命名、参数） |
+| 错误反馈 | Service 事件 | Service 事件 | LBC 上的 `huawei-elb.io/error` 注解 |
+
+**架构差异**：
+
+```
+EKS/GKE:    Service → CCM 创建 LB（从节点元数据读 VPC）
+
+CCE + 本控制器：
+            LBC → 控制器从节点探测 VPC/子网/可用区
+                → 控制器调 API 创建 ELB
+                → 将 elb.id 写回 LBC
+                → Everest 复制 elb.id 到 Service
+                → CCM 绑定 ELB 到 Service
+```
+
+用户体验是一样的：创建配置 → 获得负载均衡器 → 连接。内部流程多了一跳（控制器单独创建 ELB，再由 CCM 绑定），但换来了更好的可控性、状态报告和删除安全性。
 
 ## 开发
 
