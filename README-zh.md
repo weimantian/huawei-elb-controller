@@ -378,7 +378,33 @@ spec:
 EOF
 ```
 
-> **提示**：你也可以通过 OpenEverest UI 创建 LoadBalancerConfig：进入 **Settings → Policies & Configurations → Load Balancer Configuration → Create configuration**，然后以键值对形式添加 `huawei-elb.io/*` 注解。控制器会自动检测新的 CR 并创建 ELB。
+#### 必需注解说明
+
+| 注解 | 含义 | 示例值 |
+|---|---|---|
+| `huawei-elb.io/vpc-id` | ELB 创建在哪个 VPC 里。必须与你的 K8s 节点在同一个 VPC。 | `0d60646b-e3b7-4ad9-b422-015ee7da9a48` |
+| `huawei-elb.io/subnet-id` | ELB 的 VIP 分配所在的 Neutron 子网 ID。**不是**控制台显示的 Resource ID —— 请使用 `list-vpcs` 工具（见步骤 3）查询。 | `c265b187-a0a8-45cf-9cb3-7c3b757f8ff8` |
+| `huawei-elb.io/availability-zones` | ELB 部署的可用区列表，逗号分隔。至少填写一个。 | `cn-north-4a,cn-north-4b` |
+| `huawei-elb.io/public` | 是否创建公网 ELB。`false` = 内网 ELB（仅 VPC 内访问）；`true` = 公网 ELB（带弹性公网 IP，可从互联网访问）。 | `false` |
+
+> **简单理解**：`vpc-id` 和 `subnet-id` 决定 ELB 放在哪个网络；`availability-zones` 决定放在哪些机房；`public` 决定内网还是公网。
+
+#### 方式 B：通过 OpenEverest UI 创建
+
+你也可以通过 OpenEverest Web UI 创建 LoadBalancerConfig，无需使用 `kubectl`：
+
+1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
+2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
+3. 点击 **Create configuration**。
+4. 填写配置 **名称**（例如 `huawei-internal-elb`）。
+5. 在 **Annotations** 区域，逐条添加注解键值对：
+   - Key: `huawei-elb.io/vpc-id`，Value: 你的 VPC ID
+   - Key: `huawei-elb.io/subnet-id`，Value: 你的 Neutron 子网 ID
+   - Key: `huawei-elb.io/availability-zones`，Value: `cn-north-4a,cn-north-4b`
+   - Key: `huawei-elb.io/public`，Value: `false`（内网）或 `true`（公网）
+6. 点击 **Save** 保存。
+
+控制器会在几秒内自动检测到新的 CR 并创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
 
 ### 步骤 6：等待 ELB 就绪
 

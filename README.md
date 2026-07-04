@@ -377,9 +377,34 @@ spec:
     huawei-elb.io/bandwidth-charge-mode: "traffic"
     huawei-elb.io/public-ip-network-type: "5_bgp"
 EOF
-```
 
-> **Tip**: You can also create LoadBalancerConfigs from the OpenEverest UI: navigate to **Settings → Policies & Configurations → Load Balancer Configuration → Create configuration**, then add the `huawei-elb.io/*` annotations as key-value pairs. The controller will detect the new CR and create the ELB automatically.
+#### Required Annotations
+
+| Annotation | Description | Example |
+|---|---|---|
+| `huawei-elb.io/vpc-id` | The VPC where the ELB will be created. Must match the VPC of your Kubernetes nodes. | `0d60646b-e3b7-4ad9-b422-015ee7da9a48` |
+| `huawei-elb.io/subnet-id` | The Neutron subnet ID for the ELB's VIP allocation. **Not** the console-displayed Resource ID — use the `list-vpcs` tool (see Step 3) to look it up. | `c265b187-a0a8-45cf-9cb3-7c3b757f8ff8` |
+| `huawei-elb.io/availability-zones` | Comma-separated list of availability zones where the ELB will be deployed. At least one zone is required. | `cn-north-4a,cn-north-4b` |
+| `huawei-elb.io/public` | Whether to create a public-facing ELB. `false` = internal ELB (VPC-internal access only); `true` = public ELB with a floating IP (internet-accessible). | `false` |
+
+> **In short**: `vpc-id` and `subnet-id` determine which network the ELB is placed in; `availability-zones` determines which data centers; `public` determines internal vs. public access.
+
+#### Option B: Create via OpenEverest UI
+
+Instead of using `kubectl`, you can create a LoadBalancerConfig from the OpenEverest web UI:
+
+1. Open the OpenEverest UI in your browser (e.g., `http://localhost:8080` if port-forwarded).
+2. Navigate to **Settings → Policies & Configurations → Load Balancer Configuration**.
+3. Click **Create configuration**.
+4. Fill in a **Name** for the configuration (e.g., `huawei-internal-elb`).
+5. In the **Annotations** section, add each annotation as a key-value pair:
+   - Key: `huawei-elb.io/vpc-id`, Value: your VPC ID
+   - Key: `huawei-elb.io/subnet-id`, Value: your Neutron subnet ID
+   - Key: `huawei-elb.io/availability-zones`, Value: `cn-north-4a,cn-north-4b`
+   - Key: `huawei-elb.io/public`, Value: `false` (or `true` for public ELB)
+6. Click **Save**.
+
+The controller will automatically detect the new CR and create the ELB within a few seconds. You can verify with `kubectl get loadbalancerconfig`.
 
 ### Step 6: Wait for ELB to be Ready
 
