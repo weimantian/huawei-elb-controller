@@ -280,7 +280,22 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 
 在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。你只需指定创建内网还是公网 ELB。
 
-#### 方式 A（推荐）：零配置 via kubectl
+#### 方式 A（推荐）：零配置 via OpenEverest UI
+
+通过 OpenEverest Web UI 创建 LoadBalancerConfig —— 无需 `kubectl`：
+
+1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
+2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
+3. 点击 **Create configuration**。
+4. 填写配置**名称**（例如 `huawei-internal-elb`）。
+5. 如果是**公网 ELB**，添加一个注解：
+   - Key: `huawei-elb.io/public`，Value: `true`
+   - 如果是**内网 ELB**，跳过此步 —— 注解留空即可。
+  6. 点击 **Save** 保存。
+
+控制器会自动检测到新的 CR，从节点自动探测 VPC/子网/可用区，并在几秒内创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
+
+#### 方式 B：零配置 via kubectl
 
 **内网 ELB**（默认，仅 VPC 内访问）：
 
@@ -313,7 +328,7 @@ EOF
 
 1. 列出所有节点，收集内网 IP 和可用区标签（`topology.kubernetes.io/zone`）
 2. 调用华为云 VPC API，根据节点 IP 匹配所在的 VPC 和子网
-3. 将探测到的值写回 `spec.annotations`（标记 `huawei-elb.io/auto-detected: "true"`）
+3. 将探测到的值写入 `metadata.annotations`（标记 `huawei-elb.io/auto-detected: "true"`）
 4. 使用探测到的参数创建 ELB
 
 这提供了与 EKS/GKE 类似的零配置体验 —— 只需创建配置，控制器自动完成其余工作。
@@ -339,21 +354,6 @@ EOF
 | `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型 |
 
-#### 方式 B（推荐）：零配置 via OpenEverest UI
-
-通过 OpenEverest Web UI 创建 LoadBalancerConfig —— 无需 `kubectl`：
-
-1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
-2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
-3. 点击 **Create configuration**。
-4. 填写配置**名称**（例如 `huawei-internal-elb`）。
-5. 如果是**公网 ELB**，添加一个注解：
-   - Key: `huawei-elb.io/public`，Value: `true`
-   - 如果是**内网 ELB**，跳过此步 —— 注解留空即可。
-6. 点击 **Save** 保存。
-
-控制器会自动检测到新的 CR，从节点自动探测 VPC/子网/可用区，并在几秒内创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
-
 ### 步骤 5：等待 ELB 就绪
 
 ```bash
@@ -375,7 +375,27 @@ kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotatio
 
 ### 步骤 6：创建数据库集群
 
-创建一个使用该 LoadBalancerConfig 的 PostgreSQL 数据库集群：
+创建一个使用步骤 4 中创建的 LoadBalancerConfig 的数据库集群。
+
+#### 方式 A（推荐）：via OpenEverest UI
+
+1. 在 OpenEverest UI 中进入 **Databases**。
+2. 点击 **Create database**。
+3. **Step 1 — Basic Information**：选择引擎（例如 PostgreSQL），填写名称（例如 `my-pg`），选择版本。
+4. **Step 2 — Resources**：设置 CPU、内存、磁盘大小和节点数。
+5. **Step 3 — Backups**：配置备份存储（或跳过）。
+6. **Step 4 — Advanced Configurations**：
+   - 设置 **Storage class**（例如 `csi-disk`）。
+   - 启用 **External access**（LoadBalancer）。
+   - 选择步骤 4 中创建的 **Load Balancer config**（例如 `huawei-internal-elb`）。
+7. **Step 5 — Monitoring**：配置监控（或跳过）。
+8. 点击 **Create database**。
+
+> **注意**：如果 LoadBalancer config 下拉菜单显示 “- No configuration -”，可能是 ELB 尚未就绪。请返回步骤 5 等待 `ready=true`。
+
+#### 方式 B：via kubectl
+
+创建一个 PostgreSQL 数据库集群：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -559,20 +579,18 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 
 在 Amazon EKS 和 Google GKE 上，创建 `type: LoadBalancer` 的 Service 会自动创建云负载均衡器 —— 不需要部署额外控制器，不需要手动配置 VPC/子网。云平台的 CCM 直接从节点元数据读取 VPC/子网信息。
 
-华为云 CCE 的 CCM 也支持通过 `kubernetes.io/elb.autocreate` 注解自动创建 ELB，但需要填写一坨 JSON，包含 VPC/子网/可用区等参数 —— 用户必须自己查询并填写这些值。
+华为云 CCE 的 CCM 缺少这种自动探测能力 —— 用户必须手动查询并填写 VPC/子网/可用区参数。本控制器补上了这一层：
 
-本控制器补上了华为云 CCM 缺失的自动探测层：
-
-| 特性 | EKS / GKE | CCE + autocreate | CCE + 本控制器 |
-|---|---|---|---|
-| 额外部署控制器 | 不需要 | 不需要 | 需要 |
-| 用户填 VPC/子网/可用区 | 不用 | 要填 JSON | **不用（自动探测）** |
-| 配置复杂度 | 零 | 高（JSON 冗长） | **零** |
-| ELB 生命周期管理 | CCM | CCM | 控制器 + finalizer |
-| 状态可见性 | Service 事件 | Service 事件 | LBC 注解（`ready`、`elb-status`、`error`） |
-| 删除安全性 | CCM 处理 | CCM 处理 | finalizer 确保 ELB 先于 CR 删除 |
-| ELB 精细控制 | 有限 | 有限 | 完整（标签、命名、参数） |
-| 错误反馈 | Service 事件 | Service 事件 | LBC 上的 `huawei-elb.io/error` 注解 |
+| 特性 | EKS / GKE | CCE + 本控制器 |
+|---|---|---|
+| 额外部署控制器 | 不需要 | 需要 |
+| 用户填 VPC/子网/可用区 | 不用 | **不用（自动探测）** |
+| 配置复杂度 | 零 | **零** |
+| ELB 生命周期管理 | CCM | 控制器 + finalizer |
+| 状态可见性 | Service 事件 | LBC 注解（`ready`、`elb-status`、`error`） |
+| 删除安全性 | CCM 处理 | finalizer 确保 ELB 先于 CR 删除 |
+| ELB 精细控制 | 有限 | 完整（标签、命名、参数） |
+| 错误反馈 | Service 事件 | LBC 上的 `huawei-elb.io/error` 注解 |
 
 **架构差异**：
 

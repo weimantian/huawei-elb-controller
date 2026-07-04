@@ -281,7 +281,22 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 
 On CCE, the controller auto-detects VPC, subnet, and availability zones from cluster nodes — no manual configuration needed. You only need to specify whether you want an internal or public ELB.
 
-#### Option A (Recommended): Zero-config via kubectl
+#### Option A (Recommended): Zero-config via OpenEverest UI
+
+Create a LoadBalancerConfig from the OpenEverest web UI — no `kubectl` needed:
+
+1. Open the OpenEverest UI in your browser (e.g., `http://localhost:8080` if port-forwarded).
+2. Navigate to **Settings → Policies & Configurations → Load Balancer Configuration**.
+3. Click **Create configuration**.
+4. Fill in a **Name** (e.g., `huawei-internal-elb`).
+5. For a **public ELB**, add one annotation:
+   - Key: `huawei-elb.io/public`, Value: `true`
+   - For an **internal ELB**, skip this step — leave annotations empty.
+  6. Click **Save**.
+
+The controller will automatically detect the new CR, auto-detect VPC/subnet/AZ from nodes, and create the ELB within a few seconds. Verify with `kubectl get loadbalancerconfig`.
+
+#### Option B: Zero-config via kubectl
 
 **Internal ELB** (default, VPC-internal access only):
 
@@ -314,7 +329,7 @@ The controller will:
 
 1. List all nodes and collect their internal IPs and zone labels (`topology.kubernetes.io/zone`)
 2. Call the Huawei Cloud VPC API to find the VPC and subnet containing the node IPs
-3. Write the detected values back into `spec.annotations` (marked with `huawei-elb.io/auto-detected: "true"`)
+3. Write the detected values into `metadata.annotations` (marked with `huawei-elb.io/auto-detected: "true"`)
 4. Create the ELB using the detected parameters
 
 This gives a zero-config experience similar to EKS/GKE — just create the config and the controller figures out the rest.
@@ -340,21 +355,6 @@ Optional public ELB parameters (only effective when `public: "true"`):
 | `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic` (pay-per-traffic) or `bandwidth` (pay-per-bandwidth) |
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP network type |
 
-#### Option B (Recommended): Zero-config via OpenEverest UI
-
-Create a LoadBalancerConfig from the OpenEverest web UI — no `kubectl` needed:
-
-1. Open the OpenEverest UI in your browser (e.g., `http://localhost:8080` if port-forwarded).
-2. Navigate to **Settings → Policies & Configurations → Load Balancer Configuration**.
-3. Click **Create configuration**.
-4. Fill in a **Name** (e.g., `huawei-internal-elb`).
-5. For a **public ELB**, add one annotation:
-   - Key: `huawei-elb.io/public`, Value: `true`
-   - For an **internal ELB**, skip this step — leave annotations empty.
-6. Click **Save**.
-
-The controller will automatically detect the new CR, auto-detect VPC/subnet/AZ from nodes, and create the ELB within a few seconds. Verify with `kubectl get loadbalancerconfig`.
-
 ### Step 5: Wait for ELB to be Ready
 
 ```bash
@@ -376,7 +376,27 @@ kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotatio
 
 ### Step 6: Create a DatabaseCluster
 
-Create a PostgreSQL database cluster that uses the LoadBalancerConfig:
+Create a database cluster that uses the LoadBalancerConfig created in Step 4.
+
+#### Option A (Recommended): Via OpenEverest UI
+
+1. Navigate to **Databases** in the OpenEverest UI.
+2. Click **Create database**.
+3. **Step 1 — Basic Information**: Select engine (e.g., PostgreSQL), fill in a name (e.g., `my-pg`), choose a version.
+4. **Step 2 — Resources**: Set CPU, memory, disk size, and number of nodes.
+5. **Step 3 — Backups**: Configure backup storage (or skip).
+6. **Step 4 — Advanced Configurations**:
+   - Set **Storage class** (e.g., `csi-disk`).
+   - Enable **External access** (LoadBalancer).
+   - Select the **Load Balancer config** created in Step 4 (e.g., `huawei-internal-elb`).
+7. **Step 5 — Monitoring**: Configure monitoring (or skip).
+8. Click **Create database**.
+
+> **Note**: If the LoadBalancer config dropdown shows "- No configuration -", the ELB may not be ready yet. Go back to Step 5 and wait for `ready=true`.
+
+#### Option B: Via kubectl
+
+Create a PostgreSQL database cluster:
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -560,20 +580,18 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 
 On Amazon EKS and Google GKE, creating a `type: LoadBalancer` Service automatically provisions a cloud load balancer — no controller deployment, no manual VPC/subnet configuration. The cloud's CCM reads VPC/subnet info directly from node metadata.
 
-Huawei Cloud CCE's CCM also supports auto-creation via the `kubernetes.io/elb.autocreate` annotation, but it requires a verbose JSON spec with VPC/subnet/AZ parameters — the user must look up and fill in these values manually.
+Huawei Cloud CCE's CCM lacks this auto-detection capability — users must manually look up and fill in VPC/subnet/AZ parameters. This controller bridges that gap by adding the auto-detection layer:
 
-This controller bridges that gap by adding the auto-detection layer that Huawei Cloud's CCM lacks:
-
-| Feature | EKS / GKE | CCE + autocreate | CCE + this controller |
-|---|---|---|---|
-| Extra controller deployment | Not needed | Not needed | Needed |
-| User fills VPC/subnet/AZ | No | Yes (JSON) | **No (auto-detected)** |
-| Configuration complexity | Zero | High (verbose JSON) | **Zero** |
-| ELB lifecycle management | CCM | CCM | Controller + finalizer |
-| Status visibility | Service events | Service events | LBC annotations (`ready`, `elb-status`, `error`) |
-| Deletion safety | CCM handles | CCM handles | Finalizer ensures ELB deleted before CR |
-| Fine-grained ELB control | Limited | Limited | Full (tags, naming, params) |
-| Error feedback | Service events | Service events | `huawei-elb.io/error` annotation on LBC |
+| Feature | EKS / GKE | CCE + this controller |
+|---|---|---|
+| Extra controller deployment | Not needed | Needed |
+| User fills VPC/subnet/AZ | No | **No (auto-detected)** |
+| Configuration complexity | Zero | **Zero** |
+| ELB lifecycle management | CCM | Controller + finalizer |
+| Status visibility | Service events | LBC annotations (`ready`, `elb-status`, `error`) |
+| Deletion safety | CCM handles | Finalizer ensures ELB deleted before CR |
+| Fine-grained ELB control | Limited | Full (tags, naming, params) |
+| Error feedback | Service events | `huawei-elb.io/error` annotation on LBC |
 
 **Architecture difference**:
 
