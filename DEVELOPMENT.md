@@ -173,14 +173,14 @@ huawei-elb-controller/
 
 1. **`unstructured.Unstructured` for CR access** — The controller interacts with `LoadBalancerConfig` CRs via `unstructured.Unstructured` rather than generated typed clients. This avoids importing OpenEverest Go types and keeps the controller decoupled from OpenEverest's API evolution.
 
-2. **Annotations as configuration channel** — ELB creation parameters are passed via `metadata.annotations` (`huawei-elb.io/*`), and the ELB ID is written back to `spec.annotations["kubernetes.io/elb.id"]`. This design means:
+2. **Annotations as configuration channel** — ELB creation parameters are passed via `spec.annotations` (`huawei-elb.io/*`), and the ELB ID is also written back to `spec.annotations["kubernetes.io/elb.id"]`. This design means:
    - OpenEverest operator reads `spec.annotations` and copies them to the Service (existing OpenEverest behavior)
    - CCM reads `kubernetes.io/elb.id` from the Service and binds the ELB (existing CCM behavior)
    - The controller doesn't need to create or manage Services directly
 
 3. **Finalizer-based cleanup** — A finalizer (`huawei-elb.io/finalizer`) ensures the Huawei Cloud ELB is deleted before the CR is removed from the cluster, preventing orphaned cloud resources.
 
-4. **Label-based filtering** — Only CRs with `huawei-elb.io/controlled: "true"` label are processed. Other `LoadBalancerConfig` CRs are invisible to this controller, allowing coexistence with other ELB management solutions.
+4. **`spec.annotations`-based filtering** — Only CRs with `huawei-elb.io/vpc-id` in `spec.annotations` are processed. Other `LoadBalancerConfig` CRs are invisible to this controller, allowing coexistence with other ELB management solutions. This also enables users to create LoadBalancerConfig via the OpenEverest UI, which exposes `spec.annotations` as editable fields.
 
 
 ---
@@ -197,17 +197,17 @@ kind: LoadBalancerConfig
 metadata:
   name: <config-name>
   annotations:
-    # Controller reads these (huawei-elb.io/*):
+    # Controller writes status here (metadata.annotations):
+    huawei-elb.io/ready: "true"
+    huawei-elb.io/elb-status: "ACTIVE"
+    huawei-elb.io/error: ""
+    spec:
+  annotations:
+    # User sets these (huawei-elb.io/*):
     huawei-elb.io/vpc-id: "..."
     huawei-elb.io/subnet-id: "..."
     huawei-elb.io/availability-zones: "..."
     huawei-elb.io/public: "false"
-    # Controller writes these:
-    huawei-elb.io/ready: "true"
-    huawei-elb.io/elb-status: "ACTIVE"
-    huawei-elb.io/error: ""
-spec:
-  annotations:
     # Controller writes ELB ID here:
     kubernetes.io/elb.id: "<elb-uuid>"
 ```
@@ -347,7 +347,7 @@ The controller's reconcile loop follows this logic:
 
 **Step-by-step:**
 
-1. User creates a `LoadBalancerConfig` CR with label `huawei-elb.io/controlled=true` and ELB parameters in annotations
+1. User creates a `LoadBalancerConfig` CR with ELB parameters in `spec.annotations` (`huawei-elb.io/*`)
 2. `huawei-elb-controller` detects the CR, calls Huawei Cloud ELB v3 API to create an ELB
 3. Controller writes the ELB ID back to `spec.annotations["kubernetes.io/elb.id"]` and sets `ready=true`
 4. User creates a `DatabaseCluster` CR referencing the `LoadBalancerConfig`

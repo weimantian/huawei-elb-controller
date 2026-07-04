@@ -1,17 +1,17 @@
 // Package controller implements the LoadBalancerConfig reconciler that manages
-// Huawei Cloud ELBs for OpenEverest V1.
+// Huawei Cloud ELBs for OpenEverest.
 //
 // This controller watches LoadBalancerConfig CRs (everest.percona.com/v1alpha1)
-// that carry the label `huawei-elb.io/controlled=true`. For each such CR, it:
+// that carry huawei-elb.io/* parameters in spec.annotations. For each such CR, it:
 //
-//  1. Reads ELB creation parameters from metadata.annotations (huawei-elb.io/*).
+//  1. Reads ELB creation parameters from spec.annotations (huawei-elb.io/*).
 //  2. Creates a Huawei Cloud ELB via the ELB v3 API.
 //  3. Writes the ELB ID back into spec.annotations["kubernetes.io/elb.id"] so
-//     that the OpenEverest V1 operator — which reads spec.annotations and puts
+//     that the OpenEverest operator — which reads spec.annotations and puts
 //     them onto the K8s LoadBalancer Service — causes CCE CCM to bind the
 //     pre-created ELB.
 //  4. Sets metadata.annotations["huawei-elb.io/ready"]="true" once the ELB is
-//     ACTIVE, allowing users/V1 to wait before creating DatabaseCluster CRs.
+//     ACTIVE, allowing users to wait before creating DatabaseCluster CRs.
 //  5. On deletion, removes the ELB via the API before releasing the CR.
 package controller
 
@@ -42,9 +42,6 @@ import (
 const (
 	// finalizerName ensures the ELB is deleted before the LoadBalancerConfig CR.
 	finalizerName = "huawei-elb.io/finalizer"
-
-	// controlledLabel marks a LoadBalancerConfig as managed by this controller.
-	controlledLabel = "huawei-elb.io/controlled"
 
 	// readyAnnotation is set to "true" once the ELB is ACTIVE, "false" otherwise.
 	// Users can wait on this before creating DatabaseCluster CRs:
@@ -84,7 +81,7 @@ type LoadBalancerConfigReconciler struct {
 // annotation, a new client is created for that region (using the same
 // AK/SK/ProjectID from the default credentials).
 func (r *LoadBalancerConfigReconciler) getELBClient(lbc *unstructured.Unstructured) (*elb.ElbClient, error) {
-	region := lbc.GetAnnotations()["huawei-elb.io/region"]
+	region := getSpecAnnotation(lbc, "huawei-elb.io/region")
 	if region == "" || region == r.Creds.Region {
 		return r.ELBClient, nil
 	}
@@ -117,7 +114,8 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Skip CRs not marked as controlled by us (non-deletion path only).
+	// Skip CRs without huawei-elb.io parameters in spec.annotations
+	// (non-deletion path only). Deletion is handled above via finalizer.
 	if !isControlled(lbc) {
 		return ctrl.Result{}, nil
 	}
@@ -224,8 +222,6 @@ func (r *LoadBalancerConfigReconciler) reconcileDelete(
 
 	// Mark as not ready during deletion.
 	_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
-	// Mark as not ready during deletion.
-	_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
 
 	elbID := getSpecAnnotation(lbc, huaweicloud.AnnotationELBID)
 	if elbID != "" {
@@ -292,9 +288,29 @@ func (r *LoadBalancerConfigReconciler) getLoadBalancerConfig(
 	return lbc, nil
 }
 
-// isControlled returns true if the CR has the controlled label set to "true".
+// isControlled returns true if the CR has huawei-elb.io/vpc-id in spec.annotations,
+// indicating it should be managed by this controller.
 func isControlled(lbc *unstructured.Unstructured) bool {
-	return lbc.GetLabels()[controlledLabel] == "true"
+	return getSpecAnnotation(lbc, "huawei-elb.io/vpc-id") != ""
+}
+
+// hasHuaweiELBParams checks if a LoadBalancerConfig has huawei-elb.io/vpc-id
+// in spec.annotations. Used by the event predicate to filter CRs.
+func hasHuaweiELBParams(obj client.Object) bool {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return false
+	}
+	return getSpecAnnotation(u, "huawei-elb.io/vpc-id") != ""
+}
+
+// getSpecAnnotations returns all annotations from spec.annotations as a map.
+func getSpecAnnotations(lbc *unstructured.Unstructured) map[string]string {
+	anns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
+	if !found {
+		return map[string]string{}
+	}
+	return anns
 }
 
 // getSpecAnnotation reads a single key from spec.annotations.
@@ -370,20 +386,25 @@ func (r *LoadBalancerConfigReconciler) setAnnotation(
 	})
 }
 
-// parseELBOptions reads ELB creation parameters from metadata.annotations.
+// parseELBOptions reads ELB creation parameters from spec.annotations.
 //
-// Required annotations:
+// Required annotations (in spec.annotations):
 //   - huawei-elb.io/vpc-id
 //   - huawei-elb.io/subnet-id
 //   - huawei-elb.io/availability-zones (comma-separated)
 //
-// Optional annotations (for public ELB):
+// Optional annotations (in spec.annotations, for public ELB):
 //   - huawei-elb.io/public: "true" (default "false")
 //   - huawei-elb.io/bandwidth-size: e.g. "20" (default 10)
 //   - huawei-elb.io/bandwidth-charge-mode: "traffic" or "bandwidth" (default "traffic")
 //   - huawei-elb.io/public-ip-network-type: e.g. "5_bgp" (default "5_bgp")
+//
+// Note: These annotations are read from spec.annotations (not metadata.annotations)
+// so they can be set via the OpenEverest UI. They will also be copied to the
+// Service by the Everest operator, but CCM only reads kubernetes.io/elb.id and
+// ignores the huawei-elb.io/* keys.
 func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOption, error) {
-	a := lbc.GetAnnotations()
+	a := getSpecAnnotations(lbc)
 
 	vpcID := a["huawei-elb.io/vpc-id"]
 	subnetID := a["huawei-elb.io/subnet-id"]
@@ -425,29 +446,27 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 }
 
 // SetupWithManager registers the controller with the manager.
-// A predicate filters events so only CRs with the controlled label are processed.
-// Delete events are always processed to ensure finalizer cleanup even if the
-// label was removed.
+// A predicate filters events so only CRs with huawei-elb.io/vpc-id in
+// spec.annotations are processed. Delete events are always processed to
+// ensure finalizer cleanup.
 func (r *LoadBalancerConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	lbc := &unstructured.Unstructured{}
 	lbc.SetGroupVersionKind(lbcGVR)
 
 	controlledPredicate := predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			return e.Object.GetLabels()[controlledLabel] == "true"
+			return hasHuaweiELBParams(e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			// Process if either old or new object has the label — covers
-			// label addition and removal.
-			return e.ObjectOld.GetLabels()[controlledLabel] == "true" ||
-				e.ObjectNew.GetLabels()[controlledLabel] == "true"
+			// Process if either old or new object has huawei-elb.io params.
+			return hasHuaweiELBParams(e.ObjectOld) || hasHuaweiELBParams(e.ObjectNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			// Always process deletes to clean up finalizers.
 			return true
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
-			return e.Object.GetLabels()[controlledLabel] == "true"
+			return hasHuaweiELBParams(e.Object)
 		},
 	}
 

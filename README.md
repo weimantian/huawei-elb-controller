@@ -287,15 +287,12 @@ apiVersion: everest.percona.com/v1alpha1
 kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
-  labels:
-    huawei-elb.io/controlled: "true"
+spec:
   annotations:
     huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
     huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
     huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "false"
-spec:
-  annotations: {}
 EOF
 ```
 
@@ -307,8 +304,7 @@ apiVersion: everest.percona.com/v1alpha1
 kind: LoadBalancerConfig
 metadata:
   name: huawei-public-elb
-  labels:
-    huawei-elb.io/controlled: "true"
+spec:
   annotations:
     huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
     huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
@@ -317,8 +313,6 @@ metadata:
     huawei-elb.io/bandwidth-size: "20"
     huawei-elb.io/bandwidth-charge-mode: "traffic"
     huawei-elb.io/public-ip-network-type: "5_bgp"
-spec:
-  annotations: {}
 EOF
 ```
 
