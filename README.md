@@ -443,34 +443,147 @@ EOF
 
 ### Step 7: Verify Database Access
 
+#### 1. Check the database cluster is running
+
 ```bash
-# 1. Check the database cluster is running
+# List all database clusters and their status
 kubectl get databasecluster -n everest
-# Expected: my-pg is ready
-
-# 2. Find the Service created by Percona Everest
-kubectl get svc -n everest -l app.kubernetes.io/instance=my-pg
-# Expected: a LoadBalancer-type Service with an EXTERNAL-IP
-
-# 3. Verify the Service has the ELB ID annotation
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-# Expected: same ELB ID as in the LoadBalancerConfig
-
-# 4. Connect to the database via the ELB's IP
-# For internal ELB:
-psql -h <ELB-VIP> -U postgres -d mydb
-
-# For public ELB:
-psql -h <EIP-address> -U postgres -d mydb
 ```
 
-Example output:
+Expected output:
+```
+NAME        SIZE   READY   STATUS   HOSTNAME        AGE
+my-pg       1      1       ready    192.168.0.235   5m
+```
+
+- `READY`: ready replicas / total replicas (should match `SIZE`)
+- `STATUS`: should be `ready`
+- `HOSTNAME`: the ELB's VIP address (internal IP)
+
+#### 2. Find the LoadBalancer Service
+
+```bash
+# List the Service created by OpenEverest for the database
+# Replace <db-name> with your database name (e.g., my-pg)
+kubectl get svc -n everest -l app.kubernetes.io/instance=<db-name>
+```
+
+Expected output:
 ```
 NAME                TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)          AGE
 my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/TCP   5m
 ```
 
-The `EXTERNAL-IP` is the ELB's VIP address — this is what clients connect to.
+- `TYPE`: should be `LoadBalancer`
+- `EXTERNAL-IP`: the ELB's VIP address (internal IP for both internal and public ELBs)
+- `PORT(S)`: database port — 5432 for PostgreSQL, 3306 for MySQL, 27017 for MongoDB
+
+#### 3. Get the connection IP
+
+**For internal ELB** (VPC-internal access only):
+
+The `EXTERNAL-IP` from step 2 is the connection address:
+```bash
+# Extract the internal VIP from the Service status
+kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+# Output: 192.168.0.235
+```
+
+**For public ELB** (internet access):
+
+Get the public IP (EIP) from the LoadBalancerConfig:
+```bash
+# Read the public IP annotation written by the controller
+kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/public-ip}'
+# Output: 123.249.70.124
+```
+
+#### 4. Verify ELB is bound to the Service
+
+```bash
+# Check that the Service carries the ELB ID annotation
+# This is the ELB's UUID (NOT an IP) — CCM uses it to bind the pre-created ELB to the Service
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
+# Output: 4d8403a3-b72d-4cb5-a174-d30de79dc0b6 (ELB UUID, not an IP)
+```
+
+This should match the ELB ID in the LoadBalancerConfig:
+```bash
+# Verify the same ELB ID is stored in the LBC CR
+kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.spec.annotations.kubernetes\.io/elb\.id}'
+```
+
+> **Note**: The ELB ID is a UUID used internally by CCM. To connect to the database, use the IP from step 3, not this UUID.
+
+#### 5. Install the database client (if not already installed)
+
+**PostgreSQL (`psql`)**:
+
+| OS | Command |
+|---|---|
+| macOS | `brew install postgresql` |
+| Ubuntu/Debian | `sudo apt install postgresql-client` |
+| CentOS/RHEL | `sudo yum install postgresql` |
+
+**MySQL (`mysql`)**:
+
+| OS | Command |
+|---|---|
+| macOS | `brew install mysql-client` |
+| Ubuntu/Debian | `sudo apt install mysql-client` |
+| CentOS/RHEL | `sudo yum install mysql` |
+
+**MongoDB (`mongosh`)**:
+
+| OS | Command |
+|---|---|
+| macOS | `brew install mongosh` |
+| Ubuntu/Debian | See [official guide](https://www.mongodb.com/docs/mongodb-shell/install/) |
+| CentOS/RHEL | See [official guide](https://www.mongodb.com/docs/mongodb-shell/install/) |
+
+#### 6. Connect to the database
+
+Replace `<IP>` with the IP from step 3, and `<db-name>` with your database name.
+
+**PostgreSQL** (port 5432):
+
+```bash
+# Get the database password
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.postgres}' | base64 -d
+
+# Connect via psql
+psql -h <IP> -U postgres -d <db-name>
+# Public ELB example:  psql -h 123.249.70.124 -U postgres -d my-pg
+# Internal ELB example: psql -h 192.168.0.235 -U postgres -d my-pg
+```
+
+**MySQL / PXC** (port 3306):
+
+```bash
+# Get the database password
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.root}' | base64 -d
+
+# Connect via mysql client
+mysql -h <IP> -u root -p -e "SELECT VERSION();"
+# Public ELB example:  mysql -h 123.249.70.124 -u root -p
+# Internal ELB example: mysql -h 192.168.0.235 -u root -p
+```
+
+**MongoDB / PSMDB** (port 27017):
+
+```bash
+# Get the database password
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.clusterAdmin}' | base64 -d
+
+# Connect via mongosh
+mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
+# Public ELB example:  mongosh "mongodb://clusterAdmin:<password>@123.249.70.124:27017/?replicaSet=rs0"
+```
+
+> **Note**: For internal ELBs, the VIP is only reachable from within the VPC. If testing from your local machine outside the VPC, use a public ELB, or connect from within a Pod:
+> ```bash
+> kubectl exec -it <pod-name> -n everest -- psql -h <IP> -U postgres -d <db-name>
+> ```
 
 ---
 
@@ -482,7 +595,7 @@ The `EXTERNAL-IP` is the ELB's VIP address — this is what clients connect to.
 
 | Annotation | Default | Description |
 |---|---|---|
-| `huawei-elb.io/public` | `false` | `true` = public ELB (with EIP); `false` = internal ELB |
+| `huawei-elb.io/public` | `true` | `false` = internal ELB; default `true` = public ELB (with EIP) |
 | `huawei-elb.io/bandwidth-size` | `10` | EIP bandwidth (Mbit/s) — public ELB only |
 | `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic` (pay-per-traffic) or `bandwidth` (pay-per-bandwidth) |
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP network type; `5_bgp` for BGP |

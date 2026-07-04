@@ -442,34 +442,147 @@ EOF
 
 ### 步骤 7：验证数据库访问
 
+#### 1. 检查数据库集群运行状态
+
 ```bash
-# 1. 检查数据库集群运行状态
+# 列出所有数据库集群及其状态
 kubectl get databasecluster -n everest
-# 预期：my-pg 处于 ready 状态
-
-# 2. 查找 Percona Everest 创建的 Service
-kubectl get svc -n everest -l app.kubernetes.io/instance=my-pg
-# 预期：一个 LoadBalancer 类型的 Service，带有 EXTERNAL-IP
-
-# 3. 验证 Service 包含 ELB ID annotation
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-# 预期：与 LoadBalancerConfig 中相同的 ELB ID
-
-# 4. 通过 ELB IP 连接数据库
-# 内部 ELB：
-psql -h <ELB-VIP> -U postgres -d mydb
-
-# 公网 ELB：
-psql -h <EIP-地址> -U postgres -d mydb
 ```
 
-输出示例：
+预期输出：
+```
+NAME        SIZE   READY   STATUS   HOSTNAME        AGE
+my-pg       1      1       ready    192.168.0.235   5m
+```
+
+- `READY`：就绪副本数 / 总副本数（应与 `SIZE` 一致）
+- `STATUS`：应为 `ready`
+- `HOSTNAME`：ELB 的 VIP 地址（内网 IP）
+
+#### 2. 查找 LoadBalancer Service
+
+```bash
+# 列出 OpenEverest 为数据库创建的 Service
+# 将 <db-name> 替换为你的数据库名称（如 my-pg）
+kubectl get svc -n everest -l app.kubernetes.io/instance=<db-name>
+```
+
+预期输出：
 ```
 NAME                TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)          AGE
 my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/TCP   5m
 ```
 
-`EXTERNAL-IP` 就是 ELB 的 VIP 地址 —— 客户端通过这个地址连接数据库。
+- `TYPE`：应为 `LoadBalancer`
+- `EXTERNAL-IP`：ELB 的 VIP 地址（内网和公网 ELB 都显示内网 VIP）
+- `PORT(S)`：数据库端口 —— PostgreSQL 5432、MySQL 3306、MongoDB 27017
+
+#### 3. 获取连接 IP
+
+**内网 ELB**（仅 VPC 内访问）：
+
+步骤 2 中的 `EXTERNAL-IP` 就是连接地址：
+```bash
+# 从 Service 状态提取内网 VIP
+kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+# 输出：192.168.0.235
+```
+
+**公网 ELB**（互联网访问）：
+
+从 LoadBalancerConfig 获取公网 IP（EIP）：
+```bash
+# 读取控制器写入的公网 IP 注解
+kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/public-ip}'
+# 输出：123.249.70.124
+```
+
+#### 4. 验证 ELB 已绑定到 Service
+
+```bash
+# 检查 Service 是否携带 ELB ID 注解
+# 这是 ELB 的 UUID（不是 IP）—— CCM 用它来将预创建的 ELB 绑定到 Service
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
+# 输出：4d8403a3-b72d-4cb5-a174-d30de79dc0b6（ELB UUID，不是 IP）
+```
+
+该值应与 LoadBalancerConfig 中的 ELB ID 一致：
+```bash
+# 验证 LBC CR 中存储了相同的 ELB ID
+kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.spec.annotations.kubernetes\.io/elb\.id}'
+```
+
+> **注意**：ELB ID 是 CCM 内部使用的 UUID。连接数据库请使用步骤 3 中的 IP，不是这个 UUID。
+
+#### 5. 安装数据库客户端（如未安装）
+
+**PostgreSQL (`psql`)**：
+
+| 操作系统 | 命令 |
+|---|---|
+| macOS | `brew install postgresql` |
+| Ubuntu/Debian | `sudo apt install postgresql-client` |
+| CentOS/RHEL | `sudo yum install postgresql` |
+
+**MySQL (`mysql`)**：
+
+| 操作系统 | 命令 |
+|---|---|
+| macOS | `brew install mysql-client` |
+| Ubuntu/Debian | `sudo apt install mysql-client` |
+| CentOS/RHEL | `sudo yum install mysql` |
+
+**MongoDB (`mongosh`)**：
+
+| 操作系统 | 命令 |
+|---|---|
+| macOS | `brew install mongosh` |
+| Ubuntu/Debian | 参考[官方安装指南](https://www.mongodb.com/docs/mongodb-shell/install/) |
+| CentOS/RHEL | 参考[官方安装指南](https://www.mongodb.com/docs/mongodb-shell/install/) |
+
+#### 6. 连接数据库
+
+将 `<IP>` 替换为步骤 3 中的 IP，`<db-name>` 替换为你的数据库名称。
+
+**PostgreSQL**（端口 5432）：
+
+```bash
+# 获取数据库密码
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.postgres}' | base64 -d
+
+# 通过 psql 连接
+psql -h <IP> -U postgres -d <db-name>
+# 公网 ELB 示例：  psql -h 123.249.70.124 -U postgres -d my-pg
+# 内网 ELB 示例：  psql -h 192.168.0.235 -U postgres -d my-pg
+```
+
+**MySQL / PXC**（端口 3306）：
+
+```bash
+# 获取数据库密码
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.root}' | base64 -d
+
+# 通过 mysql 客户端连接
+mysql -h <IP> -u root -p -e "SELECT VERSION();"
+# 公网 ELB 示例：  mysql -h 123.249.70.124 -u root -p
+# 内网 ELB 示例：  mysql -h 192.168.0.235 -u root -p
+```
+
+**MongoDB / PSMDB**（端口 27017）：
+
+```bash
+# 获取数据库密码
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.clusterAdmin}' | base64 -d
+
+# 通过 mongosh 连接
+mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
+# 公网 ELB 示例：  mongosh "mongodb://clusterAdmin:<password>@123.249.70.124:27017/?replicaSet=rs0"
+```
+
+> **注意**：内网 ELB 的 VIP 只能在 VPC 内部访问。如果从本地电脑（VPC 外）测试，请使用公网 ELB，或者在 Pod 内部连接：
+> ```bash
+> kubectl exec -it <pod-name> -n everest -- psql -h <IP> -U postgres -d <db-name>
+> ```
 
 ---
 
@@ -481,7 +594,7 @@ my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/T
 
 | Annotation | 默认值 | 说明 |
 |---|---|---|
-| `huawei-elb.io/public` | `false` | `true` = 公网 ELB（带 EIP）；`false` = 内部 ELB |
+| `huawei-elb.io/public` | `true` | `false` = 内网 ELB；默认 `true` = 公网 ELB（带 EIP） |
 | `huawei-elb.io/bandwidth-size` | `10` | EIP 带宽（Mbit/s）—— 仅公网 ELB |
 | `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型；`5_bgp` 为 BGP |
