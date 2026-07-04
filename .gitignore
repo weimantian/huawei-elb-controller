@@ -1,0 +1,10 @@
+/bin/
+/list-vpcs
+/huawei-elb-controller
+.env
+*.swp
+.DS_Store
+# IDE / tool config
+.arts/
+.codeartsdoer/
+.merkle-snapshot.json

@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+rules:
+  # Watch, get, list, update LoadBalancerConfig CRs (cluster-scoped)
+  - apiGroups: ["everest.percona.com"]
+    resources: ["loadbalancerconfigs"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Events for status reporting
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]

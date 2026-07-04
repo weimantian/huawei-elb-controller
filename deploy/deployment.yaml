@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: huawei-elb-controller
+  namespace: everest-system
+  labels:
+    app: huawei-elb-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: huawei-elb-controller
+  template:
+    metadata:
+      labels:
+        app: huawei-elb-controller
+    spec:
+      serviceAccountName: huawei-elb-controller
+      containers:
+        - name: controller
+          image: huawei-elb-controller:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --metrics-bind-address=:8081
+          env:
+            - name: HUAWEI_CLOUD_AK
+              valueFrom:
+                secretKeyRef:
+                  name: huawei-cloud-credentials
+                  key: ak
+            - name: HUAWEI_CLOUD_SK
+              valueFrom:
+                secretKeyRef:
+                  name: huawei-cloud-credentials
+                  key: sk
+            - name: HUAWEI_CLOUD_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: huawei-cloud-credentials
+                  key: project-id
+            - name: HUAWEI_CLOUD_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: huawei-cloud-credentials
+                  key: region
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20

@@ -1,0 +1,21 @@
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-public-elb
+  labels:
+    huawei-elb.io/controlled: "true"
+  annotations:
+    # --- Required ---
+    huawei-elb.io/vpc-id: "REPLACE_WITH_VPC_ID"
+    # NOTE: Use the Neutron subnet ID (SubnetCidr.Id from VPC v3 API), not the VPC subnet resource ID.
+    # Run 'go run ./cmd/list-vpcs' to find it.
+    huawei-elb.io/subnet-id: "REPLACE_WITH_NEUTRON_SUBNET_ID"
+    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
+    # --- Public ELB ---
+    huawei-elb.io/public: "true"
+    huawei-elb.io/bandwidth-size: "20"
+    huawei-elb.io/bandwidth-charge-mode: "traffic"
+    huawei-elb.io/public-ip-network-type: "5_bgp"
+spec:
+  annotations:
+    {}  # Controller fills in kubernetes.io/elb.id here

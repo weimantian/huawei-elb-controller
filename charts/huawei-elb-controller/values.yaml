@@ -1,0 +1,50 @@
+# Image configuration
+image:
+  repository: huawei-elb-controller
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Huawei Cloud credentials.
+# Either set credentials directly here, or set existingSecret to use a
+# pre-created Secret (recommended for production).
+credentials:
+  ak: ""
+  sk: ""
+  projectId: ""
+  region: "cn-north-4"
+
+# Use an existing Secret for credentials instead of creating one.
+# The Secret must have keys: ak, sk, project-id, region.
+# If set, credentials.* values are ignored.
+existingSecret: ""
+
+# Deployment namespace (should match OpenEverest's namespace).
+namespace: everest-system
+
+# Resource limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Node scheduling
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Metrics endpoint
+metrics:
+  bindAddress: ":8081"
+
+# Health probe settings (controller-runtime built-in /readyz and /healthz)
+healthProbe:
+  bindAddress: ":8082"
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  livenessProbe:
+    initialDelaySeconds: 15
+    periodSeconds: 20

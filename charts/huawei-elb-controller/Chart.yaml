@@ -1,0 +1,12 @@
+apiVersion: v2
+name: huawei-elb-controller
+description: A Kubernetes controller that manages Huawei Cloud ELBs for OpenEverest V1 (Percona Everest). It watches LoadBalancerConfig CRs and creates/deletes ELBs via the Huawei Cloud ELB v3 API.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - huawei-cloud
+  - elb
+  - openeverest
+  - percona-everest
+  - loadbalancer

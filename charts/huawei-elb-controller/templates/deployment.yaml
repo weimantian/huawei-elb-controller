@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "huawei-elb-controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "huawei-elb-controller.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "huawei-elb-controller.fullname" . }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --metrics-bind-address={{ .Values.metrics.bindAddress }}
+          env:
+            - name: HUAWEI_CLOUD_AK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "huawei-elb-controller.secretName" . }}
+                  key: ak
+            - name: HUAWEI_CLOUD_SK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "huawei-elb-controller.secretName" . }}
+                  key: sk
+            - name: HUAWEI_CLOUD_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "huawei-elb-controller.secretName" . }}
+                  key: project-id
+            - name: HUAWEI_CLOUD_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "huawei-elb-controller.secretName" . }}
+                  key: region
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+            - name: health
+              containerPort: 8082
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: {{ .Values.healthProbe.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthProbe.readinessProbe.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: {{ .Values.healthProbe.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthProbe.livenessProbe.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
