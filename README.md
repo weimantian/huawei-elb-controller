@@ -163,13 +163,9 @@ The controller needs a **VPC ID** and a **Neutron subnet ID** to create an ELB.
 
 > **Which subnet?** Use the **node subnet** — the subnet where your Kubernetes worker nodes live. Do NOT use the CCE management node subnet or the container/Pod subnet.
 
-**Method A: Via Huawei Cloud Console**
+> **Why not the console?** The Huawei Cloud VPC console only shows the VPC subnet Resource ID, not the Neutron subnet ID that the ELB API requires. Use the `list-vpcs` CLI tool below to get the correct ID.
 
-1. Go to "Virtual Private Cloud" service
-2. Find the VPC where your cluster runs — record the **VPC ID**
-3. Click the subnet where your node IPs belong — record the **Neutron ID** (not the subnet Resource ID)
-
-**Method B: Via the `list-vpcs` CLI tool**
+Use the `list-vpcs` CLI tool:
 
 ```bash
 # Clone this repo and run the VPC lookup tool

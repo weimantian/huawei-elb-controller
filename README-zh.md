@@ -163,13 +163,9 @@ kubectl get pods -A | grep cloud-controller
 
 > **用哪个子网？** 使用**节点子网** —— 即 Kubernetes 工作节点 IP 所在的子网。不要使用 CCE 管理节点子网或容器/Pod 子网。
 
-**方式 A：通过华为云控制台**
+> **为什么不能用控制台？** 华为云 VPC 控制台只显示 VPC 子网资源 ID，不显示 ELB API 需要的 Neutron 子网 ID。请使用下面的 `list-vpcs` 命令行工具获取正确的 ID。
 
-1. 进入"虚拟私有云"服务
-2. 找到集群所在的 VPC —— 记录 **VPC ID**
-3. 点击节点 IP 所属的子网 —— 记录 **Neutron ID**（不是子网资源 ID）
-
-**方式 B：通过 `list-vpcs` 命令行工具**
+使用 `list-vpcs` 命令行工具：
 
 ```bash
 # 克隆仓库并运行 VPC 查询工具
