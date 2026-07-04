@@ -341,7 +341,11 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 
 ### 步骤 5：创建 LoadBalancerConfig
 
-创建**内部 ELB**（仅 VPC 内访问）：
+在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。你只需指定创建内网还是公网 ELB。
+
+#### 方式 A（推荐）：零配置 via kubectl
+
+**内网 ELB**（默认，仅 VPC 内访问）：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -350,15 +354,11 @@ kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
 spec:
-  annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
-    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
-    huawei-elb.io/public: "false"
+  annotations: {}
 EOF
 ```
 
-或创建**公网 ELB**（带弹性公网 IP，可从互联网访问）：
+**公网 ELB**（带弹性公网 IP，可从互联网访问 —— 只需填一个注解）：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -368,58 +368,7 @@ metadata:
   name: huawei-public-elb
 spec:
   annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
-    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "true"
-    huawei-elb.io/bandwidth-size: "20"
-    huawei-elb.io/bandwidth-charge-mode: "traffic"
-    huawei-elb.io/public-ip-network-type: "5_bgp"
-EOF
-```
-
-> **CCE 零配置**：在 CCE 上这些注解是**可选的** —— 如果 `spec.annotations` 留空，控制器会从集群节点自动探测 VPC/子网/可用区。详见下方[方式 C](#方式-c零配置cce-自动探测)。
-
-#### 必需注解说明
-
-| 注解 | 含义 | 示例值 |
-|---|---|---|
-| `huawei-elb.io/vpc-id` | ELB 创建在哪个 VPC 里。必须与你的 K8s 节点在同一个 VPC。 | `0d60646b-e3b7-4ad9-b422-015ee7da9a48` |
-| `huawei-elb.io/subnet-id` | ELB 的 VIP 分配所在的 Neutron 子网 ID。**不是**控制台显示的 Resource ID —— 请使用 `list-vpcs` 工具（见步骤 3）查询。 | `c265b187-a0a8-45cf-9cb3-7c3b757f8ff8` |
-| `huawei-elb.io/availability-zones` | ELB 部署的可用区列表，逗号分隔。至少填写一个。 | `cn-north-4a,cn-north-4b` |
-| `huawei-elb.io/public` | 是否创建公网 ELB。`false` = 内网 ELB（仅 VPC 内访问）；`true` = 公网 ELB（带弹性公网 IP，可从互联网访问）。 | `false` |
-
-> **简单理解**：`vpc-id` 和 `subnet-id` 决定 ELB 放在哪个网络；`availability-zones` 决定放在哪些机房；`public` 决定内网还是公网。
-
-#### 方式 B：通过 OpenEverest UI 创建
-
-你也可以通过 OpenEverest Web UI 创建 LoadBalancerConfig，无需使用 `kubectl`：
-
-1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
-2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
-3. 点击 **Create configuration**。
-4. 填写配置 **名称**（例如 `huawei-internal-elb`）。
-5. 在 **Annotations** 区域，逐条添加注解键值对：
-   - Key: `huawei-elb.io/vpc-id`，Value: 你的 VPC ID
-   - Key: `huawei-elb.io/subnet-id`，Value: 你的 Neutron 子网 ID
-   - Key: `huawei-elb.io/availability-zones`，Value: `cn-north-4a,cn-north-4b`
-   - Key: `huawei-elb.io/public`，Value: `false`（内网）或 `true`（公网）
-6. 点击 **Save** 保存。
-
-控制器会在几秒内自动检测到新的 CR 并创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
-
-#### 方式 C：零配置（CCE 自动探测）
-
-在华为云 CCE 上，你可以创建一个**不带任何注解**的 LoadBalancerConfig —— 控制器会自动从集群节点探测 VPC、子网和可用区：
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-elb
-spec:
-  annotations: {}
 EOF
 ```
 
@@ -432,9 +381,7 @@ EOF
 
 这提供了与 EKS/GKE 类似的零配置体验 —— 只需创建配置，控制器自动完成其余工作。
 
-> **注意**：自动探测适用于所有节点在同一 VPC 的 CCE 集群。如果节点跨多个 VPC，控制器会报错并要求手动指定 `huawei-elb.io/vpc-id`。
->
-> **覆盖**：你仍可以手动设置任何注解来覆盖自动探测的值。例如，要创建公网 ELB，只需添加 `huawei-elb.io/public: "true"`。
+> **注意**：自动探测适用于所有节点在同一 VPC 的 CCE 集群。如果节点跨多个 VPC，控制器会报错并要求手动指定 `huawei-elb.io/vpc-id`（见下方方式 C）。
 
 ##### 公网 vs 内网 ELB
 
@@ -447,21 +394,6 @@ EOF
 | `huawei-elb.io/availability-zones` | ✅ 从节点标签自动探测 | 需要时覆盖 |
 | `huawei-elb.io/public` | 默认 `false`（内网） | 设为 `"true"` 创建公网 ELB |
 
-**内网 ELB**（默认，零配置）：
-
-```yaml
-spec:
-  annotations: {}  # → 内网 ELB，VPC/子网/可用区自动探测
-```
-
-**公网 ELB**（只需填一个注解）：
-
-```yaml
-spec:
-  annotations:
-    huawei-elb.io/public: "true"  # → 公网 ELB，VPC/子网/可用区仍自动探测
-```
-
 公网 ELB 可选参数（仅 `public: "true"` 时生效）：
 
 | 注解 | 默认值 | 说明 |
@@ -470,7 +402,54 @@ spec:
 | `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型 |
 
+#### 方式 B（推荐）：零配置 via OpenEverest UI
 
+通过 OpenEverest Web UI 创建 LoadBalancerConfig —— 无需 `kubectl`：
+
+1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
+2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
+3. 点击 **Create configuration**。
+4. 填写配置**名称**（例如 `huawei-internal-elb`）。
+5. 如果是**公网 ELB**，添加一个注解：
+   - Key: `huawei-elb.io/public`，Value: `true`
+   - 如果是**内网 ELB**，跳过此步 —— 注解留空即可。
+6. 点击 **Save** 保存。
+
+控制器会自动检测到新的 CR，从节点自动探测 VPC/子网/可用区，并在几秒内创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
+
+#### 方式 C（高级）：手动注解
+
+当你需要覆盖自动探测时使用手动注解（例如多 VPC 集群、自定义子网或特定 ELB 参数）：
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-elb
+spec:
+  annotations:
+    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
+    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
+    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
+    huawei-elb.io/public: "false"
+EOF
+```
+
+使用 `list-vpcs` 工具（见步骤 2）查询 VPC ID 和 Neutron 子网 ID。
+
+> **重要**：`huawei-elb.io/subnet-id` 需要的是 **Neutron 子网 ID**，不是华为云控制台显示的 VPC 子网资源 ID。填错会导致 ELB 创建失败。
+
+注解参考：
+
+| 注解 | 必填 | 说明 | 示例 |
+|---|---|---|---|
+| `huawei-elb.io/vpc-id` | 是* | 创建 ELB 所在的 VPC ID | `0d60646b-...` |
+| `huawei-elb.io/subnet-id` | 是* | Neutron 子网 ID（不是 VPC 子网资源 ID） | `c265b187-...` |
+| `huawei-elb.io/availability-zones` | 是* | 可用区列表（逗号分隔） | `cn-north-4a,cn-north-4b` |
+| `huawei-elb.io/public` | 否 | `true` = 公网 ELB；`false` = 内网（默认） | `false` |
+
+\* 在 CCE 上不填时自动探测。
 
 ### 步骤 6：等待 ELB 就绪
 

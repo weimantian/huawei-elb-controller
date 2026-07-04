@@ -342,7 +342,11 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 
 ### Step 5: Create a LoadBalancerConfig
 
-Create an **internal ELB** (VPC-internal access only):
+On CCE, the controller auto-detects VPC, subnet, and availability zones from cluster nodes — no manual configuration needed. You only need to specify whether you want an internal or public ELB.
+
+#### Option A (Recommended): Zero-config via kubectl
+
+**Internal ELB** (default, VPC-internal access only):
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -351,15 +355,11 @@ kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
 spec:
-  annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
-    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
-    huawei-elb.io/public: "false"
+  annotations: {}
 EOF
 ```
 
-Or create a **public ELB** (internet-accessible, with floating IP):
+**Public ELB** (internet-accessible, with floating IP — only one annotation needed):
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -369,57 +369,7 @@ metadata:
   name: huawei-public-elb
 spec:
   annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
-    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "true"
-    huawei-elb.io/bandwidth-size: "20"
-    huawei-elb.io/bandwidth-charge-mode: "traffic"
-    huawei-elb.io/public-ip-network-type: "5_bgp"
-EOF
-
-> **Zero-config on CCE**: These annotations are **optional** on CCE — if you leave `spec.annotations` empty, the controller auto-detects VPC/subnet/AZ from cluster nodes. See [Option C](#option-c-zero-config-cce-auto-detection) below.
-
-#### Required Annotations
-
-| Annotation | Description | Example |
-|---|---|---|
-| `huawei-elb.io/vpc-id` | The VPC where the ELB will be created. Must match the VPC of your Kubernetes nodes. | `0d60646b-e3b7-4ad9-b422-015ee7da9a48` |
-| `huawei-elb.io/subnet-id` | The Neutron subnet ID for the ELB's VIP allocation. **Not** the console-displayed Resource ID — use the `list-vpcs` tool (see Step 3) to look it up. | `c265b187-a0a8-45cf-9cb3-7c3b757f8ff8` |
-| `huawei-elb.io/availability-zones` | Comma-separated list of availability zones where the ELB will be deployed. At least one zone is required. | `cn-north-4a,cn-north-4b` |
-| `huawei-elb.io/public` | Whether to create a public-facing ELB. `false` = internal ELB (VPC-internal access only); `true` = public ELB with a floating IP (internet-accessible). | `false` |
-
-> **In short**: `vpc-id` and `subnet-id` determine which network the ELB is placed in; `availability-zones` determines which data centers; `public` determines internal vs. public access.
-
-#### Option B: Create via OpenEverest UI
-
-Instead of using `kubectl`, you can create a LoadBalancerConfig from the OpenEverest web UI:
-
-1. Open the OpenEverest UI in your browser (e.g., `http://localhost:8080` if port-forwarded).
-2. Navigate to **Settings → Policies & Configurations → Load Balancer Configuration**.
-3. Click **Create configuration**.
-4. Fill in a **Name** for the configuration (e.g., `huawei-internal-elb`).
-5. In the **Annotations** section, add each annotation as a key-value pair:
-   - Key: `huawei-elb.io/vpc-id`, Value: your VPC ID
-   - Key: `huawei-elb.io/subnet-id`, Value: your Neutron subnet ID
-   - Key: `huawei-elb.io/availability-zones`, Value: `cn-north-4a,cn-north-4b`
-   - Key: `huawei-elb.io/public`, Value: `false` (or `true` for public ELB)
-6. Click **Save**.
-
-The controller will automatically detect the new CR and create the ELB within a few seconds. You can verify with `kubectl get loadbalancerconfig`.
-
-#### Option C: Zero-config (CCE Auto-Detection)
-
-On Huawei Cloud CCE, you can create a LoadBalancerConfig with **no annotations at all** — the controller automatically detects VPC, subnet, and availability zones from the cluster's nodes:
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-elb
-spec:
-  annotations: {}
 EOF
 ```
 
@@ -432,9 +382,7 @@ The controller will:
 
 This gives a zero-config experience similar to EKS/GKE — just create the config and the controller figures out the rest.
 
-> **Note**: Auto-detection works on CCE clusters where all nodes are in the same VPC. If nodes span multiple VPCs, the controller reports an error asking you to specify `huawei-elb.io/vpc-id` manually.
->
-> **Override**: You can still set any annotation manually to override auto-detected values. For example, to create a public ELB, just add `huawei-elb.io/public: "true"`.
+> **Note**: Auto-detection works on CCE clusters where all nodes are in the same VPC. If nodes span multiple VPCs, the controller reports an error asking you to specify `huawei-elb.io/vpc-id` manually (see Option C below).
 
 ##### Public vs Internal ELB
 
@@ -447,21 +395,6 @@ Auto-detection covers VPC, subnet, and availability zones — but **public vs in
 | `huawei-elb.io/availability-zones` | ✅ Auto-detected from node labels | Override if needed |
 | `huawei-elb.io/public` | Defaults to `false` (internal) | Set `"true"` for public ELB |
 
-**Internal ELB** (default, zero config):
-
-```yaml
-spec:
-  annotations: {}  # → internal ELB, VPC/subnet/AZ auto-detected
-```
-
-**Public ELB** (only one annotation needed):
-
-```yaml
-spec:
-  annotations:
-    huawei-elb.io/public: "true"  # → public ELB, VPC/subnet/AZ still auto-detected
-```
-
 Optional public ELB parameters (only effective when `public: "true"`):
 
 | Annotation | Default | Description |
@@ -470,7 +403,54 @@ Optional public ELB parameters (only effective when `public: "true"`):
 | `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic` (pay-per-traffic) or `bandwidth` (pay-per-bandwidth) |
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP network type |
 
+#### Option B (Recommended): Zero-config via OpenEverest UI
 
+Create a LoadBalancerConfig from the OpenEverest web UI — no `kubectl` needed:
+
+1. Open the OpenEverest UI in your browser (e.g., `http://localhost:8080` if port-forwarded).
+2. Navigate to **Settings → Policies & Configurations → Load Balancer Configuration**.
+3. Click **Create configuration**.
+4. Fill in a **Name** (e.g., `huawei-internal-elb`).
+5. For a **public ELB**, add one annotation:
+   - Key: `huawei-elb.io/public`, Value: `true`
+   - For an **internal ELB**, skip this step — leave annotations empty.
+6. Click **Save**.
+
+The controller will automatically detect the new CR, auto-detect VPC/subnet/AZ from nodes, and create the ELB within a few seconds. Verify with `kubectl get loadbalancerconfig`.
+
+#### Option C (Advanced): Manual Annotations
+
+Use manual annotations when you need to override auto-detection (e.g., multi-VPC clusters, custom subnet, or specific ELB parameters):
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-elb
+spec:
+  annotations:
+    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
+    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
+    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
+    huawei-elb.io/public: "false"
+EOF
+```
+
+Use the `list-vpcs` tool (see Step 2) to look up your VPC ID and Neutron subnet ID.
+
+> **Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID**, NOT the VPC subnet Resource ID shown in the Huawei Cloud console. Using the wrong ID will cause ELB creation to fail.
+
+Annotation reference:
+
+| Annotation | Required | Description | Example |
+|---|---|---|---|
+| `huawei-elb.io/vpc-id` | Yes* | VPC where the ELB will be created | `0d60646b-...` |
+| `huawei-elb.io/subnet-id` | Yes* | Neutron subnet ID (NOT the VPC subnet Resource ID) | `c265b187-...` |
+| `huawei-elb.io/availability-zones` | Yes* | Comma-separated availability zone list | `cn-north-4a,cn-north-4b` |
+| `huawei-elb.io/public` | No | `true` = public ELB; `false` = internal (default) | `false` |
+
+\* Auto-detected on CCE if not specified.
 
 ### Step 6: Wait for ELB to be Ready
 
