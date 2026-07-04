@@ -436,6 +436,41 @@ This gives a zero-config experience similar to EKS/GKE — just create the confi
 >
 > **Override**: You can still set any annotation manually to override auto-detected values. For example, to create a public ELB, just add `huawei-elb.io/public: "true"`.
 
+##### Public vs Internal ELB
+
+Auto-detection covers VPC, subnet, and availability zones — but **public vs internal is a user choice** and cannot be auto-detected:
+
+| Annotation | Not set (auto-detect) | User sets manually |
+|---|---|---|
+| `huawei-elb.io/vpc-id` | ✅ Auto-detected from node IPs | Override if needed |
+| `huawei-elb.io/subnet-id` | ✅ Auto-detected from node IPs | Override if needed |
+| `huawei-elb.io/availability-zones` | ✅ Auto-detected from node labels | Override if needed |
+| `huawei-elb.io/public` | Defaults to `false` (internal) | Set `"true"` for public ELB |
+
+**Internal ELB** (default, zero config):
+
+```yaml
+spec:
+  annotations: {}  # → internal ELB, VPC/subnet/AZ auto-detected
+```
+
+**Public ELB** (only one annotation needed):
+
+```yaml
+spec:
+  annotations:
+    huawei-elb.io/public: "true"  # → public ELB, VPC/subnet/AZ still auto-detected
+```
+
+Optional public ELB parameters (only effective when `public: "true"`):
+
+| Annotation | Default | Description |
+|---|---|---|
+| `huawei-elb.io/bandwidth-size` | `10` | EIP bandwidth (Mbit/s) |
+| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic` (pay-per-traffic) or `bandwidth` (pay-per-bandwidth) |
+| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP network type |
+
+
 
 ### Step 6: Wait for ELB to be Ready
 

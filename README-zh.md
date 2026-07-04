@@ -436,6 +436,41 @@ EOF
 >
 > **覆盖**：你仍可以手动设置任何注解来覆盖自动探测的值。例如，要创建公网 ELB，只需添加 `huawei-elb.io/public: "true"`。
 
+##### 公网 vs 内网 ELB
+
+自动探测覆盖 VPC、子网和可用区 —— 但**公网还是内网是用户的选择**，无法自动探测：
+
+| 注解 | 不填时（自动探测） | 用户手动设置 |
+|---|---|---|
+| `huawei-elb.io/vpc-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
+| `huawei-elb.io/subnet-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
+| `huawei-elb.io/availability-zones` | ✅ 从节点标签自动探测 | 需要时覆盖 |
+| `huawei-elb.io/public` | 默认 `false`（内网） | 设为 `"true"` 创建公网 ELB |
+
+**内网 ELB**（默认，零配置）：
+
+```yaml
+spec:
+  annotations: {}  # → 内网 ELB，VPC/子网/可用区自动探测
+```
+
+**公网 ELB**（只需填一个注解）：
+
+```yaml
+spec:
+  annotations:
+    huawei-elb.io/public: "true"  # → 公网 ELB，VPC/子网/可用区仍自动探测
+```
+
+公网 ELB 可选参数（仅 `public: "true"` 时生效）：
+
+| 注解 | 默认值 | 说明 |
+|---|---|---|
+| `huawei-elb.io/bandwidth-size` | `10` | EIP 带宽（Mbit/s） |
+| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
+| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型 |
+
+
 
 ### 步骤 6：等待 ELB 就绪
 
