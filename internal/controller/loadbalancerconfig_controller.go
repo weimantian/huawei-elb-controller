@@ -63,6 +63,11 @@ const (
 	healthyRequeue      = 5 * time.Minute  // periodic health check when ACTIVE
 	errorRequeue        = 5 * time.Minute  // permanent errors (bad params, etc.)
 	retryRequeue        = 10 * time.Second // temporary errors (network, throttling)
+
+	// uiGracePeriod is the minimum age of a LoadBalancerConfig before the
+	// controller modifies it. This gives the OpenEverest UI time to complete
+	// post-create operations (reload, update) without resourceVersion conflicts.
+	uiGracePeriod = 5 * time.Second
 )
 
 // lbcGVR is the GroupVersionKind for OpenEverest V1's LoadBalancerConfig CR.
@@ -151,6 +156,14 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			return ctrl.Result{}, nil
 		}
+		// Grace period: if the LBC was created very recently, wait before
+		// modifying it. The OpenEverest UI performs post-create operations
+		// (reload, update) that conflict with controller writes.
+		if age := time.Since(lbc.GetCreationTimestamp().Time); age < uiGracePeriod {
+			logger.Info("LBC recently created, waiting to avoid UI conflict",
+				"age", age, "wait", uiGracePeriod-age)
+			return ctrl.Result{RequeueAfter: uiGracePeriod - age}, nil
+		}
 
 		// Auto-detect VPC/subnet/AZ from cluster nodes.
 		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger)
@@ -176,6 +189,8 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 		logger.Info("Auto-detected VPC/subnet/AZ from cluster nodes",
 			"vpc-id", vpcID, "subnet-id", subnetID, "azs", azs)
 
+		// Write auto-detected params, finalizer, and ready=false in a single
+		// update to minimize resourceVersion changes that conflict with the UI.
 		if err := r.updateWithRetry(ctx, req.NamespacedName, func(latest *unstructured.Unstructured) error {
 			anns := latest.GetAnnotations()
 			if anns == nil {
@@ -185,10 +200,12 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 			anns["huawei-elb.io/subnet-id"] = subnetID
 			anns["huawei-elb.io/availability-zones"] = strings.Join(azs, ",")
 			anns["huawei-elb.io/auto-detected"] = "true"
+			anns[readyAnnotation] = "false"
 			latest.SetAnnotations(anns)
+			controllerutil.AddFinalizer(latest, finalizerName)
 			return nil
 		}); err != nil {
-			return ctrl.Result{}, fmt.Errorf("writing auto-detected params: %w", err)
+			return ctrl.Result{}, fmt.Errorf("writing auto-detected params and finalizer: %w", err)
 		}
 
 		return ctrl.Result{Requeue: true}, nil
@@ -252,9 +269,26 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 		}
 
 		logger.Info("ELB created", "elbID", info.ID, "status", info.ProvisioningStatus)
-		_ = r.setAnnotation(ctx, lbc, errorAnnotation, "")
-		if err := r.setSpecAnnotation(ctx, lbc, huaweicloud.AnnotationELBID, info.ID); err != nil {
-			return ctrl.Result{}, err
+		// Write ELB ID (spec.annotations) and clear error (metadata.annotations)
+		// in a single update to minimize resourceVersion changes.
+		if err := r.updateWithRetry(ctx, client.ObjectKeyFromObject(lbc), func(latest *unstructured.Unstructured) error {
+			specAnns, _, _ := unstructured.NestedStringMap(latest.Object, "spec", "annotations")
+			if specAnns == nil {
+				specAnns = map[string]string{}
+			}
+			specAnns[huaweicloud.AnnotationELBID] = info.ID
+			if err := unstructured.SetNestedStringMap(latest.Object, specAnns, "spec", "annotations"); err != nil {
+				return err
+			}
+			anns := latest.GetAnnotations()
+			if anns == nil {
+				anns = map[string]string{}
+			}
+			anns[errorAnnotation] = ""
+			latest.SetAnnotations(anns)
+			return nil
+		}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("writing ELB ID: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: provisioningRequeue}, nil
 	}
@@ -268,20 +302,32 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 	logger.V(1).Info("ELB status", "elbID", elbID,
 		"provisioning", info.ProvisioningStatus, "operating", info.OperatingStatus)
 
-	// Record public IP if available (useful for debugging, stored in metadata).
-	if info.PublicIP != "" {
-		_ = r.setAnnotation(ctx, lbc, "huawei-elb.io/public-ip", info.PublicIP)
-	}
-	_ = r.setAnnotation(ctx, lbc, "huawei-elb.io/elb-status", info.ProvisioningStatus)
-
-	// Set ready annotation based on ELB status.
+	// Update all status annotations in a single write to minimize
+	// resourceVersion changes that could conflict with the OpenEverest UI.
+	ready := "false"
 	if info.ProvisioningStatus == "ACTIVE" {
-		_ = r.setAnnotation(ctx, lbc, readyAnnotation, "true")
-		_ = r.setAnnotation(ctx, lbc, errorAnnotation, "")
+		ready = "true"
+	}
+	if err := r.updateWithRetry(ctx, client.ObjectKeyFromObject(lbc), func(latest *unstructured.Unstructured) error {
+		anns := latest.GetAnnotations()
+		if anns == nil {
+			anns = map[string]string{}
+		}
+		anns["huawei-elb.io/elb-status"] = info.ProvisioningStatus
+		anns[readyAnnotation] = ready
+		anns[errorAnnotation] = ""
+		if info.PublicIP != "" {
+			anns["huawei-elb.io/public-ip"] = info.PublicIP
+		}
+		latest.SetAnnotations(anns)
+		return nil
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating ELB status annotations: %w", err)
+	}
+
+	if info.ProvisioningStatus == "ACTIVE" {
 		return ctrl.Result{RequeueAfter: healthyRequeue}, nil
 	}
-
-	_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
 	return ctrl.Result{RequeueAfter: provisioningRequeue}, nil
 }
 
@@ -560,7 +606,7 @@ func (r *LoadBalancerConfigReconciler) setAnnotation(
 //   - huawei-elb.io/availability-zones (comma-separated)
 //
 // Optional params (spec.annotations only, for public ELB):
-//   - huawei-elb.io/public: "true" (default "false")
+//   - huawei-elb.io/public: "false" for internal ELB (default "true", public)
 //   - huawei-elb.io/bandwidth-size: e.g. "20" (default 10)
 //   - huawei-elb.io/bandwidth-charge-mode: "traffic" or "bandwidth" (default "traffic")
 //   - huawei-elb.io/public-ip-network-type: e.g. "5_bgp" (default "5_bgp")
@@ -611,8 +657,12 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 		},
 	}
 
-	if strings.EqualFold(specAnns["huawei-elb.io/public"], "true") {
-		opt.IsPublic = true
+	// Default to public ELB. Set huawei-elb.io/public: "false" for internal.
+	opt.IsPublic = true
+	if strings.EqualFold(specAnns["huawei-elb.io/public"], "false") {
+		opt.IsPublic = false
+	}
+	if opt.IsPublic {
 		if bw, err := strconv.Atoi(specAnns["huawei-elb.io/bandwidth-size"]); err == nil && bw > 0 {
 			opt.BandwidthSize = int32(bw)
 		}
