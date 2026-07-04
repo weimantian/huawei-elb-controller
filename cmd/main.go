@@ -12,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	"github.com/weimantian/huawei-elb-controller/internal/controller"
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
@@ -67,6 +68,17 @@ func main() {
 		Creds:     creds,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "failed to setup controller")
+		os.Exit(1)
+	}
+
+	// 5b. Register health/readyiness checks so /healthz and /readyz
+	// are served by the health probe server on :8082.
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		logger.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+		logger.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 
