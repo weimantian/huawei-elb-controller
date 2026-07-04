@@ -453,7 +453,7 @@ kubectl get databasecluster -n everest
 Expected output:
 ```
 NAME        SIZE   READY   STATUS   HOSTNAME        AGE
-my-pg       1      1       ready    192.168.0.235   5m
+my-pg       1      1       ready    <ELB-VIP>   5m
 ```
 
 - `READY`: ready replicas / total replicas (should match `SIZE`)
@@ -471,7 +471,7 @@ kubectl get svc -n everest -l app.kubernetes.io/instance=<db-name>
 Expected output:
 ```
 NAME                TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)          AGE
-my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/TCP   5m
+my-pg-pgbouncer     LoadBalancer   <CLUSTER-IP>   <ELB-VIP>    5432:31234/TCP   5m
 ```
 
 - `TYPE`: should be `LoadBalancer`
@@ -486,7 +486,7 @@ The `EXTERNAL-IP` from step 2 is the connection address:
 ```bash
 # Extract the internal VIP from the Service status
 kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-# Output: 192.168.0.235
+# Output: <ELB-VIP>
 ```
 
 **For public ELB** (internet access):
@@ -495,7 +495,7 @@ Get the public IP (EIP) from the LoadBalancerConfig:
 ```bash
 # Read the public IP annotation written by the controller
 kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/public-ip}'
-# Output: 123.249.70.124
+# Output: <EIP-address>
 ```
 
 #### 4. Verify ELB is bound to the Service
@@ -504,7 +504,7 @@ kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.metadata.annotations.hu
 # Check that the Service carries the ELB ID annotation
 # This is the ELB's UUID (NOT an IP) — CCM uses it to bind the pre-created ELB to the Service
 kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-# Output: 4d8403a3-b72d-4cb5-a174-d30de79dc0b6 (ELB UUID, not an IP)
+# Output: <ELB-UUID> (ELB UUID, not an IP)
 ```
 
 This should match the ELB ID in the LoadBalancerConfig:
@@ -553,8 +553,8 @@ kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.post
 
 # Connect via psql
 psql -h <IP> -U postgres -d <db-name>
-# Public ELB example:  psql -h 123.249.70.124 -U postgres -d my-pg
-# Internal ELB example: psql -h 192.168.0.235 -U postgres -d my-pg
+# Public ELB example:  psql -h <EIP-address> -U postgres -d my-pg
+# Internal ELB example: psql -h <ELB-VIP> -U postgres -d my-pg
 ```
 
 **MySQL / PXC** (port 3306):
@@ -565,8 +565,8 @@ kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.root
 
 # Connect via mysql client
 mysql -h <IP> -u root -p -e "SELECT VERSION();"
-# Public ELB example:  mysql -h 123.249.70.124 -u root -p
-# Internal ELB example: mysql -h 192.168.0.235 -u root -p
+# Public ELB example:  mysql -h <EIP-address> -u root -p
+# Internal ELB example: mysql -h <ELB-VIP> -u root -p
 ```
 
 **MongoDB / PSMDB** (port 27017):
@@ -577,7 +577,7 @@ kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.clus
 
 # Connect via mongosh
 mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
-# Public ELB example:  mongosh "mongodb://clusterAdmin:<password>@123.249.70.124:27017/?replicaSet=rs0"
+# Public ELB example:  mongosh "mongodb://clusterAdmin:<password>@<EIP-address>:27017/?replicaSet=rs0"
 ```
 
 > **Note**: For internal ELBs, the VIP is only reachable from within the VPC. If testing from your local machine outside the VPC, use a public ELB, or connect from within a Pod:
