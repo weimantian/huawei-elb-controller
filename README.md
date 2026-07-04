@@ -265,7 +265,46 @@ kubectl create secret generic huawei-cloud-credentials \
 ```bash
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
-# Push to SWR for CCE, or docker save + ctr import for self-managed clusters
+
+# For CCE clusters: push to SWR (Huawei Cloud Container Registry)
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+
+# For self-managed clusters without SSH access to nodes,
+# import the image via a helper pod with hostPath access:
+docker save huawei-elb-controller:latest -o /tmp/image.tar
+
+# Create a helper pod with access to the host filesystem
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-importer
+spec:
+  hostNetwork: true
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: importer
+      image: ubuntu
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: host
+          mountPath: /host
+  volumes:
+    - name: host
+      hostPath:
+        path: /
+EOF
+
+kubectl wait --for=condition=Ready pod/image-importer --timeout=120s
+
+# Copy the image tar into the helper pod, then import via ctr
+kubectl cp /tmp/image.tar image-importer:/tmp/image.tar
+kubectl exec image-importer -- chroot /host /usr/local/bin/ctr -n k8s.io image import /tmp/image.tar
+
+# Clean up
+kubectl delete pod image-importer
 ```
 
 3. Apply the manifests:
@@ -340,6 +379,8 @@ spec:
 EOF
 ```
 
+> **Tip**: You can also create LoadBalancerConfigs from the OpenEverest UI: navigate to **Settings → Policies & Configurations → Load Balancer Configuration → Create configuration**, then add the `huawei-elb.io/*` annotations as key-value pairs. The controller will detect the new CR and create the ELB automatically.
+
 ### Step 6: Wait for ELB to be Ready
 
 ```bash
@@ -373,7 +414,7 @@ metadata:
 spec:
   engine:
     type: postgresql
-    version: "17.4"
+    version: "17.9"
     replicas: 1
     resources:
       cpu: "1"

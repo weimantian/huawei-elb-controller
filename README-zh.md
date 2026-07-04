@@ -265,7 +265,45 @@ kubectl create secret generic huawei-cloud-credentials \
 ```bash
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
-# CCE 集群推送到 SWR；自建集群用 docker save + ctr import 导入
+
+# CCE 集群：推送到 SWR（华为云容器镜像服务）
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+
+# 自建集群（无法 SSH 到节点时），通过 helper pod 导入镜像：
+docker save huawei-elb-controller:latest -o /tmp/image.tar
+
+# 创建一个可以访问宿主机文件系统的 helper pod
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-importer
+spec:
+  hostNetwork: true
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: importer
+      image: ubuntu
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: host
+          mountPath: /host
+  volumes:
+    - name: host
+      hostPath:
+        path: /
+EOF
+
+kubectl wait --for=condition=Ready pod/image-importer --timeout=120s
+
+# 将镜像 tar 拷入 helper pod，然后通过 ctr 导入
+kubectl cp /tmp/image.tar image-importer:/tmp/image.tar
+kubectl exec image-importer -- chroot /host /usr/local/bin/ctr -n k8s.io image import /tmp/image.tar
+
+# 清理
+kubectl delete pod image-importer
 ```
 
 3. 应用清单：
@@ -340,6 +378,8 @@ spec:
 EOF
 ```
 
+> **提示**：你也可以通过 OpenEverest UI 创建 LoadBalancerConfig：进入 **Settings → Policies & Configurations → Load Balancer Configuration → Create configuration**，然后以键值对形式添加 `huawei-elb.io/*` 注解。控制器会自动检测新的 CR 并创建 ELB。
+
 ### 步骤 6：等待 ELB 就绪
 
 ```bash
@@ -373,7 +413,7 @@ metadata:
 spec:
   engine:
     type: postgresql
-    version: "17.4"
+    version: "17.9"
     replicas: 1
     resources:
       cpu: "1"
