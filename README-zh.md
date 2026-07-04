@@ -1,190 +1,132 @@
 # huawei-elb-controller
 
-[English](README.md) | **中文**
-
----
-
-## 目录
-
-- [概述](#概述)
-- [工作原理](#工作原理)
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-- [配置参考](#配置参考)
-- [故障排查](#故障排查)
-- [开发指南](#开发指南)
+[中文](README-zh.md) | **English**
 
 ---
 
 ## 概述
 
-`huawei-elb-controller` 是一个 Kubernetes 控制器，用于为 [OpenEverest V1](https://github.com/openeverest/openeverest)（Percona Everest）管理**华为云 ELB**（弹性负载均衡）实例。
+`huawei-elb-controller` 是一个 Kubernetes 控制器，为 [Percona Everest](https://docs.percona.com/everest/)（OpenEverest V1）数据库集群自动创建和管理**华为云 ELB**（弹性负载均衡）实例。
 
-它解决了以下问题：OpenEverest V1 的 `LoadBalancerConfig` CR 可以向 K8s Service 注入注解，但**本身不会创建华为云 ELB**。这个控制器填补了这一缺口——监听 `LoadBalancerConfig` CR，自动创建/删除华为云 ELB，并将 ELB ID 写回 CR，使 V1 Operator 创建的 Service 能够绑定预创建的 ELB。
+**解决的问题**：Percona Everest 的 `LoadBalancerConfig` CR 可以向 Kubernetes Service 注入 annotation，但不会创建华为云 ELB 本身。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
+
+**工作原理**：监听 `LoadBalancerConfig` CR，调用华为云 ELB v3 API 自动创建/删除 ELB，并将 ELB ID 写回 CR。Percona Everest 的 operator 随后读取 ELB ID，将其添加到 Service，华为云 CCM 绑定 ELB —— 为你的数据库集群提供外部负载均衡访问入口。
 
 ---
 
-## 工作原理
-
-### 背景
-
-OpenEverest V1 是 Percona 提供的数据库集群管理平台。当用户创建 `DatabaseCluster` CR 时，V1 Operator 会为数据库集群创建一个 Kubernetes `LoadBalancer` 类型的 Service，用于外部访问。
-
-V1 的 `LoadBalancerConfig` CR 机制允许用户自定义 Service 的注解：
+## 工作流程
 
 ```
-DatabaseCluster.spec.proxy.expose.loadBalancerConfigName → 指向一个 LoadBalancerConfig CR
-LoadBalancerConfig.spec.annotations → V1 Operator 将这些注解复制到 K8s Service
-```
-
-在华为云 CCE（云容器引擎）环境中，Cloud Controller Manager（CCM）通过 `kubernetes.io/elb.id` 注解绑定预创建的 ELB。但 V1 不会创建 ELB——它只负责传递注解。
-
-### 问题
-
-```
-用户创建 LoadBalancerConfig (spec.annotations 为空)
+你创建 LoadBalancerConfig（包含 ELB 参数）
     ↓
-V1 Operator 创建 Service (没有 elb.id 注解)
+huawei-elb-controller 通过华为云 API 创建 ELB
     ↓
-CCM 找不到 ELB → Service 永远拿不到外部 IP ❌
+控制器将 ELB ID 写回 LoadBalancerConfig
+    ↓
+你创建 DatabaseCluster，引用该 LoadBalancerConfig
+    ↓
+Percona Everest operator 创建 LoadBalancer 类型 Service
+    ↓
+华为云 CCM 绑定 ELB → Service 获得外部 IP
+    ↓
+你通过 ELB 的 IP 连接数据库
 ```
 
-### 解决方案
+---
 
-`huawei-elb-controller` 自动完成 ELB 的创建和写回：
+## 使用前提
 
-```
-用户创建 LoadBalancerConfig (带标签 + ELB 参数注解)
-    ↓
-huawei-elb-controller 监听到 CR，调用华为云 ELB v3 API 创建 ELB
-    ↓
-控制器将 ELB ID 写回 LoadBalancerConfig.spec.annotations["kubernetes.io/elb.id"]
-    ↓
-用户创建 DatabaseCluster，引用该 LoadBalancerConfig
-    ↓
-V1 Operator 创建 Service，复制 spec.annotations (包含 elb.id)
-    ↓
-CCM 读取 elb.id，绑定预创建的 ELB → Service 获得外部 IP ✅
-```
+### 1. Kubernetes 集群
 
-### 端到端数据流
+一个运行中的 Kubernetes 集群（1.26+），需要：
+- **华为云 CCM**（Cloud Controller Manager）已安装 —— 用于将 ELB 绑定到 Service
+- **StorageClass** 已配置（用于数据库持久化存储）
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        用户操作                                       │
-└──────────────┬──────────────────────────────────┬───────────────────┘
-               │                                  │
-    ① 创建 LoadBalancerConfig           ④ 创建 DatabaseCluster
-    (带标签 + ELB 参数)                  (引用 LoadBalancerConfig)
-               │                                  │
-               ▼                                  ▼
-┌──────────────────────┐              ┌──────────────────────────┐
-│ huawei-elb-controller │              │   V1 Operator             │
-│                      │              │                          │
-│ ② 监听 CR            │              │ ⑤ 创建 K8s LoadBalancer    │
-│   调用 ELB v3 API    │              │   Service                │
-│   创建华为云 ELB      │              │   复制 spec.annotations   │
-│                      │              │   (包含 elb.id)           │
-│ ③ 写回 elb.id 到     │              │                          │
-│   spec.annotations   │              │ ⑥ CCM 读取 elb.id        │
-│   设置 ready=true    │              │   绑定预创建的 ELB        │
-└──────────────────────┘              │   Service 获得 EXTERNAL-IP│
-                                      └──────────────────────────┘
-```
+> **华为云 CCE 集群**：CCM 已预装。如果是华为云 ECS 自建集群，需要单独安装 CCM。
 
-### 时序保护
+### 2. Percona Everest（OpenEverest V1）
 
-为了确保 V1 Operator 在读取 `spec.annotations` 时 ELB ID 已经写回，控制器提供了 `huawei-elb.io/ready` 注解：
-
-- ELB 创建中：`ready=false`
-- ELB ACTIVE 且 ONLINE：`ready=true`
-- ELB 删除中：`ready=false`
-
-用户应在创建 `DatabaseCluster` 之前等待 `ready=true`：
+如果尚未安装 Percona Everest：
 
 ```bash
-kubectl wait loadbalancerconfig <name> \
-  --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
-  --timeout=120s
+# 添加 Percona Helm 仓库
+helm repo add percona https://percona.github.io/percona-helm-charts/
+helm repo update
+
+# 安装 Percona Everest
+helm install everest-core percona/everest \
+    --namespace everest-system \
+    --create-namespace
 ```
 
----
+这会安装：
+- Everest operator 和 server（`everest-system` 命名空间）
+- 数据库 operator（PostgreSQL、MongoDB、PXC）（`everest` 命名空间）
 
-## 功能特性
+验证安装：
 
-### 核心功能
+```bash
+# 检查 Everest pod 运行状态
+kubectl get pods -n everest-system
 
-| 功能 | 说明 |
-|---|---|
-| **ELB 创建** | 根据 `LoadBalancerConfig` 的注解参数，调用华为云 ELB v3 API 创建 ELB |
-| **ELB 删除** | 删除 CR 时，通过 finalizer 机制自动删除对应的华为云 ELB，避免残留费用 |
-| **状态调和** | 持续轮询 ELB 状态，更新 `metadata.annotations` 中的状态信息 |
-| **幂等性** | 控制器重启后，通过 ELB 名称查找已有实例，不会重复创建 |
-| **时序保护** | `huawei-elb.io/ready` 注解标记 ELB 是否就绪，用户可等待后再创建数据库集群 |
+# 获取管理员密码
+kubectl get secret everest-accounts -n everest-system \
+  -o jsonpath='{.data.users\.yaml}' | base64 --decode | yq '.admin.passwordHash'
+```
 
-### 生产级特性
+> 更多详情请参考 [Percona Everest 快速安装指南](https://docs.percona.com/everest/quick-install.html)。
 
-| 特性 | 说明 |
-|---|---|
-| **标签过滤** | 只处理带 `huawei-elb.io/controlled=true` 标签的 CR，不影响其他 LoadBalancerConfig |
-| **错误分类** | 永久错误（参数缺失）5 分钟重试，临时错误（网络/限流）10 秒重试 |
-| **错误记录** | `huawei-elb.io/error` 注解记录最近的调和错误，方便排查 |
-| **更新冲突处理** | 使用 `retry.RetryOnConflict` 处理与 V1 Operator 的并发更新冲突 |
-| **多区域支持** | 支持通过 `huawei-elb.io/region` 注解为每个 CR 指定不同的华为云区域 |
-| **健康检查** | 内置 `/readyz` 和 `/healthz` 端点，支持 Kubernetes readiness/liveness probe |
-| **凭证安全** | AK/SK 通过 Kubernetes Secret 注入，不硬编码在镜像中 |
-| **Helm Chart** | 提供完整的 Helm Chart，支持参数化部署 |
+### 3. 华为云账号
 
-### 支持的 ELB 类型
-
-| 类型 | `huawei-elb.io/public` | 说明 |
-|---|---|---|
-| **内部 ELB** | `false`（默认） | 只有 VPC 内网 IP，适合 VPC 内部访问 |
-| **公网 ELB** | `true` | 带有浮动 IP（EIP），可从公网访问 |
+- 已开通 ELB 服务的华为云账号
+- **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
+- **Project ID** —— 在控制台右上角用户名下拉菜单中找到
+- 已知你的 **VPC ID** 和 **Neutron 子网 ID**（见下方步骤 2）
 
 ---
 
 ## 快速开始
 
-### 前置条件
+### 步骤 1：验证前提条件
 
-在开始之前，请确保您具备以下条件：
+```bash
+# 检查 Percona Everest 运行状态
+kubectl get pods -n everest-system
+# 预期：everest-operator 和 everest-server pod 处于 Running 状态
 
-1. **华为云账号**：已开通 ELB 服务，拥有 AK（Access Key）和 SK（Secret Key）
-2. **Kubernetes 集群**：已安装 OpenEverest V1 和华为云 CCM
-3. **kubectl**：已配置好集群访问凭证
-4. **Helm 3**（可选）：如果使用 Helm Chart 部署
-5. **Go 1.26+**（可选）：如果从源码编译
+# 检查 CCM 运行状态（华为云）
+kubectl get pods -A | grep cloud-controller
+# 预期：cloud-controller-manager pod 处于 Running 状态
 
-### 步骤 1：获取华为云凭证
-
-1. 登录 [华为云控制台](https://console.huaweicloud.com/)
-2. 进入「统一身份认证服务」→「我的凭证」→「访问密钥」
-3. 创建访问密钥，记录 AK 和 SK
-4. 获取 Project ID：在控制台右上角用户名下拉菜单中查看
+# 检查数据库 operator 已安装
+kubectl get pods -n everest
+# 预期：psql-operator、pxc-operator、psmdb-operator pod 处于 Running 状态
+```
 
 ### 步骤 2：获取 VPC 和子网信息
 
-控制器需要 VPC ID 和 Neutron 子网 ID 来创建 ELB。
+控制器需要 **VPC ID** 和 **Neutron 子网 ID** 来创建 ELB。
 
-**方法 A：通过控制台获取**
+> **用哪个子网？** 使用**节点子网** —— 即 Kubernetes 工作节点 IP 所在的子网。不要使用 CCE 管理节点子网或容器/Pod 子网。
 
-1. 进入「虚拟私有云」服务
-2. 找到您的集群所在的 VPC，记录 VPC ID（如 `0d60646b-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）
-3. 点击子网，记录子网的 **Neutron 网络 ID**（不是子网资源 ID）
+**方式 A：通过华为云控制台**
 
-**方法 B：通过命令行工具获取**
+1. 进入"虚拟私有云"服务
+2. 找到集群所在的 VPC —— 记录 **VPC ID**
+3. 点击节点 IP 所属的子网 —— 记录 **Neutron ID**（不是子网资源 ID）
 
-如果您已部署控制器源码，可以使用 `list-vpcs` 工具：
+**方式 B：通过 `list-vpcs` 命令行工具**
 
 ```bash
-# 设置凭证
-export HUAWEI_CLOUD_AK=<您的AK>
-export HUAWEI_CLOUD_SK=<您的SK>
-export HUAWEI_CLOUD_PROJECT_ID=<您的ProjectID>
+# 克隆仓库并运行 VPC 查询工具
+git clone https://github.com/weimantian/huawei-elb-controller.git
+cd huawei-elb-controller
+
+export HUAWEI_CLOUD_AK=<你的-AK>
+export HUAWEI_CLOUD_SK=<你的-SK>
+export HUAWEI_CLOUD_PROJECT_ID=<你的-ProjectID>
 export HUAWEI_CLOUD_REGION=cn-north-4
 
-# 列出所有 VPC 和子网
 go run ./cmd/list-vpcs/
 ```
 
@@ -192,22 +134,21 @@ go run ./cmd/list-vpcs/
 ```
 VPC: vpc-a489 (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
   Subnet: subnet-a489
-    Resource ID:  566342ef-db1b-4ffa-a5ec-4185f5d61d40  ← 不是这个
-    Neutron ID:   c265b187-a0a8-45cf-9cb3-7c3b757f8ff8  ← 用这个！
+    Resource ID:  566342ef-...  ← 不是这个
+    Neutron ID:   c265b187-...  ← 用这个！
     CIDR:         192.168.0.0/24
 ```
 
-> **⚠️ 注意**：`huawei-elb.io/subnet-id` 需要的是 **Neutron 子网 ID**（SubnetCidr.Id），不是 VPC 子网资源 ID（Virsubnet.Id）。使用错误的 ID 会导致 ELB 创建失败。
+> **重要**：`huawei-elb.io/subnet-id` 需要的是 **Neutron 子网 ID**，不是 VPC 子网资源 ID。用错 ID 会导致 ELB 创建失败。
 
 ### 步骤 3：部署控制器
 
-#### 方式 A：使用 Helm Chart（推荐）
+#### 方式 A：使用 Helm（推荐）
 
 ```bash
-# 添加 chart（如果已发布到 registry）
-# helm repo add huawei-elb https://your-org.github.io/charts
+git clone https://github.com/weimantian/huawei-elb-controller.git
+cd huawei-elb-controller
 
-# 使用 values.yaml 部署
 cat > my-values.yaml << 'EOF'
 image:
   repository: huawei-elb-controller
@@ -215,9 +156,9 @@ image:
   pullPolicy: IfNotPresent
 
 credentials:
-  ak: "<您的AK>"
-  sk: "<您的SK>"
-  projectId: "<您的ProjectID>"
+  ak: "<你的-AK>"
+  sk: "<你的-SK>"
+  projectId: "<你的-ProjectID>"
   region: "cn-north-4"
 
 namespace: everest-system
@@ -228,32 +169,28 @@ helm install huawei-elb-controller \
   -f my-values.yaml
 ```
 
-#### 方式 B：手动部署
+#### 方式 B：使用原生清单
 
 1. 创建凭证 Secret：
 
 ```bash
 kubectl create secret generic huawei-cloud-credentials \
   --namespace everest-system \
-  --from-literal=ak=<您的AK> \
-  --from-literal=sk=<您的SK> \
-  --from-literal=project-id=<您的ProjectID> \
+  --from-literal=ak=<你的-AK> \
+  --from-literal=sk=<你的-SK> \
+  --from-literal=project-id=<你的-ProjectID> \
   --from-literal=region=cn-north-4
 ```
 
-2. 构建镜像并导入集群：
+2. 构建并导入容器镜像：
 
 ```bash
-# 编译 linux/amd64 二进制
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
-
-# 构建 Docker 镜像
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
-
-# 导入到集群（CCE 集群可直接推送 SWR，自建集群可用 docker save + ctr import）
+# CCE 集群推送到 SWR；自建集群用 docker save + ctr import 导入
 ```
 
-3. 部署 RBAC 和 Deployment：
+3. 应用清单：
 
 ```bash
 kubectl apply -f deploy/serviceaccount.yaml
@@ -262,14 +199,10 @@ kubectl apply -f deploy/clusterrolebinding.yaml
 kubectl apply -f deploy/deployment.yaml
 ```
 
-### 步骤 4：验证控制器运行
+### 步骤 4：验证控制器运行状态
 
 ```bash
-# 检查 Pod 状态
 kubectl get pods -n everest-system -l app=huawei-elb-controller
-
-# 查看控制器日志
-kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
 预期输出：
@@ -278,16 +211,21 @@ NAME                                     READY   STATUS    RESTARTS   AGE
 huawei-elb-controller-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
 ```
 
-日志中应出现：
+查看日志：
+```bash
+kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
-INFO    starting huawei-elb-controller    {"region": "cn-north-4", "metrics": ":8081"}
-INFO    Starting Controller               {"controller": "loadbalancerconfig", ...}
-INFO    Starting workers                  {"controller": "loadbalancerconfig", ..., "worker count": 1}
+
+预期输出：
+```
+INFO    starting huawei-elb-controller    {"region": "cn-north-4"}
+INFO    Starting Controller               {"controller": "loadbalancerconfig"}
+INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
 ### 步骤 5：创建 LoadBalancerConfig
 
-创建一个内部 ELB（VPC 内访问）：
+创建**内部 ELB**（仅 VPC 内访问）：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -296,18 +234,18 @@ kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
   labels:
-    huawei-elb.io/controlled: "true"    # 必须有此标签，控制器才会处理
+    huawei-elb.io/controlled: "true"
   annotations:
     huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
     huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
     huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "false"
 spec:
-  annotations: {}   # 控制器会自动填充 kubernetes.io/elb.id
+  annotations: {}
 EOF
 ```
 
-创建一个公网 ELB（带浮动 IP，可从公网访问）：
+或创建**公网 ELB**（带弹性公网 IP，可从互联网访问）：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -322,9 +260,9 @@ metadata:
     huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
     huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "true"
-    huawei-elb.io/bandwidth-size: "20"               # 带宽 20Mbit/s
-    huawei-elb.io/bandwidth-charge-mode: "traffic"    # 按流量计费
-    huawei-elb.io/public-ip-network-type: "5_bgp"     # BGP 公网 IP
+    huawei-elb.io/bandwidth-size: "20"
+    huawei-elb.io/bandwidth-charge-mode: "traffic"
+    huawei-elb.io/public-ip-network-type: "5_bgp"
 spec:
   annotations: {}
 EOF
@@ -333,27 +271,32 @@ EOF
 ### 步骤 6：等待 ELB 就绪
 
 ```bash
-# 等待 ready 注解变为 true（最多 120 秒）
+# 等待 ELB 创建完成并激活（最多 120 秒）
 kubectl wait loadbalancerconfig huawei-internal-elb \
   --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
   --timeout=120s
 
-# 查看状态
-kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotations}'
-# 预期输出: {"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
-
+# 验证 ELB 状态
 kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
-# 预期输出: ACTIVE
+# 预期：ACTIVE
+
+# 验证 ELB ID 已写入
+kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotations}'
+# 预期：{"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
 ```
 
-### 步骤 7：创建 DatabaseCluster
+> **重要**：在创建 DatabaseCluster 之前，务必等待 `ready=true`。这确保 ELB ID 已写入 LoadBalancerConfig，Percona Everest operator 读取时能获取到。
+
+### 步骤 7：创建数据库集群
+
+创建一个使用该 LoadBalancerConfig 的 PostgreSQL 数据库集群：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
 apiVersion: everest.percona.com/v1alpha1
 kind: DatabaseCluster
 metadata:
-  name: my-database
+  name: my-pg
   namespace: everest
 spec:
   engine:
@@ -368,58 +311,74 @@ spec:
       size: 1Gi
     expose:
       type: LoadBalancer
-      loadBalancerConfigName: huawei-internal-elb   # 引用步骤 5 创建的 LBC
+      loadBalancerConfigName: huawei-internal-elb
 EOF
 ```
 
-### 步骤 8：验证 Service 绑定 ELB
+### 步骤 8：验证数据库访问
 
 ```bash
-# 查看 V1 创建的 Service
-kubectl get svc -n everest -l app.kubernetes.io/instance=my-database
+# 1. 检查数据库集群运行状态
+kubectl get databasecluster -n everest
+# 预期：my-pg 处于 ready 状态
 
-# 检查 Service 注解是否包含 elb.id
+# 2. 查找 Percona Everest 创建的 Service
+kubectl get svc -n everest -l app.kubernetes.io/instance=my-pg
+# 预期：一个 LoadBalancer 类型的 Service，带有 EXTERNAL-IP
+
+# 3. 验证 Service 包含 ELB ID annotation
 kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-# 预期输出: 与 LoadBalancerConfig 中的 elb.id 相同
+# 预期：与 LoadBalancerConfig 中相同的 ELB ID
 
-# 检查 Service 是否获得外部 IP
-kubectl get svc <service-name> -n everest
-# 预期 EXTERNAL-IP 列显示 ELB 的 VIP 地址
+# 4. 通过 ELB IP 连接数据库
+# 内部 ELB：
+psql -h <ELB-VIP> -U postgres -d mydb
+
+# 公网 ELB：
+psql -h <EIP-地址> -U postgres -d mydb
 ```
+
+输出示例：
+```
+NAME                TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)          AGE
+my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/TCP   5m
+```
+
+`EXTERNAL-IP` 就是 ELB 的 VIP 地址 —— 客户端通过这个地址连接数据库。
 
 ---
 
 ## 配置参考
 
-### LoadBalancerConfig 注解
+### LoadBalancerConfig Annotation
 
-#### 必填注解（`metadata.annotations`）
+#### 必需 Annotation
 
-| 注解 | 说明 | 示例 |
+| Annotation | 说明 | 示例 |
 |---|---|---|
-| `huawei-elb.io/vpc-id` | ELB 所在的 VPC ID | `0d60646b-e3b7-4ad9-b422-015ee7da9a48` |
-| `huawei-elb.io/subnet-id` | Neutron 子网 ID（不是 VPC 子网资源 ID） | `c265b187-a0a8-45cf-9cb3-7c3b757f8ff8` |
+| `huawei-elb.io/vpc-id` | 创建 ELB 所在的 VPC ID | `0d60646b-...` |
+| `huawei-elb.io/subnet-id` | Neutron 子网 ID（不是 VPC 子网资源 ID） | `c265b187-...` |
 | `huawei-elb.io/availability-zones` | 可用区列表（逗号分隔） | `cn-north-4a,cn-north-4b` |
 
-#### 可选注解（`metadata.annotations`）
+#### 可选 Annotation
 
-| 注解 | 默认值 | 说明 |
+| Annotation | 默认值 | 说明 |
 |---|---|---|
-| `huawei-elb.io/public` | `false` | `true` 创建公网 ELB（带 EIP），`false` 创建内部 ELB |
-| `huawei-elb.io/bandwidth-size` | `10` | EIP 带宽大小（Mbit/s），仅公网 ELB 有效 |
-| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | 计费模式：`traffic`（按流量）或 `bandwidth`（按带宽） |
-| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型，`5_bgp` 为 BGP 公网 IP |
-| `huawei-elb.io/region` | 全局 REGION | 为单个 CR 指定不同的华为云区域 |
+| `huawei-elb.io/public` | `false` | `true` = 公网 ELB（带 EIP）；`false` = 内部 ELB |
+| `huawei-elb.io/bandwidth-size` | `10` | EIP 带宽（Mbit/s）—— 仅公网 ELB |
+| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
+| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型；`5_bgp` 为 BGP |
+| `huawei-elb.io/region` | 全局 REGION | 为特定 CR 覆盖华为云区域 |
 
-#### 控制器自动写入的注解
+#### 控制器写入的 Annotation
 
-| 位置 | 注解 | 说明 |
+| 位置 | Annotation | 说明 |
 |---|---|---|
-| `spec.annotations` | `kubernetes.io/elb.id` | 华为云 ELB ID，V1 Operator 复制到 Service，CCM 用于绑定 ELB |
-| `metadata.annotations` | `huawei-elb.io/ready` | `true` 表示 ELB 已就绪，`false` 表示创建中或异常 |
-| `metadata.annotations` | `huawei-elb.io/elb-status` | ELB 的 provisioning 状态（`ACTIVE`、`PENDING_CREATE` 等） |
-| `metadata.annotations` | `huawei-elb.io/public-ip` | 公网 ELB 的 EIP 地址（内部 ELB 为空） |
-| `metadata.annotations` | `huawei-elb.io/error` | 最近的调和错误信息（正常时为空） |
+| `spec.annotations` | `kubernetes.io/elb.id` | ELB ID —— Percona Everest 复制到 Service；CCM 用它绑定 ELB |
+| `metadata.annotations` | `huawei-elb.io/ready` | `true` 表示 ELB 就绪；`false` 表示创建中或出错 |
+| `metadata.annotations` | `huawei-elb.io/elb-status` | ELB 状态：`ACTIVE`、`PENDING_CREATE` 等 |
+| `metadata.annotations` | `huawei-elb.io/public-ip` | EIP 地址（仅公网 ELB） |
+| `metadata.annotations` | `huawei-elb.io/error` | 最近一次错误信息（正常时为空） |
 
 ### Helm Values
 
@@ -432,14 +391,12 @@ kubectl get svc <service-name> -n everest
 | `credentials.sk` | `""` | 华为云 SK |
 | `credentials.projectId` | `""` | 华为云 Project ID |
 | `credentials.region` | `cn-north-4` | 华为云区域 |
-| `existingSecret` | `""` | 使用已有的 Secret（优先于 credentials） |
+| `existingSecret` | `""` | 使用已有 Secret（覆盖 credentials） |
 | `namespace` | `everest-system` | 部署命名空间 |
 | `resources.requests.cpu` | `100m` | CPU 请求 |
 | `resources.requests.memory` | `128Mi` | 内存请求 |
 | `resources.limits.cpu` | `500m` | CPU 限制 |
 | `resources.limits.memory` | `256Mi` | 内存限制 |
-| `healthProbe.readinessProbe.initialDelaySeconds` | `5` | 就绪探针初始延迟 |
-| `healthProbe.livenessProbe.initialDelaySeconds` | `15` | 存活探针初始延迟 |
 
 ---
 
@@ -448,124 +405,60 @@ kubectl get svc <service-name> -n everest
 ### 控制器 Pod 无法启动
 
 ```bash
-# 查看 Pod 事件
 kubectl describe pod -n everest-system -l app=huawei-elb-controller
-
-# 常见原因：
-# 1. 镜像不存在 → 检查镜像是否已导入集群
-# 2. Secret 不存在 → 检查 huawei-cloud-credentials Secret
-# 3. RBAC 权限不足 → 检查 ClusterRole 和 ClusterRoleBinding
 ```
+
+常见原因：
+- **镜像未找到** → 确保镜像已导入集群
+- **Secret 缺失** → 检查 `everest-system` 命名空间中是否存在 `huawei-cloud-credentials` Secret
+- **RBAC 权限不足** → 检查 ClusterRole 和 ClusterRoleBinding
 
 ### ELB 创建失败
 
 ```bash
-# 查看错误注解
+# 查看错误 annotation
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/error}'
 
-# 常见错误：
-# "missing required annotations" → 检查 vpc-id、subnet-id、availability-zones 是否填写
-# "creating ELB: ..." → 查看控制器日志获取华为云 API 错误详情
+# 查看控制器日志获取 API 错误详情
+kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
-### subnet-id 错误
+常见错误：
+- `missing required annotations` → 检查 `vpc-id`、`subnet-id`、`availability-zones`
+- `vip_subnet_cidr_id not found` → 用了 VPC 子网资源 ID 而非 Neutron ID
+- `creating ELB: ...` → 查看控制器日志了解华为云 API 错误详情
 
-> **最常见的错误**：使用了 VPC 子网资源 ID 而非 Neutron 子网 ID。
-
-```
-错误信息: "creating ELB: ... vip_subnet_cidr_id ... not found"
-原因: subnet-id 填了 Virsubnet.Id 而非 SubnetCidr.Id (Neutron ID)
-解决: 运行 go run ./cmd/list-vpcs/ 获取正确的 Neutron 子网 ID
-```
-
-### Service 没有获得外部 IP
+### Service 没有外部 IP
 
 ```bash
-# 1. 检查 LoadBalancerConfig 是否 ready
+# 1. 检查 LoadBalancerConfig 是否就绪
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'
 # 应为 "true"
 
-# 2. 检查 Service 注解
-kubectl get svc <service-name> -o jsonpath='{.metadata.annotations}'
-# 应包含 kubernetes.io/elb.id
+# 2. 检查 Service 是否有 elb.id annotation
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
+# 应显示 ELB ID
 
-# 3. 如果注解正确但没有 IP，检查 CCM 是否运行
+# 3. 检查 CCM 是否运行
 kubectl get pods -A | grep cloud-controller
 ```
 
-### 删除 LoadBalancerConfig 卡住
+### LoadBalancerConfig 删除卡住
 
 ```bash
 # 检查 finalizer 是否存在
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.finalizers}'
 # 应包含 "huawei-elb.io/finalizer"
 
-# 查看控制器日志，确认删除操作是否执行
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=10
+# 查看控制器日志
+kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 
-# 如果 ELB 已被手动删除，控制器会跳过并移除 finalizer
+# 如果 ELB 已在华为云控制台手动删除，
+# 控制器会检测到 404 并自动移除 finalizer。
 ```
 
 ---
 
-## 开发指南
+## 开发
 
-### 从源码构建
-
-```bash
-# 依赖
-go mod tidy
-
-# 编译
-go build ./...
-
-# 代码检查
-go vet ./...
-
-# 本地运行（需要 kubeconfig 和凭证）
-export HUAWEI_CLOUD_AK=...
-export HUAWEI_CLOUD_SK=...
-export HUAWEI_CLOUD_PROJECT_ID=...
-export HUAWEI_CLOUD_REGION=cn-north-4
-go run ./cmd/
-```
-
-### 项目结构
-
-```
-huawei-elb-controller/
-├── cmd/
-│   ├── main.go              # 控制器入口
-│   └── list-vpcs/           # VPC/子网查询工具
-├── internal/
-│   ├── controller/
-│   │   └── loadbalancerconfig_controller.go  # 核心调和逻辑
-│   └── huaweicloud/
-│       ├── client.go         # 华为云客户端构建
-│       └── elb.go            # ELB CRUD 操作
-├── deploy/                   # Kubernetes 部署清单
-│   ├── serviceaccount.yaml
-│   ├── clusterrole.yaml
-│   ├── clusterrolebinding.yaml
-│   └── deployment.yaml
-├── charts/                   # Helm Chart
-│   └── huawei-elb-controller/
-├── examples/                 # 示例 YAML
-│   ├── internal-elb.yaml
-│   └── public-elb.yaml
-├── Dockerfile
-├── Makefile
-└── go.mod
-```
-
-### 调和循环说明
-
-控制器的调和循环遵循以下逻辑：
-
-1. **获取 CR**：从集群获取 LoadBalancerConfig
-2. **标签检查**：跳过没有 `huawei-elb.io/controlled=true` 标签的 CR
-3. **删除处理**：如果有 deletion timestamp，删除 ELB 并移除 finalizer
-4. **Finalizer 确保**：如果没有 finalizer，添加并重新排队
-5. **ELB 创建**：如果 `spec.annotations` 中没有 `elb.id`，创建 ELB
-6. **ELB 状态检查**：如果已有 `elb.id`，查询 ELB 状态，更新 `ready` 注解
-7. **重新排队**：根据状态决定下次调和时间（30s/5min/10s/5min）
+构建说明、架构详情和贡献指南请参见 [DEVELOPMENT.md](DEVELOPMENT.md)。

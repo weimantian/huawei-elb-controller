@@ -4,187 +4,129 @@
 
 ---
 
-## Table of Contents
-
-- [Overview](#overview)
-- [How It Works](#how-it-works)
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [Configuration Reference](#configuration-reference)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-
----
-
 ## Overview
 
-`huawei-elb-controller` is a Kubernetes controller that manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [OpenEverest V1](https://github.com/openeverest/openeverest) (Percona Everest).
+`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [Percona Everest](https://docs.percona.com/everest/) (OpenEverest V1) database clusters.
 
-It solves a specific gap: OpenEverest V1's `LoadBalancerConfig` CR can inject annotations into a K8s Service, but **does not create the Huawei Cloud ELB itself**. This controller fills that gap — it watches `LoadBalancerConfig` CRs, automatically creates/deletes Huawei Cloud ELBs via the ELB v3 API, and writes the ELB ID back into the CR so that V1's operator-created Service can bind the pre-created ELB.
+**The problem it solves**: Percona Everest's `LoadBalancerConfig` CR can pass annotations to a Kubernetes Service, but it doesn't create the Huawei Cloud ELB itself. Without this controller, you'd have to manually create an ELB in the Huawei Cloud console, copy its ID, and paste it into the CR — every time.
+
+**What it does**: Watches `LoadBalancerConfig` CRs, calls the Huawei Cloud ELB v3 API to create/delete ELBs automatically, and writes the ELB ID back into the CR. Percona Everest's operator then picks up the ELB ID, adds it to the Service, and the Huawei Cloud CCM binds the ELB — giving your database cluster an external load-balanced endpoint.
 
 ---
 
 ## How It Works
 
-### Background
-
-OpenEverest V1 is a database cluster management platform by Percona. When a user creates a `DatabaseCluster` CR, the V1 Operator creates a Kubernetes `LoadBalancer`-type Service for external access.
-
-V1's `LoadBalancerConfig` CR mechanism lets users customize the Service's annotations:
-
 ```
-DatabaseCluster.spec.proxy.expose.loadBalancerConfigName → points to a LoadBalancerConfig CR
-LoadBalancerConfig.spec.annotations → V1 Operator copies these annotations to the K8s Service
-```
-
-In Huawei Cloud CCE (Cloud Container Engine) environments, the Cloud Controller Manager (CCM) binds a pre-created ELB via the `kubernetes.io/elb.id` annotation. But V1 doesn't create the ELB — it only passes annotations.
-
-### The Problem
-
-```
-User creates LoadBalancerConfig (spec.annotations is empty)
+You create a LoadBalancerConfig (with ELB params)
     ↓
-V1 Operator creates Service (no elb.id annotation)
+huawei-elb-controller creates ELB via Huawei Cloud API
     ↓
-CCM can't find an ELB → Service never gets an external IP ❌
-```
-
-### The Solution
-
-`huawei-elb-controller` automates ELB creation and write-back:
-
-```
-User creates LoadBalancerConfig (with label + ELB params)
+Controller writes ELB ID back into the LoadBalancerConfig
     ↓
-huawei-elb-controller detects the CR, calls Huawei Cloud ELB v3 API to create ELB
+You create a DatabaseCluster referencing the LoadBalancerConfig
     ↓
-Controller writes ELB ID back to LoadBalancerConfig.spec.annotations["kubernetes.io/elb.id"]
+Percona Everest operator creates a LoadBalancer-type Service
     ↓
-User creates DatabaseCluster referencing the LoadBalancerConfig
+Huawei Cloud CCM binds the ELB → Service gets an external IP
     ↓
-V1 Operator creates Service, copies spec.annotations (including elb.id)
-    ↓
-CCM reads elb.id, binds pre-created ELB → Service gets external IP ✅
-```
-
-### End-to-End Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         User Actions                                 │
-└──────────────┬──────────────────────────────────┬───────────────────┘
-               │                                  │
-    ① Create LoadBalancerConfig         ④ Create DatabaseCluster
-    (with label + ELB params)           (references LoadBalancerConfig)
-               │                                  │
-               ▼                                  ▼
-┌──────────────────────┐              ┌──────────────────────────┐
-│ huawei-elb-controller │              │   V1 Operator             │
-│                      │              │                          │
-│ ② Watches CR         │              │ ⑤ Creates K8s LoadBalancer │
-│   Calls ELB v3 API   │              │   Service                │
-│   Creates Huawei ELB │              │   Copies spec.annotations │
-│                      │              │   (includes elb.id)       │
-│ ③ Writes elb.id to   │              │                          │
-│   spec.annotations   │              │ ⑥ CCM reads elb.id       │
-│   Sets ready=true    │              │   Binds pre-created ELB  │
-└──────────────────────┘              │   Service gets EXTERNAL-IP│
-                                      └──────────────────────────┘
-```
-
-### Timing Protection
-
-To ensure the ELB ID is written before the V1 Operator reads `spec.annotations`, the controller provides a `huawei-elb.io/ready` annotation:
-
-- ELB being created: `ready=false`
-- ELB ACTIVE and ONLINE: `ready=true`
-- ELB being deleted: `ready=false`
-
-Users should wait for `ready=true` before creating a `DatabaseCluster`:
-
-```bash
-kubectl wait loadbalancerconfig <name> \
-  --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
-  --timeout=120s
+You connect to your database via the ELB's IP address
 ```
 
 ---
 
-## Features
+## Prerequisites
 
-### Core Features
+### 1. Kubernetes Cluster
 
-| Feature | Description |
-|---|---|
-| **ELB Creation** | Creates a Huawei Cloud ELB via the ELB v3 API based on `LoadBalancerConfig` annotations |
-| **ELB Deletion** | Automatically deletes the corresponding Huawei Cloud ELB when the CR is deleted, via finalizer mechanism — no leftover resources |
-| **Status Reconciliation** | Continuously polls ELB status, updates status info in `metadata.annotations` |
-| **Idempotency** | After controller restart, finds existing ELB by name — no duplicate creation |
-| **Timing Protection** | `huawei-elb.io/ready` annotation marks whether the ELB is ready; users can wait before creating database clusters |
+A running Kubernetes cluster (1.26+) with:
+- **Huawei Cloud CCM** (Cloud Controller Manager) installed — this is what binds the ELB to the Service
+- **StorageClass** configured (for database persistent volumes)
 
-### Production Features
+> **For Huawei Cloud CCE clusters**: CCM is pre-installed. For self-managed clusters on Huawei Cloud ECS, install CCM separately.
 
-| Feature | Description |
-|---|---|
-| **Label Filtering** | Only processes CRs with `huawei-elb.io/controlled=true` label — doesn't touch other LoadBalancerConfigs |
-| **Error Classification** | Permanent errors (bad params) retry every 5 min; transient errors (network/throttling) retry every 10 sec |
-| **Error Recording** | `huawei-elb.io/error` annotation records the last reconciliation error for troubleshooting |
-| **Conflict Handling** | Uses `retry.RetryOnConflict` to handle concurrent update conflicts with V1 Operator |
-| **Multi-Region** | Supports per-CR region override via `huawei-elb.io/region` annotation |
-| **Health Probes** | Built-in `/readyz` and `/healthz` endpoints for Kubernetes readiness/liveness probes |
-| **Credential Security** | AK/SK injected via Kubernetes Secret — no hardcoding in image |
-| **Helm Chart** | Full Helm Chart with parameterized deployment |
+### 2. Percona Everest (OpenEverest V1)
 
-### Supported ELB Types
+If you haven't installed Percona Everest yet:
 
-| Type | `huawei-elb.io/public` | Description |
-|---|---|---|
-| **Internal ELB** | `false` (default) | Private VPC IP only — suitable for intra-VPC access |
-| **Public ELB** | `true` | Includes a floating IP (EIP) — accessible from the internet |
+```bash
+# Add the Percona Helm repository
+helm repo add percona https://percona.github.io/percona-helm-charts/
+helm repo update
+
+# Install Percona Everest
+helm install everest-core percona/everest \
+    --namespace everest-system \
+    --create-namespace
+```
+
+This installs:
+- Everest operator and server in `everest-system` namespace
+- Database operators (PostgreSQL, MongoDB, PXC) in `everest` namespace
+
+Verify the installation:
+
+```bash
+# Check Everest pods are running
+kubectl get pods -n everest-system
+
+# Get the admin password
+kubectl get secret everest-accounts -n everest-system \
+  -o jsonpath='{.data.users\.yaml}' | base64 --decode | yq '.admin.passwordHash'
+```
+
+> For more details, see the [Percona Everest Quickstart Guide](https://docs.percona.com/everest/quick-install.html).
+
+### 3. Huawei Cloud Account
+
+- An active Huawei Cloud account with **ELB service enabled**
+- **AK** (Access Key) and **SK** (Secret Key) — create at: IAM → My Credentials → Access Keys
+- **Project ID** — found in the console top-right dropdown under your username
+- Know your **VPC ID** and **Neutron Subnet ID** (see Step 2 below)
 
 ---
 
 ## Quick Start
 
-### Prerequisites
+### Step 1: Verify Prerequisites
 
-Before you begin, ensure you have:
+```bash
+# Check Percona Everest is running
+kubectl get pods -n everest-system
+# Expected: everest-operator and everest-server pods Running
 
-1. **Huawei Cloud account**: ELB service enabled, with AK (Access Key) and SK (Secret Key)
-2. **Kubernetes cluster**: OpenEverest V1 and Huawei Cloud CCM installed
-3. **kubectl**: configured with cluster access
-4. **Helm 3** (optional): if deploying via Helm Chart
-5. **Go 1.26+** (optional): if building from source
+# Check CCM is running (Huawei Cloud)
+kubectl get pods -A | grep cloud-controller
+# Expected: cloud-controller-manager pods Running
 
-### Step 1: Get Huawei Cloud Credentials
-
-1. Log in to the [Huawei Cloud Console](https://console.huaweicloud.com/)
-2. Navigate to "Identity and Access Management" → "My Credentials" → "Access Keys"
-3. Create an access key — record your AK and SK
-4. Get your Project ID: found in the top-right dropdown under your username
+# Check database operators are installed
+kubectl get pods -n everest
+# Expected: psql-operator, pxc-operator, psmdb-operator pods Running
+```
 
 ### Step 2: Get VPC and Subnet Information
 
-The controller needs a VPC ID and a Neutron subnet ID to create an ELB.
+The controller needs a **VPC ID** and a **Neutron subnet ID** to create an ELB.
 
-**Method A: Via Console**
+> **Which subnet?** Use the **node subnet** — the subnet where your Kubernetes worker nodes live. Do NOT use the CCE management node subnet or the container/Pod subnet.
 
-1. Navigate to "Virtual Private Cloud" service
-2. Find the VPC where your cluster runs — record the VPC ID (e.g., `0d60646b-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
-3. Click the subnet — record the **Neutron Network ID** (not the subnet resource ID)
+**Method A: Via Huawei Cloud Console**
 
-**Method B: Via CLI tool**
+1. Go to "Virtual Private Cloud" service
+2. Find the VPC where your cluster runs — record the **VPC ID**
+3. Click the subnet where your node IPs belong — record the **Neutron ID** (not the subnet Resource ID)
 
-If you have the controller source code, use the `list-vpcs` tool:
+**Method B: Via the `list-vpcs` CLI tool**
 
 ```bash
-# Set credentials
+# Clone this repo and run the VPC lookup tool
+git clone https://github.com/weimantian/huawei-elb-controller.git
+cd huawei-elb-controller
+
 export HUAWEI_CLOUD_AK=<your-AK>
 export HUAWEI_CLOUD_SK=<your-SK>
 export HUAWEI_CLOUD_PROJECT_ID=<your-ProjectID>
 export HUAWEI_CLOUD_REGION=cn-north-4
 
-# List all VPCs and subnets
 go run ./cmd/list-vpcs/
 ```
 
@@ -192,19 +134,21 @@ Example output:
 ```
 VPC: vpc-a489 (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
   Subnet: subnet-a489
-    Resource ID:  566342ef-db1b-4ffa-a5ec-4185f5d61d40  ← NOT this one
-    Neutron ID:   c265b187-a0a8-45cf-9cb3-7c3b757f8ff8  ← Use THIS one!
+    Resource ID:  566342ef-...  ← NOT this one
+    Neutron ID:   c265b187-...  ← Use THIS one
     CIDR:         192.168.0.0/24
 ```
 
-> **⚠️ Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID** (SubnetCidr.Id), NOT the VPC subnet resource ID (Virsubnet.Id). Using the wrong ID will cause ELB creation to fail.
+> **Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID**, NOT the VPC subnet Resource ID. Using the wrong ID will cause ELB creation to fail.
 
 ### Step 3: Deploy the Controller
 
-#### Option A: Using Helm Chart (Recommended)
+#### Option A: Using Helm (Recommended)
 
 ```bash
-# Deploy with a values file
+git clone https://github.com/weimantian/huawei-elb-controller.git
+cd huawei-elb-controller
+
 cat > my-values.yaml << 'EOF'
 image:
   repository: huawei-elb-controller
@@ -225,7 +169,7 @@ helm install huawei-elb-controller \
   -f my-values.yaml
 ```
 
-#### Option B: Manual Deployment
+#### Option B: Using Raw Manifests
 
 1. Create the credentials Secret:
 
@@ -238,19 +182,15 @@ kubectl create secret generic huawei-cloud-credentials \
   --from-literal=region=cn-north-4
 ```
 
-2. Build and import the image:
+2. Build and import the container image:
 
 ```bash
-# Build linux/amd64 binary
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
-
-# Build Docker image
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
-
-# Import to cluster (push to SWR for CCE, or docker save + ctr import for self-managed)
+# Push to SWR for CCE, or docker save + ctr import for self-managed clusters
 ```
 
-3. Apply RBAC and Deployment:
+3. Apply the manifests:
 
 ```bash
 kubectl apply -f deploy/serviceaccount.yaml
@@ -262,29 +202,30 @@ kubectl apply -f deploy/deployment.yaml
 ### Step 4: Verify the Controller is Running
 
 ```bash
-# Check Pod status
 kubectl get pods -n everest-system -l app=huawei-elb-controller
-
-# View controller logs
-kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
-Expected output:
+Expected:
 ```
 NAME                                     READY   STATUS    RESTARTS   AGE
 huawei-elb-controller-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
 ```
 
-Logs should show:
+Check logs:
+```bash
+kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
-INFO    starting huawei-elb-controller    {"region": "cn-north-4", "metrics": ":8081"}
-INFO    Starting Controller               {"controller": "loadbalancerconfig", ...}
-INFO    Starting workers                  {"controller": "loadbalancerconfig", ..., "worker count": 1}
+
+Expected:
+```
+INFO    starting huawei-elb-controller    {"region": "cn-north-4"}
+INFO    Starting Controller               {"controller": "loadbalancerconfig"}
+INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
 ### Step 5: Create a LoadBalancerConfig
 
-Create an internal ELB (intra-VPC access):
+Create an **internal ELB** (VPC-internal access only):
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -293,18 +234,18 @@ kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
   labels:
-    huawei-elb.io/controlled: "true"    # Required — controller only processes CRs with this label
+    huawei-elb.io/controlled: "true"
   annotations:
     huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
     huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
     huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "false"
 spec:
-  annotations: {}   # Controller auto-fills kubernetes.io/elb.id here
+  annotations: {}
 EOF
 ```
 
-Create a public ELB (with floating IP, internet-accessible):
+Or create a **public ELB** (internet-accessible, with floating IP):
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -319,9 +260,9 @@ metadata:
     huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
     huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
     huawei-elb.io/public: "true"
-    huawei-elb.io/bandwidth-size: "20"               # 20 Mbit/s bandwidth
-    huawei-elb.io/bandwidth-charge-mode: "traffic"    # Pay by traffic
-    huawei-elb.io/public-ip-network-type: "5_bgp"     # BGP public IP
+    huawei-elb.io/bandwidth-size: "20"
+    huawei-elb.io/bandwidth-charge-mode: "traffic"
+    huawei-elb.io/public-ip-network-type: "5_bgp"
 spec:
   annotations: {}
 EOF
@@ -330,27 +271,32 @@ EOF
 ### Step 6: Wait for ELB to be Ready
 
 ```bash
-# Wait for ready annotation to become true (up to 120 seconds)
+# Wait for the ELB to be created and active (up to 120s)
 kubectl wait loadbalancerconfig huawei-internal-elb \
   --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
   --timeout=120s
 
-# Check status
-kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotations}'
-# Expected: {"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
-
+# Verify ELB status
 kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
 # Expected: ACTIVE
+
+# Verify ELB ID was written
+kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotations}'
+# Expected: {"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
 ```
 
+> **Important**: Wait for `ready=true` before creating a DatabaseCluster. This ensures the ELB ID is written into the LoadBalancerConfig before Percona Everest's operator reads it.
+
 ### Step 7: Create a DatabaseCluster
+
+Create a PostgreSQL database cluster that uses the LoadBalancerConfig:
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
 apiVersion: everest.percona.com/v1alpha1
 kind: DatabaseCluster
 metadata:
-  name: my-database
+  name: my-pg
   namespace: everest
 spec:
   engine:
@@ -365,24 +311,40 @@ spec:
       size: 1Gi
     expose:
       type: LoadBalancer
-      loadBalancerConfigName: huawei-internal-elb   # Reference the LBC from Step 5
+      loadBalancerConfigName: huawei-internal-elb
 EOF
 ```
 
-### Step 8: Verify Service ELB Binding
+### Step 8: Verify Database Access
 
 ```bash
-# Check the Service created by V1
-kubectl get svc -n everest -l app.kubernetes.io/instance=my-database
+# 1. Check the database cluster is running
+kubectl get databasecluster -n everest
+# Expected: my-pg is ready
 
-# Check Service annotations for elb.id
+# 2. Find the Service created by Percona Everest
+kubectl get svc -n everest -l app.kubernetes.io/instance=my-pg
+# Expected: a LoadBalancer-type Service with an EXTERNAL-IP
+
+# 3. Verify the Service has the ELB ID annotation
 kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
 # Expected: same ELB ID as in the LoadBalancerConfig
 
-# Check if Service got an external IP
-kubectl get svc <service-name> -n everest
-# Expected: EXTERNAL-IP column shows the ELB's VIP address
+# 4. Connect to the database via the ELB's IP
+# For internal ELB:
+psql -h <ELB-VIP> -U postgres -d mydb
+
+# For public ELB:
+psql -h <EIP-address> -U postgres -d mydb
 ```
+
+Example output:
+```
+NAME                TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)          AGE
+my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/TCP   5m
+```
+
+The `EXTERNAL-IP` is the ELB's VIP address — this is what clients connect to.
 
 ---
 
@@ -390,33 +352,33 @@ kubectl get svc <service-name> -n everest
 
 ### LoadBalancerConfig Annotations
 
-#### Required Annotations (`metadata.annotations`)
+#### Required Annotations
 
 | Annotation | Description | Example |
 |---|---|---|
-| `huawei-elb.io/vpc-id` | VPC ID where the ELB will be created | `0d60646b-e3b7-4ad9-b422-015ee7da9a48` |
-| `huawei-elb.io/subnet-id` | Neutron subnet ID (not VPC subnet resource ID) | `c265b187-a0a8-45cf-9cb3-7c3b757f8ff8` |
+| `huawei-elb.io/vpc-id` | VPC ID where the ELB will be created | `0d60646b-...` |
+| `huawei-elb.io/subnet-id` | Neutron subnet ID (NOT the VPC subnet Resource ID) | `c265b187-...` |
 | `huawei-elb.io/availability-zones` | Comma-separated availability zone list | `cn-north-4a,cn-north-4b` |
 
-#### Optional Annotations (`metadata.annotations`)
+#### Optional Annotations
 
 | Annotation | Default | Description |
 |---|---|---|
-| `huawei-elb.io/public` | `false` | `true` creates a public ELB (with EIP); `false` creates an internal ELB |
-| `huawei-elb.io/bandwidth-size` | `10` | EIP bandwidth size (Mbit/s) — public ELB only |
-| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | Billing mode: `traffic` (pay-per-traffic) or `bandwidth` (pay-per-bandwidth) |
-| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP network type; `5_bgp` for BGP public IP |
-| `huawei-elb.io/region` | Global REGION | Override the Huawei Cloud region for a specific CR |
+| `huawei-elb.io/public` | `false` | `true` = public ELB (with EIP); `false` = internal ELB |
+| `huawei-elb.io/bandwidth-size` | `10` | EIP bandwidth (Mbit/s) — public ELB only |
+| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic` (pay-per-traffic) or `bandwidth` (pay-per-bandwidth) |
+| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP network type; `5_bgp` for BGP |
+| `huawei-elb.io/region` | Global REGION | Override Huawei Cloud region for a specific CR |
 
 #### Controller-Written Annotations
 
 | Location | Annotation | Description |
 |---|---|---|
-| `spec.annotations` | `kubernetes.io/elb.id` | Huawei Cloud ELB ID — V1 Operator copies this to the Service; CCM uses it to bind the ELB |
-| `metadata.annotations` | `huawei-elb.io/ready` | `true` when ELB is ready; `false` during creation or error |
-| `metadata.annotations` | `huawei-elb.io/elb-status` | ELB provisioning status (`ACTIVE`, `PENDING_CREATE`, etc.) |
-| `metadata.annotations` | `huawei-elb.io/public-ip` | EIP address for public ELBs (empty for internal) |
-| `metadata.annotations` | `huawei-elb.io/error` | Last reconciliation error message (empty when healthy) |
+| `spec.annotations` | `kubernetes.io/elb.id` | ELB ID — Percona Everest copies this to the Service; CCM uses it to bind the ELB |
+| `metadata.annotations` | `huawei-elb.io/ready` | `true` when ELB is ready; `false` during creation/error |
+| `metadata.annotations` | `huawei-elb.io/elb-status` | ELB status: `ACTIVE`, `PENDING_CREATE`, etc. |
+| `metadata.annotations` | `huawei-elb.io/public-ip` | EIP address (public ELB only) |
+| `metadata.annotations` | `huawei-elb.io/error` | Last error message (empty when healthy) |
 
 ### Helm Values
 
@@ -435,8 +397,6 @@ kubectl get svc <service-name> -n everest
 | `resources.requests.memory` | `128Mi` | Memory request |
 | `resources.limits.cpu` | `500m` | CPU limit |
 | `resources.limits.memory` | `256Mi` | Memory limit |
-| `healthProbe.readinessProbe.initialDelaySeconds` | `5` | Readiness probe initial delay |
-| `healthProbe.livenessProbe.initialDelaySeconds` | `15` | Liveness probe initial delay |
 
 ---
 
@@ -445,14 +405,13 @@ kubectl get svc <service-name> -n everest
 ### Controller Pod Won't Start
 
 ```bash
-# Check Pod events
 kubectl describe pod -n everest-system -l app=huawei-elb-controller
-
-# Common causes:
-# 1. Image not found → ensure the image is imported into the cluster
-# 2. Secret missing → check huawei-cloud-credentials Secret
-# 3. RBAC insufficient → check ClusterRole and ClusterRoleBinding
 ```
+
+Common causes:
+- **Image not found** → ensure the image is imported into the cluster
+- **Secret missing** → check `huawei-cloud-credentials` Secret exists in `everest-system`
+- **RBAC insufficient** → check ClusterRole and ClusterRoleBinding
 
 ### ELB Creation Failed
 
@@ -460,20 +419,14 @@ kubectl describe pod -n everest-system -l app=huawei-elb-controller
 # Check error annotation
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/error}'
 
-# Common errors:
-# "missing required annotations" → check vpc-id, subnet-id, availability-zones
-# "creating ELB: ..." → check controller logs for Huawei Cloud API error details
+# Check controller logs for API error details
+kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
-### Wrong subnet-id
-
-> **Most common error**: using the VPC subnet resource ID instead of the Neutron subnet ID.
-
-```
-Error: "creating ELB: ... vip_subnet_cidr_id ... not found"
-Cause: subnet-id was set to Virsubnet.Id instead of SubnetCidr.Id (Neutron ID)
-Fix: Run go run ./cmd/list-vpcs/ to get the correct Neutron subnet ID
-```
+Common errors:
+- `missing required annotations` → check `vpc-id`, `subnet-id`, `availability-zones`
+- `vip_subnet_cidr_id not found` → you used the VPC subnet Resource ID instead of the Neutron ID
+- `creating ELB: ...` → check controller logs for Huawei Cloud API error details
 
 ### Service Has No External IP
 
@@ -482,11 +435,11 @@ Fix: Run go run ./cmd/list-vpcs/ to get the correct Neutron subnet ID
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'
 # Should be "true"
 
-# 2. Check Service annotations
-kubectl get svc <service-name> -o jsonpath='{.metadata.annotations}'
-# Should include kubernetes.io/elb.id
+# 2. Check Service has elb.id annotation
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
+# Should show the ELB ID
 
-# 3. If annotations are correct but no IP, check if CCM is running
+# 3. Check CCM is running
 kubectl get pods -A | grep cloud-controller
 ```
 
@@ -497,72 +450,15 @@ kubectl get pods -A | grep cloud-controller
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.finalizers}'
 # Should include "huawei-elb.io/finalizer"
 
-# Check controller logs to confirm deletion was attempted
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=10
+# Check controller logs
+kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 
-# If the ELB was manually deleted, the controller will skip and remove the finalizer
+# If the ELB was manually deleted in Huawei Cloud console,
+# the controller will detect the 404 and remove the finalizer automatically.
 ```
 
 ---
 
 ## Development
 
-### Build from Source
-
-```bash
-# Dependencies
-go mod tidy
-
-# Build
-go build ./...
-
-# Lint
-go vet ./...
-
-# Run locally (requires kubeconfig and credentials)
-export HUAWEI_CLOUD_AK=...
-export HUAWEI_CLOUD_SK=...
-export HUAWEI_CLOUD_PROJECT_ID=...
-export HUAWEI_CLOUD_REGION=cn-north-4
-go run ./cmd/
-```
-
-### Project Structure
-
-```
-huawei-elb-controller/
-├── cmd/
-│   ├── main.go              # Controller entry point
-│   └── list-vpcs/           # VPC/subnet lookup tool
-├── internal/
-│   ├── controller/
-│   │   └── loadbalancerconfig_controller.go  # Core reconcile logic
-│   └── huaweicloud/
-│       ├── client.go         # Huawei Cloud client builder
-│       └── elb.go            # ELB CRUD operations
-├── deploy/                   # Kubernetes deployment manifests
-│   ├── serviceaccount.yaml
-│   ├── clusterrole.yaml
-│   ├── clusterrolebinding.yaml
-│   └── deployment.yaml
-├── charts/                   # Helm Chart
-│   └── huawei-elb-controller/
-├── examples/                 # Example YAML
-│   ├── internal-elb.yaml
-│   └── public-elb.yaml
-├── Dockerfile
-├── Makefile
-└── go.mod
-```
-
-### Reconciliation Loop
-
-The controller's reconcile loop follows this logic:
-
-1. **Fetch CR**: Get the LoadBalancerConfig from the cluster
-2. **Label check**: Skip CRs without `huawei-elb.io/controlled=true` label
-3. **Deletion handling**: If deletion timestamp is set, delete the ELB and remove the finalizer
-4. **Finalizer ensure**: If no finalizer exists, add one and requeue
-5. **ELB creation**: If no `elb.id` in `spec.annotations`, create a new ELB
-6. **ELB status check**: If `elb.id` exists, query ELB status and update `ready` annotation
-7. **Requeue**: Schedule next reconciliation based on state (30s/5min/10s/5min)
+For build instructions, architecture details, and contributing guidelines, see [DEVELOPMENT.md](DEVELOPMENT.md).
