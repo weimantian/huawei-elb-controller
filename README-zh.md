@@ -161,11 +161,26 @@ kubectl get pods -A | grep cloud-controller
 
 控制器需要 **VPC ID** 和 **Neutron 子网 ID** 来创建 ELB。
 
-> **用哪个子网？** 使用**节点子网** —— 即 Kubernetes 工作节点 IP 所在的子网。不要使用 CCE 管理节点子网或容器/Pod 子网。
+> **用哪个子网？** 使用**节点子网** —— 即 Kubernetes 工作节点 IP 所在的子网。不要使用 CCE 管理节点子网或容器/Pod 子网。即使有多个节点，也只需要一个子网 ID —— 选节点 IP 所在的那个子网即可。
 
 > **为什么不能用控制台？** 华为云 VPC 控制台只显示 VPC 子网资源 ID，不显示 ELB API 需要的 Neutron 子网 ID。请使用下面的 `list-vpcs` 命令行工具获取正确的 ID。
 
-使用 `list-vpcs` 命令行工具：
+**步骤 2a：查看节点 IP**
+
+```bash
+kubectl get nodes -o wide
+```
+
+输出示例：
+```
+NAME          STATUS   ROLES    AGE   VERSION    INTERNAL-IP      EXTERNAL-IP
+node-1        Ready    <none>   10d   v1.31.0    192.168.0.131    <none>
+node-2        Ready    <none>   10d   v1.31.0    192.168.0.132    <none>
+```
+
+记下 `INTERNAL-IP` 的值（如 `192.168.0.131`、`192.168.0.132`），下一步用来匹配子网。
+
+**步骤 2b：列出 VPC 并找到匹配的子网**
 
 ```bash
 # 克隆仓库并运行 VPC 查询工具
@@ -180,14 +195,25 @@ export HUAWEI_CLOUD_REGION=cn-north-4
 go run ./cmd/list-vpcs/
 ```
 
-输出示例：
+该工具会列出账号下**所有 VPC 和子网**。找到 **CIDR 包含节点 IP** 的那个子网：
+
 ```
-VPC: vpc-a489 (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
-  Subnet: subnet-a489
+VPC: vpc-prod (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
+  Subnet: subnet-prod
     Resource ID:  566342ef-...  ← 不是这个
     Neutron ID:   c265b187-...  ← 用这个！
-    CIDR:         192.168.0.0/24
+    CIDR:         192.168.0.0/24  ← 包含 192.168.0.131 ✓
+
+VPC: vpc-mgmt (a1b2c3d4-...) CIDR: 10.0.0.0/16
+  Subnet: subnet-mgmt
+    Resource ID:  d4c3b2a1-...
+    Neutron ID:   e5f6a7b8-...
+    CIDR:         10.0.0.0/24    ← 不包含节点 IP ✗
 ```
+
+上例中，节点 IP 为 `192.168.0.131` 和 `192.168.0.132`，落在 `192.168.0.0/24` 网段内，所以选用：
+- **VPC ID**：`0d60646b-e3b7-4ad9-b422-015ee7da9a48`
+- **Neutron 子网 ID**：`c265b187-...`
 
 > **重要**：`huawei-elb.io/subnet-id` 需要的是 **Neutron 子网 ID**，不是 VPC 子网资源 ID。用错 ID 会导致 ELB 创建失败。
 

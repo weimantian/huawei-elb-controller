@@ -161,11 +161,26 @@ kubectl get pods -A | grep cloud-controller
 
 The controller needs a **VPC ID** and a **Neutron subnet ID** to create an ELB.
 
-> **Which subnet?** Use the **node subnet** — the subnet where your Kubernetes worker nodes live. Do NOT use the CCE management node subnet or the container/Pod subnet.
+> **Which subnet?** Use the **node subnet** — the subnet where your Kubernetes worker nodes live. Do NOT use the CCE management node subnet or the container/Pod subnet. Even if you have many nodes, you only need ONE subnet ID — pick the one where your nodes' IPs live.
 
 > **Why not the console?** The Huawei Cloud VPC console only shows the VPC subnet Resource ID, not the Neutron subnet ID that the ELB API requires. Use the `list-vpcs` CLI tool below to get the correct ID.
 
-Use the `list-vpcs` CLI tool:
+**Step 2a: Find your node IPs**
+
+```bash
+kubectl get nodes -o wide
+```
+
+Example output:
+```
+NAME          STATUS   ROLES    AGE   VERSION    INTERNAL-IP      EXTERNAL-IP
+node-1        Ready    <none>   10d   v1.31.0    192.168.0.131    <none>
+node-2        Ready    <none>   10d   v1.31.0    192.168.0.132    <none>
+```
+
+Note the `INTERNAL-IP` values (e.g., `192.168.0.131`, `192.168.0.132`) — you'll match these to a subnet in the next step.
+
+**Step 2b: List VPCs and find the matching subnet**
 
 ```bash
 # Clone this repo and run the VPC lookup tool
@@ -180,14 +195,25 @@ export HUAWEI_CLOUD_REGION=cn-north-4
 go run ./cmd/list-vpcs/
 ```
 
-Example output:
+The tool lists ALL VPCs and subnets in your project. Find the subnet whose **CIDR contains your node IPs**:
+
 ```
-VPC: vpc-a489 (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
-  Subnet: subnet-a489
+VPC: vpc-prod (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
+  Subnet: subnet-prod
     Resource ID:  566342ef-...  ← NOT this one
     Neutron ID:   c265b187-...  ← Use THIS one
-    CIDR:         192.168.0.0/24
+    CIDR:         192.168.0.0/24  ← Contains 192.168.0.131 ✓
+
+VPC: vpc-mgmt (a1b2c3d4-...) CIDR: 10.0.0.0/16
+  Subnet: subnet-mgmt
+    Resource ID:  d4c3b2a1-...
+    Neutron ID:   e5f6a7b8-...
+    CIDR:         10.0.0.0/24    ← Does NOT contain node IPs ✗
 ```
+
+In this example, your nodes are at `192.168.0.131` and `192.168.0.132`, which fall within `192.168.0.0/24`. So use:
+- **VPC ID**: `0d60646b-e3b7-4ad9-b422-015ee7da9a48`
+- **Neutron subnet ID**: `c265b187-...`
 
 > **Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID**, NOT the VPC subnet Resource ID. Using the wrong ID will cause ELB creation to fail.
 
