@@ -215,6 +215,8 @@ In this example, your nodes are at `192.168.0.131` and `192.168.0.132`, which fa
 - **VPC ID**: `0d60646b-e3b7-4ad9-b422-015ee7da9a48`
 - **Neutron subnet ID**: `c265b187-...`
 
+> **How to match?** For a `/24` subnet, check if the first three octets of your node IP match the CIDR's network portion. For example, `192.168.0.131` matches `192.168.0.0/24` (first three octets `192.168.0` match), but not `192.168.1.0/24` or `10.0.0.0/24`.
+
 > **Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID**, NOT the VPC subnet Resource ID. Using the wrong ID will cause ELB creation to fail.
 
 ### Step 3: Deploy the Controller
@@ -545,6 +547,24 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 # If the ELB was manually deleted in Huawei Cloud console,
 # the controller will detect the 404 and remove the finalizer automatically.
 ```
+
+---
+
+## Multiple Clusters
+
+If you have multiple Kubernetes (CCE) clusters, **each cluster needs its own deployment** of both OpenEverest and the huawei-elb-controller. Both are cluster-scoped applications — they run as pods inside a specific cluster and only manage resources within that cluster.
+
+**Per-cluster setup:**
+
+| Component | Per cluster? | Why |
+|---|---|---|
+| OpenEverest | Yes | Manages database clusters via Kubernetes CRDs within the cluster |
+| huawei-elb-controller | Yes | Watches `LoadBalancerConfig` CRs and creates ELBs for that cluster's Services |
+| Huawei Cloud credentials | Same for all | Same AK/SK/ProjectID can be reused across clusters |
+
+**ELB placement:** Each cluster's `LoadBalancerConfig` should specify the VPC and subnet where that cluster's nodes live. If all clusters are in the same VPC, they share the same VPC ID but may use different subnets. If clusters are in different VPCs, each uses its own VPC ID.
+
+**ELB isolation:** ELBs are not shared across clusters. Each `LoadBalancerConfig` creates its own ELB. Two clusters in the same VPC will have separate ELBs with separate VIPs.
 
 ---
 
