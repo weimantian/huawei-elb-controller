@@ -14,6 +14,17 @@
 
 ---
 
+## 功能特性
+
+- **零配置自动探测** —— 从集群节点自动探测 VPC、子网和可用区（与 EKS/GKE 体验一致）
+- **默认公网 ELB** —— 默认创建带 EIP 的公网 ELB；设 `huawei-elb.io/public: "false"` 创建内网 ELB
+- **完整生命周期管理** —— 通过华为云 ELB v3 API 创建、监控、删除 ELB，带 finalizer 安全保障
+- **状态可见** —— 在 CR 上暴露 `ready`、`elb-status`、`error`、`public-ip` 注解
+- **UI 友好** —— 与 OpenEverest Web UI 无缝协作；端到端配置无需 `kubectl`
+- **多区域支持** —— 通过 `huawei-elb.io/region` 注解按 CR 覆盖区域
+
+---
+
 ## 工作流程
 
 ```
@@ -25,7 +36,7 @@ huawei-elb-controller 通过华为云 API 创建 ELB
     ↓
 你创建 DatabaseCluster，引用该 LoadBalancerConfig
     ↓
-Percona Everest operator 创建 LoadBalancer 类型 Service
+OpenEverest operator 创建 LoadBalancer 类型 Service
     ↓
 华为云 CCM 绑定 ELB → Service 获得外部 IP
     ↓
@@ -278,7 +289,7 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 
 ### 步骤 4：创建 LoadBalancerConfig
 
-在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。你只需指定创建内网还是公网 ELB。
+在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。默认 ELB 类型为**公网**（带 EIP）。设 `huawei-elb.io/public: "false"` 创建内网 ELB。
 
 #### 方式 A（推荐）：零配置 via OpenEverest UI
 
@@ -287,17 +298,30 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
 2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
 3. 点击 **Create configuration**。
-4. 填写配置**名称**（例如 `huawei-internal-elb`）。
-5. 如果是**公网 ELB**，添加一个注解：
-   - Key: `huawei-elb.io/public`，Value: `true`
-   - 如果是**内网 ELB**，跳过此步 —— 注解留空即可。
-  6. 点击 **Save** 保存。
+4. 填写配置**名称**（例如 `huawei-elb`）。
+5. 如果是**内网 ELB**，添加一个注解：
+   - Key: `huawei-elb.io/public`，Value: `false`
+   - 如果是**公网 ELB**（默认），跳过此步 —— 注解留空即可。
+6. 点击 **Save** 保存。
 
 控制器会自动检测到新的 CR，从节点自动探测 VPC/子网/可用区，并在几秒内创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
 
 #### 方式 B：零配置 via kubectl
 
-**内网 ELB**（默认，仅 VPC 内访问）：
+**公网 ELB**（默认，带弹性公网 IP，可从互联网访问）：
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-elb
+spec:
+  annotations: {}
+EOF
+```
+
+**内网 ELB**（仅 VPC 内访问 —— 只需填一个注解）：
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -306,21 +330,8 @@ kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
 spec:
-  annotations: {}
-EOF
-```
-
-**公网 ELB**（带弹性公网 IP，可从互联网访问 —— 只需填一个注解）：
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-public-elb
-spec:
   annotations:
-    huawei-elb.io/public: "true"
+    huawei-elb.io/public: "false"
 EOF
 ```
 
@@ -344,7 +355,7 @@ EOF
 | `huawei-elb.io/vpc-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
 | `huawei-elb.io/subnet-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
 | `huawei-elb.io/availability-zones` | ✅ 从节点标签自动探测 | 需要时覆盖 |
-| `huawei-elb.io/public` | 默认 `false`（内网） | 设为 `"true"` 创建公网 ELB |
+| `huawei-elb.io/public` | 默认 `true`（公网） | 设为 `"false"` 创建内网 ELB |
 
 公网 ELB 可选参数（仅 `public: "true"` 时生效）：
 
@@ -358,20 +369,20 @@ EOF
 
 ```bash
 # 等待 ELB 创建完成并激活（最多 120 秒）
-kubectl wait loadbalancerconfig huawei-internal-elb \
+kubectl wait loadbalancerconfig huawei-elb \
   --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
   --timeout=120s
 
 # 验证 ELB 状态
-kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
+kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
 # 预期：ACTIVE
 
 # 验证 ELB ID 已写入
-kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotations}'
+kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.spec.annotations}'
 # 预期：{"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
 ```
 
-> **重要**：在创建 DatabaseCluster 之前，务必等待 `ready=true`。这确保 ELB ID 已写入 LoadBalancerConfig，Percona Everest operator 读取时能获取到。
+> **重要**：在创建 DatabaseCluster 之前，务必等待 `ready=true`。这确保 ELB ID 已写入 LoadBalancerConfig，OpenEverest operator 读取时能获取到。
 
 ### 步骤 6：创建数据库集群
 
@@ -387,7 +398,7 @@ kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotatio
 6. **Step 4 — Advanced Configurations**：
    - 设置 **Storage class**（例如 `csi-disk`）。
    - 启用 **External access**（LoadBalancer）。
-   - 选择步骤 4 中创建的 **Load Balancer config**（例如 `huawei-internal-elb`）。
+   - 选择步骤 4 中创建的 **Load Balancer config**（例如 `huawei-elb`）。
 7. **Step 5 — Monitoring**：配置监控（或跳过）。
 8. 点击 **Create database**。
 
@@ -425,7 +436,7 @@ spec:
       size: 1Gi
     expose:
       type: LoadBalancer
-      loadBalancerConfigName: huawei-internal-elb
+      loadBalancerConfigName: huawei-elb
 EOF
 ```
 
@@ -435,7 +446,7 @@ EOF
 > ```yaml
 >     expose:
 >       type: LoadBalancer
->       loadBalancerConfigName: huawei-internal-elb
+>       loadBalancerConfigName: huawei-elb
 >       ipSourceRanges:
 >         - "10.0.0.0/24"
 > ```
@@ -604,7 +615,7 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 
 | 位置 | Annotation | 说明 |
 |---|---|---|
-| `spec.annotations` | `kubernetes.io/elb.id` | ELB ID —— Percona Everest 复制到 Service；CCM 用它绑定 ELB |
+| `spec.annotations` | `kubernetes.io/elb.id` | ELB ID —— OpenEverest 复制到 Service；CCM 用它绑定 ELB |
 | `metadata.annotations` | `huawei-elb.io/ready` | `true` 表示 ELB 就绪；`false` 表示创建中或出错 |
 | `metadata.annotations` | `huawei-elb.io/elb-status` | ELB 状态：`ACTIVE`、`PENDING_CREATE` 等 |
 | `metadata.annotations` | `huawei-elb.io/public-ip` | EIP 地址（仅公网 ELB） |
@@ -723,3 +734,9 @@ CCE + 本控制器：
 ## 开发
 
 构建说明、架构详情和贡献指南请参见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+---
+
+## 开源许可证
+
+本项目基于 Apache License 2.0 开源。详见 [LICENSE](LICENSE)。

@@ -14,6 +14,17 @@
 
 ---
 
+## Features
+
+- **Zero-config auto-detection** — automatically detects VPC, subnet, and availability zones from cluster nodes (like EKS/GKE)
+- **Public ELB by default** — creates a public ELB with EIP out of the box; set `huawei-elb.io/public: "false"` for internal
+- **Full lifecycle management** — creates, monitors, and deletes ELBs via Huawei Cloud ELB v3 API with finalizer safety
+- **Status visibility** — exposes `ready`, `elb-status`, `error`, and `public-ip` annotations on the CR
+- **UI-friendly** — works seamlessly with the OpenEverest web UI; no `kubectl` required for end-to-end setup
+- **Multi-region support** — override the region per CR via the `huawei-elb.io/region` annotation
+
+---
+
 ## How It Works
 
 ```
@@ -25,7 +36,7 @@ Controller writes ELB ID back into the LoadBalancerConfig
     ↓
 You create a DatabaseCluster referencing the LoadBalancerConfig
     ↓
-Percona Everest operator creates a LoadBalancer-type Service
+OpenEverest operator creates a LoadBalancer-type Service
     ↓
 Huawei Cloud CCM binds the ELB → Service gets an external IP
     ↓
@@ -279,7 +290,7 @@ INFO    Starting workers                  {"controller": "loadbalancerconfig", "
 
 ### Step 4: Create a LoadBalancerConfig
 
-On CCE, the controller auto-detects VPC, subnet, and availability zones from cluster nodes — no manual configuration needed. You only need to specify whether you want an internal or public ELB.
+On CCE, the controller auto-detects VPC, subnet, and availability zones from cluster nodes — no manual configuration needed. The default ELB type is **public** (with EIP). Set `huawei-elb.io/public: "false"` for an internal ELB.
 
 #### Option A (Recommended): Zero-config via OpenEverest UI
 
@@ -288,17 +299,30 @@ Create a LoadBalancerConfig from the OpenEverest web UI — no `kubectl` needed:
 1. Open the OpenEverest UI in your browser (e.g., `http://localhost:8080` if port-forwarded).
 2. Navigate to **Settings → Policies & Configurations → Load Balancer Configuration**.
 3. Click **Create configuration**.
-4. Fill in a **Name** (e.g., `huawei-internal-elb`).
-5. For a **public ELB**, add one annotation:
-   - Key: `huawei-elb.io/public`, Value: `true`
-   - For an **internal ELB**, skip this step — leave annotations empty.
-  6. Click **Save**.
+4. Fill in a **Name** (e.g., `huawei-elb`).
+5. For an **internal ELB**, add one annotation:
+   - Key: `huawei-elb.io/public`, Value: `false`
+   - For a **public ELB** (default), skip this step — leave annotations empty.
+6. Click **Save**.
 
 The controller will automatically detect the new CR, auto-detect VPC/subnet/AZ from nodes, and create the ELB within a few seconds. Verify with `kubectl get loadbalancerconfig`.
 
 #### Option B: Zero-config via kubectl
 
-**Internal ELB** (default, VPC-internal access only):
+**Public ELB** (default, internet-accessible with EIP):
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: huawei-elb
+spec:
+  annotations: {}
+EOF
+```
+
+**Internal ELB** (VPC-internal access only — one annotation):
 
 ```bash
 cat <<'EOF' | kubectl apply -f -
@@ -307,21 +331,8 @@ kind: LoadBalancerConfig
 metadata:
   name: huawei-internal-elb
 spec:
-  annotations: {}
-EOF
-```
-
-**Public ELB** (internet-accessible, with floating IP — only one annotation needed):
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-public-elb
-spec:
   annotations:
-    huawei-elb.io/public: "true"
+    huawei-elb.io/public: "false"
 EOF
 ```
 
@@ -345,7 +356,7 @@ Auto-detection covers VPC, subnet, and availability zones — but **public vs in
 | `huawei-elb.io/vpc-id` | ✅ Auto-detected from node IPs | Override if needed |
 | `huawei-elb.io/subnet-id` | ✅ Auto-detected from node IPs | Override if needed |
 | `huawei-elb.io/availability-zones` | ✅ Auto-detected from node labels | Override if needed |
-| `huawei-elb.io/public` | Defaults to `false` (internal) | Set `"true"` for public ELB |
+| `huawei-elb.io/public` | Defaults to `true` (public) | Set `"false"` for internal ELB |
 
 Optional public ELB parameters (only effective when `public: "true"`):
 
@@ -359,20 +370,20 @@ Optional public ELB parameters (only effective when `public: "true"`):
 
 ```bash
 # Wait for the ELB to be created and active (up to 120s)
-kubectl wait loadbalancerconfig huawei-internal-elb \
+kubectl wait loadbalancerconfig huawei-elb \
   --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
   --timeout=120s
 
 # Verify ELB status
-kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
+kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
 # Expected: ACTIVE
 
 # Verify ELB ID was written
-kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotations}'
+kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.spec.annotations}'
 # Expected: {"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
 ```
 
-> **Important**: Wait for `ready=true` before creating a DatabaseCluster. This ensures the ELB ID is written into the LoadBalancerConfig before Percona Everest's operator reads it.
+The ELB ID in `spec.annotations` is what OpenEverest's operator reads when creating a Service for your database cluster in the next step.
 
 ### Step 6: Create a DatabaseCluster
 
@@ -388,7 +399,7 @@ Create a database cluster that uses the LoadBalancerConfig created in Step 4.
 6. **Step 4 — Advanced Configurations**:
    - Set **Storage class** (e.g., `csi-disk`).
    - Enable **External access** (LoadBalancer).
-   - Select the **Load Balancer config** created in Step 4 (e.g., `huawei-internal-elb`).
+   - Select the **Load Balancer config** created in Step 4 (e.g., `huawei-elb`).
 7. **Step 5 — Monitoring**: Configure monitoring (or skip).
 8. Click **Create database**.
 
@@ -426,7 +437,7 @@ spec:
       size: 1Gi
     expose:
       type: LoadBalancer
-      loadBalancerConfigName: huawei-internal-elb
+      loadBalancerConfigName: huawei-elb
 EOF
 ```
 
@@ -724,3 +735,9 @@ The user experience is the same: create config → get load balancer → connect
 ## Development
 
 For build instructions, architecture details, and contributing guidelines, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+---
+
+## License
+
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
