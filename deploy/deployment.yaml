@@ -18,8 +18,9 @@ spec:
       serviceAccountName: huawei-elb-controller
       containers:
         - name: controller
-          image: huawei-elb-controller:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
+          command: ["/huawei-elb-controller"]
           args:
             - --metrics-bind-address=:8081
           env:
@@ -43,6 +44,8 @@ spec:
                 secretKeyRef:
                   name: huawei-cloud-credentials
                   key: region
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-certificates.crt
           resources:
             requests:
               cpu: 100m
@@ -54,18 +57,19 @@ spec:
             - name: metrics
               containerPort: 8081
               protocol: TCP
-            - name: health
-              containerPort: 8082
-              protocol: TCP
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: health
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: health
-            initialDelaySeconds: 15
-            periodSeconds: 20
+          volumeMounts:
+            - name: controller-binary
+              mountPath: /huawei-elb-controller
+              readOnly: true
+            - name: ca-certs
+              mountPath: /etc/ssl/certs
+              readOnly: true
+      volumes:
+        - name: controller-binary
+          hostPath:
+            path: /tmp/controller-binary
+            type: File
+        - name: ca-certs
+          hostPath:
+            path: /etc/ssl/certs
+            type: Directory

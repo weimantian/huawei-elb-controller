@@ -4,7 +4,9 @@
 // This controller watches LoadBalancerConfig CRs (everest.percona.com/v1alpha1).
 // If the CR has huawei-elb.io/* annotations in spec.annotations, it uses those
 // parameters. If the annotations are missing, it auto-detects VPC/subnet/AZ
-// from the cluster's nodes (zero-config, similar to EKS/GKE). For each CR, it:
+// from the cluster's nodes (zero-config, similar to EKS/GKE) and stores them in
+// metadata.annotations (NOT spec.annotations) to avoid conflicts with the
+// OpenEverest UI which edits spec.annotations. For each CR, it:
 //
 //  1. Reads or auto-detects ELB creation parameters (VPC, subnet, AZs).
 //  2. Creates a Huawei Cloud ELB via the ELB v3 API.
@@ -167,13 +169,15 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{RequeueAfter: errorRequeue}, nil
 		}
 
-		// Write detected values into spec.annotations so subsequent reconciles
-		// use the explicit path. Also mark as auto-detected for transparency.
+		// Write detected values into metadata.annotations (NOT spec.annotations)
+		// to avoid resourceVersion conflicts with the OpenEverest UI which edits
+		// spec.annotations. The ELB ID (kubernetes.io/elb.id) is the only key
+		// written to spec.annotations, and that happens once after ELB creation.
 		logger.Info("Auto-detected VPC/subnet/AZ from cluster nodes",
 			"vpc-id", vpcID, "subnet-id", subnetID, "azs", azs)
 
 		if err := r.updateWithRetry(ctx, req.NamespacedName, func(latest *unstructured.Unstructured) error {
-			anns, _, _ := unstructured.NestedStringMap(latest.Object, "spec", "annotations")
+			anns := latest.GetAnnotations()
 			if anns == nil {
 				anns = map[string]string{}
 			}
@@ -181,7 +185,8 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 			anns["huawei-elb.io/subnet-id"] = subnetID
 			anns["huawei-elb.io/availability-zones"] = strings.Join(azs, ",")
 			anns["huawei-elb.io/auto-detected"] = "true"
-			return unstructured.SetNestedStringMap(latest.Object, anns, "spec", "annotations")
+			latest.SetAnnotations(anns)
+			return nil
 		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("writing auto-detected params: %w", err)
 		}
@@ -357,10 +362,15 @@ func (r *LoadBalancerConfigReconciler) getLoadBalancerConfig(
 	return lbc, nil
 }
 
-// isControlled returns true if the CR has huawei-elb.io/vpc-id in spec.annotations,
+// isControlled returns true if the CR has huawei-elb.io/vpc-id in either
+// spec.annotations (user-specified) or metadata.annotations (auto-detected),
 // indicating it should be managed by this controller.
 func isControlled(lbc *unstructured.Unstructured) bool {
-	return getSpecAnnotation(lbc, "huawei-elb.io/vpc-id") != ""
+	if getSpecAnnotation(lbc, "huawei-elb.io/vpc-id") != "" {
+		return true
+	}
+	anns := lbc.GetAnnotations()
+	return anns["huawei-elb.io/vpc-id"] != ""
 }
 
 
@@ -537,33 +547,46 @@ func (r *LoadBalancerConfigReconciler) setAnnotation(
 	})
 }
 
-// parseELBOptions reads ELB creation parameters from spec.annotations.
+// parseELBOptions reads ELB creation parameters.
 //
-// If the annotations were auto-detected (huawei-elb.io/auto-detected="true"),
-// they are already present in spec.annotations from the auto-detection phase.
-// Users can also set them manually to override auto-detection.
+// Required params are read from spec.annotations (user-specified) first,
+// falling back to metadata.annotations (auto-detected). This avoids writing
+// auto-detected params to spec.annotations, which would conflict with the
+// OpenEverest UI.
 //
-// Required annotations (in spec.annotations, auto-detected if missing):
+// Required params (spec.annotations or metadata.annotations):
 //   - huawei-elb.io/vpc-id
 //   - huawei-elb.io/subnet-id
 //   - huawei-elb.io/availability-zones (comma-separated)
 //
-// Optional annotations (in spec.annotations, for public ELB):
+// Optional params (spec.annotations only, for public ELB):
 //   - huawei-elb.io/public: "true" (default "false")
 //   - huawei-elb.io/bandwidth-size: e.g. "20" (default 10)
 //   - huawei-elb.io/bandwidth-charge-mode: "traffic" or "bandwidth" (default "traffic")
 //   - huawei-elb.io/public-ip-network-type: e.g. "5_bgp" (default "5_bgp")
 //
-// Note: These annotations are read from spec.annotations (not metadata.annotations)
-// so they can be set via the OpenEverest UI. They will also be copied to the
-// Service by the Everest operator, but CCM only reads kubernetes.io/elb.id and
-// ignores the huawei-elb.io/* keys.
+// Note: kubernetes.io/elb.id is written to spec.annotations after ELB creation
+// so the OpenEverest operator can copy it to the K8s LoadBalancer Service.
 func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOption, error) {
-	a := getSpecAnnotations(lbc)
+	specAnns := getSpecAnnotations(lbc)
+	metaAnns := lbc.GetAnnotations()
+	if metaAnns == nil {
+		metaAnns = map[string]string{}
+	}
 
-	vpcID := a["huawei-elb.io/vpc-id"]
-	subnetID := a["huawei-elb.io/subnet-id"]
-	azStr := a["huawei-elb.io/availability-zones"]
+	// Prefer spec.annotations (user-specified), fall back to metadata.annotations (auto-detected).
+	vpcID := specAnns["huawei-elb.io/vpc-id"]
+	if vpcID == "" {
+		vpcID = metaAnns["huawei-elb.io/vpc-id"]
+	}
+	subnetID := specAnns["huawei-elb.io/subnet-id"]
+	if subnetID == "" {
+		subnetID = metaAnns["huawei-elb.io/subnet-id"]
+	}
+	azStr := specAnns["huawei-elb.io/availability-zones"]
+	if azStr == "" {
+		azStr = metaAnns["huawei-elb.io/availability-zones"]
+	}
 
 	if vpcID == "" || subnetID == "" || azStr == "" {
 		return nil, fmt.Errorf(
@@ -588,13 +611,13 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 		},
 	}
 
-	if strings.EqualFold(a["huawei-elb.io/public"], "true") {
+	if strings.EqualFold(specAnns["huawei-elb.io/public"], "true") {
 		opt.IsPublic = true
-		if bw, err := strconv.Atoi(a["huawei-elb.io/bandwidth-size"]); err == nil && bw > 0 {
+		if bw, err := strconv.Atoi(specAnns["huawei-elb.io/bandwidth-size"]); err == nil && bw > 0 {
 			opt.BandwidthSize = int32(bw)
 		}
-		opt.BandwidthChargeMode = a["huawei-elb.io/bandwidth-charge-mode"]
-		opt.PublicIPNetworkType = a["huawei-elb.io/public-ip-network-type"]
+		opt.BandwidthChargeMode = specAnns["huawei-elb.io/bandwidth-charge-mode"]
+		opt.PublicIPNetworkType = specAnns["huawei-elb.io/public-ip-network-type"]
 	}
 
 	return opt, nil
