@@ -114,9 +114,24 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Skip CRs without huawei-elb.io parameters in spec.annotations
-	// (non-deletion path only). Deletion is handled above via finalizer.
+	// If the LBC is not controlled (no huawei-elb.io/vpc-id) but IS in use
+	// (referenced by a DatabaseCluster), write an error annotation so the
+	// user knows required annotations are missing. Without this feedback, the
+	// user sees a Service stuck in <pending> with no clue why.
 	if !isControlled(lbc) {
+		if isInUse(lbc) {
+			anns := lbc.GetAnnotations()
+			errMsg := "LoadBalancerConfig is in use but missing required annotations: " +
+				"huawei-elb.io/vpc-id, huawei-elb.io/subnet-id, huawei-elb.io/availability-zones"
+			if anns[errorAnnotation] != errMsg {
+				_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
+			}
+			if anns[readyAnnotation] != "false" {
+				_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
+			}
+			logger.Info("LoadBalancerConfig in use but missing huawei-elb.io annotations",
+				"name", lbc.GetName())
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -304,6 +319,23 @@ func hasHuaweiELBParams(obj client.Object) bool {
 	return getSpecAnnotation(u, "huawei-elb.io/vpc-id") != ""
 }
 
+// isInUse returns true if the CR has status.inUse == true,
+// indicating it is referenced by a DatabaseCluster.
+func isInUse(lbc *unstructured.Unstructured) bool {
+	inUse, found, _ := unstructured.NestedBool(lbc.Object, "status", "inUse")
+	return found && inUse
+}
+
+// isInUseObj checks if a client.Object is an in-use LoadBalancerConfig.
+// Used by the event predicate to filter CRs.
+func isInUseObj(obj client.Object) bool {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return false
+	}
+	return isInUse(u)
+}
+
 // getSpecAnnotations returns all annotations from spec.annotations as a map.
 func getSpecAnnotations(lbc *unstructured.Unstructured) map[string]string {
 	anns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
@@ -455,18 +487,21 @@ func (r *LoadBalancerConfigReconciler) SetupWithManager(mgr ctrl.Manager) error 
 
 	controlledPredicate := predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			return hasHuaweiELBParams(e.Object)
+			return hasHuaweiELBParams(e.Object) || isInUseObj(e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			// Process if either old or new object has huawei-elb.io params.
-			return hasHuaweiELBParams(e.ObjectOld) || hasHuaweiELBParams(e.ObjectNew)
+			// Process if either old or new object has huawei-elb.io params,
+			// or if the inUse status changed (to catch LBCs referenced by
+			// DatabaseClusters but missing huawei-elb.io annotations).
+			return hasHuaweiELBParams(e.ObjectOld) || hasHuaweiELBParams(e.ObjectNew) ||
+				isInUseObj(e.ObjectOld) || isInUseObj(e.ObjectNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			// Always process deletes to clean up finalizers.
 			return true
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
-			return hasHuaweiELBParams(e.Object)
+			return hasHuaweiELBParams(e.Object) || isInUseObj(e.Object)
 		},
 	}
 
