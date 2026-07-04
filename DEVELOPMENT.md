@@ -4,6 +4,8 @@ This document is for developers who want to build, modify, or contribute to `hua
 
 For user-facing installation and usage, see [README.md](README.md).
 
+> **Note**: OpenEverest (formerly Percona Everest) is the database platform this controller integrates with. The `everest.percona.com/v1alpha1` API group is unchanged. Source code: [openeverest/everest-operator](https://github.com/openeverest/everest-operator).
+
 ---
 
 ## Table of Contents
@@ -12,6 +14,7 @@ For user-facing installation and usage, see [README.md](README.md).
 - [Project Structure](#project-structure)
 - [Architecture](#architecture)
 - [Reconciliation Loop](#reconciliation-loop)
+- [CRD Reference](#crd-reference)
 - [End-to-End Data Flow](#end-to-end-data-flow)
 - [Timing Protection](#timing-protection)
 - [Error Handling Strategy](#error-handling-strategy)
@@ -142,8 +145,8 @@ huawei-elb-controller/
                     │           Kubernetes Cluster              │
                     │                                          │
   ┌──────────┐     │  ┌──────────────┐    ┌───────────────┐   │
-  │  User    │─────┼─▶│ LoadBalancer │    │  V1 Operator  │   │
-  │          │     │  │    Config    │    │  (Everest)    │   │
+  │  OpenEverest  │   │
+  │  operator     │   │
   └──────────┘     │  │     (CR)     │    └───────┬───────┘   │
                     │  └──────┬───────┘            │           │
                     │         │ watches            │ creates    │
@@ -168,10 +171,10 @@ huawei-elb-controller/
 
 ### Key Design Decisions
 
-1. **`unstructured.Unstructured` for CR access** — The controller interacts with `LoadBalancerConfig` CRs via `unstructured.Unstructured` rather than generated typed clients. This avoids importing V1 Go types and keeps the controller decoupled from V1's API evolution.
+1. **`unstructured.Unstructured` for CR access** — The controller interacts with `LoadBalancerConfig` CRs via `unstructured.Unstructured` rather than generated typed clients. This avoids importing OpenEverest Go types and keeps the controller decoupled from OpenEverest's API evolution.
 
 2. **Annotations as configuration channel** — ELB creation parameters are passed via `metadata.annotations` (`huawei-elb.io/*`), and the ELB ID is written back to `spec.annotations["kubernetes.io/elb.id"]`. This design means:
-   - V1 Operator reads `spec.annotations` and copies them to the Service (existing V1 behavior)
+   - OpenEverest operator reads `spec.annotations` and copies them to the Service (existing OpenEverest behavior)
    - CCM reads `kubernetes.io/elb.id` from the Service and binds the ELB (existing CCM behavior)
    - The controller doesn't need to create or manage Services directly
 
@@ -179,6 +182,64 @@ huawei-elb-controller/
 
 4. **Label-based filtering** — Only CRs with `huawei-elb.io/controlled: "true"` label are processed. Other `LoadBalancerConfig` CRs are invisible to this controller, allowing coexistence with other ELB management solutions.
 
+
+---
+
+## CRD Reference
+
+The controller interacts with two OpenEverest CRDs. The field references below are from the [everest-operator source](https://github.com/openeverest/everest-operator/blob/main/api/everest/v1alpha1/databasecluster_types.go).
+
+### LoadBalancerConfig
+
+```yaml
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: <config-name>
+  annotations:
+    # Controller reads these (huawei-elb.io/*):
+    huawei-elb.io/vpc-id: "..."
+    huawei-elb.io/subnet-id: "..."
+    huawei-elb.io/availability-zones: "..."
+    huawei-elb.io/public: "false"
+    # Controller writes these:
+    huawei-elb.io/ready: "true"
+    huawei-elb.io/elb-status: "ACTIVE"
+    huawei-elb.io/error: ""
+spec:
+  annotations:
+    # Controller writes ELB ID here:
+    kubernetes.io/elb.id: "<elb-uuid>"
+```
+
+### DatabaseCluster — `spec.proxy.expose`
+
+From the [`Expose` struct](https://github.com/openeverest/everest-operator/blob/b296204ed61cbf540d3984c4b62451a1c572878a/api/everest/v1alpha1/databasecluster_types.go#L225-L242):
+
+```go
+type Expose struct {
+    // Type: ClusterIP | LoadBalancer | NodePort
+    // (legacy values "internal" and "external" are deprecated)
+    Type ExposeType `json:"type,omitempty"`
+
+    // IPSourceRanges: optional IP whitelist (CIDR notation)
+    IPSourceRanges []IPSourceRange `json:"ipSourceRanges,omitempty"`
+
+    // LoadBalancerConfigName: references a LoadBalancerConfig CR
+    // ⚠️ Once set, cannot be cleared (XValidation rule)
+    LoadBalancerConfigName string `json:"loadBalancerConfigName,omitempty"`
+}
+```
+
+### Supported Engine & Proxy Types
+
+| `spec.engine.type` | Engine | `spec.proxy.type` |
+|---|---|---|
+| `postgresql` | PostgreSQL | `pgbouncer` |
+| `pxc` | MySQL (Percona XtraDB Cluster) | `haproxy` |
+| `psmdb` | MongoDB | `mongos` |
+
+> `spec.engine.type` is immutable after creation. `spec.proxy.expose.loadBalancerConfigName` cannot be cleared once set.
 ---
 
 ## Reconciliation Loop
@@ -271,7 +332,7 @@ The controller's reconcile loop follows this logic:
                │                                  │
                ▼                                  ▼
 ┌──────────────────────┐              ┌──────────────────────────┐
-│ huawei-elb-controller │              │   V1 Operator             │
+│ OpenEverest operator     │
 │                      │              │                          │
 │ ② Watches CR         │              │ ⑤ Creates K8s LoadBalancer │
 │   Calls ELB v3 API   │              │   Service                │
@@ -290,24 +351,24 @@ The controller's reconcile loop follows this logic:
 2. `huawei-elb-controller` detects the CR, calls Huawei Cloud ELB v3 API to create an ELB
 3. Controller writes the ELB ID back to `spec.annotations["kubernetes.io/elb.id"]` and sets `ready=true`
 4. User creates a `DatabaseCluster` CR referencing the `LoadBalancerConfig`
-5. V1 Operator creates a K8s `LoadBalancer`-type Service, copying `spec.annotations` (including `elb.id`)
+5. OpenEverest operator creates a K8s `LoadBalancer`-type Service, copying `spec.annotations` (including `elb.id`)
 6. CCM reads `kubernetes.io/elb.id` from the Service, binds the pre-created ELB → Service gets an external IP
 
 ---
 
 ## Timing Protection
 
-The controller and V1 Operator both modify `LoadBalancerConfig` CRs. To ensure correct ordering:
+The controller and OpenEverest operator both modify `LoadBalancerConfig` CRs. To ensure correct ordering:
 
 ### The Problem
 
 ```
 Time →  T1                    T2                    T3
-        Controller creates    V1 Operator reads     CCM binds ELB
+        Controller creates    OpenEverest op. reads CCM binds ELB
         ELB, writes elb.id    spec.annotations      to Service
 ```
 
-If V1 Operator reads `spec.annotations` **before** the controller writes `elb.id`, the Service won't have the annotation, and CCM won't bind the ELB.
+If the OpenEverest operator reads `spec.annotations` **before** the controller writes `elb.id`, the Service won't have the annotation, and CCM won't bind the ELB.
 
 ### The Solution: `huawei-elb.io/ready` Annotation
 
@@ -334,7 +395,7 @@ kubectl apply -f database-cluster.yaml
 
 ### Concurrent Update Protection
 
-Both the controller and V1 Operator may update the CR simultaneously. The controller uses:
+Both the controller and OpenEverest operator may update the CR simultaneously. The controller uses:
 
 - **`retry.RetryOnConflict`**: Automatically re-fetches and retries on 409 Conflict errors
 - **`updateWithRetry` helper**: All CR updates go through a callback that re-gets the latest version before applying changes
