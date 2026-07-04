@@ -135,7 +135,6 @@ kubectl get secret everest-accounts -n everest-system \
 - 已开通 ELB 服务的华为云账号
 - **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
 - **Project ID** —— 在控制台右上角用户名下拉菜单中找到
-- 已知你的 **VPC ID** 和 **Neutron 子网 ID**（见下方步骤 2）
 
 ---
 
@@ -157,69 +156,7 @@ kubectl get pods -A | grep cloud-controller
 # 预期：cloud-controller-manager pod 处于 Running 状态
 ```
 
-### 步骤 2：获取 VPC 和子网信息
-
-控制器需要 **VPC ID** 和 **Neutron 子网 ID** 来创建 ELB。
-
-> **用哪个子网？** 使用**节点子网** —— 即 Kubernetes 工作节点 IP 所在的子网。不要使用 CCE 管理节点子网或容器/Pod 子网。即使有多个节点，也只需要一个子网 ID —— 选节点 IP 所在的那个子网即可。
-
-> **为什么不能用控制台？** 华为云 VPC 控制台只显示 VPC 子网资源 ID，不显示 ELB API 需要的 Neutron 子网 ID。请使用下面的 `list-vpcs` 命令行工具获取正确的 ID。
-
-**步骤 2a：查看节点 IP**
-
-```bash
-kubectl get nodes -o wide
-```
-
-输出示例：
-```
-NAME          STATUS   ROLES    AGE   VERSION    INTERNAL-IP      EXTERNAL-IP
-node-1        Ready    <none>   10d   v1.31.0    192.168.0.131    <none>
-node-2        Ready    <none>   10d   v1.31.0    192.168.0.132    <none>
-```
-
-记下 `INTERNAL-IP` 的值（如 `192.168.0.131`、`192.168.0.132`），下一步用来匹配子网。
-
-**步骤 2b：列出 VPC 并找到匹配的子网**
-
-```bash
-# 克隆仓库并运行 VPC 查询工具
-git clone https://github.com/weimantian/huawei-elb-controller.git
-cd huawei-elb-controller
-
-export HUAWEI_CLOUD_AK=<你的-AK>
-export HUAWEI_CLOUD_SK=<你的-SK>
-export HUAWEI_CLOUD_PROJECT_ID=<你的-ProjectID>
-export HUAWEI_CLOUD_REGION=cn-north-4
-
-go run ./cmd/list-vpcs/
-```
-
-该工具会列出账号下**所有 VPC 和子网**。找到 **CIDR 包含节点 IP** 的那个子网：
-
-```
-VPC: vpc-prod (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
-  Subnet: subnet-prod
-    Resource ID:  566342ef-...  ← 不是这个
-    Neutron ID:   c265b187-...  ← 用这个！
-    CIDR:         192.168.0.0/24  ← 包含 192.168.0.131 ✓
-
-VPC: vpc-mgmt (a1b2c3d4-...) CIDR: 10.0.0.0/16
-  Subnet: subnet-mgmt
-    Resource ID:  d4c3b2a1-...
-    Neutron ID:   e5f6a7b8-...
-    CIDR:         10.0.0.0/24    ← 不包含节点 IP ✗
-```
-
-上例中，节点 IP 为 `192.168.0.131` 和 `192.168.0.132`，落在 `192.168.0.0/24` 网段内，所以选用：
-- **VPC ID**：`0d60646b-e3b7-4ad9-b422-015ee7da9a48`
-- **Neutron 子网 ID**：`c265b187-...`
-
-> **怎么匹配？** 对于 `/24` 子网，看节点 IP 的前三段是否和 CIDR 的网络部分一致。例如 `192.168.0.131` 匹配 `192.168.0.0/24`（前三段 `192.168.0` 一致），但不匹配 `192.168.1.0/24` 或 `10.0.0.0/24`。
-
-> **重要**：`huawei-elb.io/subnet-id` 需要的是 **Neutron 子网 ID**，不是 VPC 子网资源 ID。用错 ID 会导致 ELB 创建失败。
-
-### 步骤 3：部署控制器
+### 步骤 2：部署控制器
 
 #### 方式 A：使用 Helm（推荐）
 
@@ -315,7 +252,7 @@ kubectl apply -f deploy/clusterrolebinding.yaml
 kubectl apply -f deploy/deployment.yaml
 ```
 
-### 步骤 4：验证控制器运行状态
+### 步骤 3：验证控制器运行状态
 
 ```bash
 kubectl get pods -n everest-system -l app=huawei-elb-controller
@@ -339,7 +276,7 @@ INFO    Starting Controller               {"controller": "loadbalancerconfig"}
 INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
-### 步骤 5：创建 LoadBalancerConfig
+### 步骤 4：创建 LoadBalancerConfig
 
 在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。你只需指定创建内网还是公网 ELB。
 
@@ -381,7 +318,7 @@ EOF
 
 这提供了与 EKS/GKE 类似的零配置体验 —— 只需创建配置，控制器自动完成其余工作。
 
-> **注意**：自动探测适用于所有节点在同一 VPC 的 CCE 集群。如果节点跨多个 VPC，控制器会报错并要求手动指定 `huawei-elb.io/vpc-id`（见下方方式 C）。
+> **注意**：自动探测适用于所有节点在同一 VPC 的 CCE 集群。如果节点跨多个 VPC，控制器会在 `huawei-elb.io/error` 注解中报错。
 
 ##### 公网 vs 内网 ELB
 
@@ -417,41 +354,7 @@ EOF
 
 控制器会自动检测到新的 CR，从节点自动探测 VPC/子网/可用区，并在几秒内创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
 
-#### 方式 C（高级）：手动注解
-
-当你需要覆盖自动探测时使用手动注解（例如多 VPC 集群、自定义子网或特定 ELB 参数）：
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-elb
-spec:
-  annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
-    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
-    huawei-elb.io/public: "false"
-EOF
-```
-
-使用 `list-vpcs` 工具（见步骤 2）查询 VPC ID 和 Neutron 子网 ID。
-
-> **重要**：`huawei-elb.io/subnet-id` 需要的是 **Neutron 子网 ID**，不是华为云控制台显示的 VPC 子网资源 ID。填错会导致 ELB 创建失败。
-
-注解参考：
-
-| 注解 | 必填 | 说明 | 示例 |
-|---|---|---|---|
-| `huawei-elb.io/vpc-id` | 是* | 创建 ELB 所在的 VPC ID | `0d60646b-...` |
-| `huawei-elb.io/subnet-id` | 是* | Neutron 子网 ID（不是 VPC 子网资源 ID） | `c265b187-...` |
-| `huawei-elb.io/availability-zones` | 是* | 可用区列表（逗号分隔） | `cn-north-4a,cn-north-4b` |
-| `huawei-elb.io/public` | 否 | `true` = 公网 ELB；`false` = 内网（默认） | `false` |
-
-\* 在 CCE 上不填时自动探测。
-
-### 步骤 6：等待 ELB 就绪
+### 步骤 5：等待 ELB 就绪
 
 ```bash
 # 等待 ELB 创建完成并激活（最多 120 秒）
@@ -470,7 +373,7 @@ kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotatio
 
 > **重要**：在创建 DatabaseCluster 之前，务必等待 `ready=true`。这确保 ELB ID 已写入 LoadBalancerConfig，Percona Everest operator 读取时能获取到。
 
-### 步骤 7：创建数据库集群
+### 步骤 6：创建数据库集群
 
 创建一个使用该 LoadBalancerConfig 的 PostgreSQL 数据库集群：
 
@@ -517,7 +420,7 @@ EOF
 >         - "10.0.0.0/24"
 > ```
 
-### 步骤 8：验证数据库访问
+### 步骤 7：验证数据库访问
 
 ```bash
 # 1. 检查数据库集群运行状态
@@ -553,16 +456,6 @@ my-pg-pgbouncer     LoadBalancer   10.96.145.200   192.168.0.235    5432:31234/T
 ## 配置参考
 
 ### LoadBalancerConfig Annotation
-
-#### 网络 Annotation（CCE 上自动探测）
-
-> 在 CCE 上这些是**可选的** —— 控制器在缺失时会从集群节点自动探测。你也可以手动设置以覆盖。
-
-| Annotation | 说明 | 示例 |
-|---|---|---|
-| `huawei-elb.io/vpc-id` | 创建 ELB 所在的 VPC ID。从节点 IP 自动探测。 | `0d60646b-...` |
-| `huawei-elb.io/subnet-id` | Neutron 子网 ID（不是 VPC 子网资源 ID）。从节点 IP 自动探测。 | `c265b187-...` |
-| `huawei-elb.io/availability-zones` | 可用区列表（逗号分隔）。从节点标签自动探测。 | `cn-north-4a,cn-north-4b` |
 
 #### 可选 Annotation
 
@@ -628,8 +521,7 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
 常见错误：
-- `missing required annotations` → 检查 `vpc-id`、`subnet-id`、`availability-zones`
-- `vip_subnet_cidr_id not found` → 用了 VPC 子网资源 ID 而非 Neutron ID
+- `auto-detection failed: ...` → 检查所有节点是否在同一 VPC 内；查看控制器日志了解详情
 - `creating ELB: ...` → 查看控制器日志了解华为云 API 错误详情
 
 ### Service 没有外部 IP
@@ -660,27 +552,6 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 # 如果 ELB 已在华为云控制台手动删除，
 # 控制器会检测到 404 并自动移除 finalizer。
 ```
-
----
-
-## 多集群场景
-
-如果有多个 Kubernetes（CCE）集群，**每个集群都需要单独部署** OpenEverest 和 huawei-elb-controller。两者都是集群级应用 —— 以 Pod 形式运行在特定集群内，只管理该集群内的资源。
-
-**每个集群的部署需求：**
-
-| 组件 | 每个集群都要？ | 原因 |
-|---|---|---|
-| OpenEverest | 是 | 通过 Kubernetes CRD 管理集群内的数据库集群 |
-| huawei-elb-controller | 是 | 监听该集群的 `LoadBalancerConfig` CR，为该集群的 Service 创建 ELB |
-| 华为云凭证 | 所有集群共用 | 同一套 AK/SK/ProjectID 可在多个集群中复用 |
-
-**ELB 位置：** 每个集群的 `LoadBalancerConfig` 应指定该集群节点所在的 VPC 和子网。如果所有集群在同一个 VPC 内，VPC ID 相同但可能使用不同子网。如果集群在不同 VPC 内，各自使用自己的 VPC ID。
-
-**ELB 隔离：** ELB 不会跨集群共享。每个 `LoadBalancerConfig` 创建独立的 ELB。同一 VPC 内的两个集群会有各自独立的 ELB 和 VIP。
-
----
-
 
 ---
 

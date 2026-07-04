@@ -135,7 +135,6 @@ kubectl get secret everest-accounts -n everest-system \
 - An active Huawei Cloud account with **ELB service enabled**
 - **AK** (Access Key) and **SK** (Secret Key) — create at: IAM → My Credentials → Access Keys
 - **Project ID** — found in the console top-right dropdown under your username
-- Know your **VPC ID** and **Neutron Subnet ID** (see Step 2 below)
 
 ---
 
@@ -157,69 +156,7 @@ kubectl get pods -A | grep cloud-controller
 # Expected: cloud-controller-manager pods Running
 ```
 
-### Step 2: Get VPC and Subnet Information
-
-The controller needs a **VPC ID** and a **Neutron subnet ID** to create an ELB.
-
-> **Which subnet?** Use the **node subnet** — the subnet where your Kubernetes worker nodes live. Do NOT use the CCE management node subnet or the container/Pod subnet. Even if you have many nodes, you only need ONE subnet ID — pick the one where your nodes' IPs live.
-
-> **Why not the console?** The Huawei Cloud VPC console only shows the VPC subnet Resource ID, not the Neutron subnet ID that the ELB API requires. Use the `list-vpcs` CLI tool below to get the correct ID.
-
-**Step 2a: Find your node IPs**
-
-```bash
-kubectl get nodes -o wide
-```
-
-Example output:
-```
-NAME          STATUS   ROLES    AGE   VERSION    INTERNAL-IP      EXTERNAL-IP
-node-1        Ready    <none>   10d   v1.31.0    192.168.0.131    <none>
-node-2        Ready    <none>   10d   v1.31.0    192.168.0.132    <none>
-```
-
-Note the `INTERNAL-IP` values (e.g., `192.168.0.131`, `192.168.0.132`) — you'll match these to a subnet in the next step.
-
-**Step 2b: List VPCs and find the matching subnet**
-
-```bash
-# Clone this repo and run the VPC lookup tool
-git clone https://github.com/weimantian/huawei-elb-controller.git
-cd huawei-elb-controller
-
-export HUAWEI_CLOUD_AK=<your-AK>
-export HUAWEI_CLOUD_SK=<your-SK>
-export HUAWEI_CLOUD_PROJECT_ID=<your-ProjectID>
-export HUAWEI_CLOUD_REGION=cn-north-4
-
-go run ./cmd/list-vpcs/
-```
-
-The tool lists ALL VPCs and subnets in your project. Find the subnet whose **CIDR contains your node IPs**:
-
-```
-VPC: vpc-prod (0d60646b-e3b7-4ad9-b422-015ee7da9a48) CIDR: 192.168.0.0/16
-  Subnet: subnet-prod
-    Resource ID:  566342ef-...  ← NOT this one
-    Neutron ID:   c265b187-...  ← Use THIS one
-    CIDR:         192.168.0.0/24  ← Contains 192.168.0.131 ✓
-
-VPC: vpc-mgmt (a1b2c3d4-...) CIDR: 10.0.0.0/16
-  Subnet: subnet-mgmt
-    Resource ID:  d4c3b2a1-...
-    Neutron ID:   e5f6a7b8-...
-    CIDR:         10.0.0.0/24    ← Does NOT contain node IPs ✗
-```
-
-In this example, your nodes are at `192.168.0.131` and `192.168.0.132`, which fall within `192.168.0.0/24`. So use:
-- **VPC ID**: `0d60646b-e3b7-4ad9-b422-015ee7da9a48`
-- **Neutron subnet ID**: `c265b187-...`
-
-> **How to match?** For a `/24` subnet, check if the first three octets of your node IP match the CIDR's network portion. For example, `192.168.0.131` matches `192.168.0.0/24` (first three octets `192.168.0` match), but not `192.168.1.0/24` or `10.0.0.0/24`.
-
-> **Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID**, NOT the VPC subnet Resource ID. Using the wrong ID will cause ELB creation to fail.
-
-### Step 3: Deploy the Controller
+### Step 2: Deploy the Controller
 
 #### Option A: Using Helm (Recommended)
 
@@ -316,7 +253,7 @@ kubectl apply -f deploy/clusterrolebinding.yaml
 kubectl apply -f deploy/deployment.yaml
 ```
 
-### Step 4: Verify the Controller is Running
+### Step 3: Verify the Controller is Running
 
 ```bash
 kubectl get pods -n everest-system -l app=huawei-elb-controller
@@ -340,7 +277,7 @@ INFO    Starting Controller               {"controller": "loadbalancerconfig"}
 INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
-### Step 5: Create a LoadBalancerConfig
+### Step 4: Create a LoadBalancerConfig
 
 On CCE, the controller auto-detects VPC, subnet, and availability zones from cluster nodes — no manual configuration needed. You only need to specify whether you want an internal or public ELB.
 
@@ -382,7 +319,7 @@ The controller will:
 
 This gives a zero-config experience similar to EKS/GKE — just create the config and the controller figures out the rest.
 
-> **Note**: Auto-detection works on CCE clusters where all nodes are in the same VPC. If nodes span multiple VPCs, the controller reports an error asking you to specify `huawei-elb.io/vpc-id` manually (see Option C below).
+> **Note**: Auto-detection works on CCE clusters where all nodes are in the same VPC. If nodes span multiple VPCs, the controller reports an error in the `huawei-elb.io/error` annotation.
 
 ##### Public vs Internal ELB
 
@@ -418,41 +355,7 @@ Create a LoadBalancerConfig from the OpenEverest web UI — no `kubectl` needed:
 
 The controller will automatically detect the new CR, auto-detect VPC/subnet/AZ from nodes, and create the ELB within a few seconds. Verify with `kubectl get loadbalancerconfig`.
 
-#### Option C (Advanced): Manual Annotations
-
-Use manual annotations when you need to override auto-detection (e.g., multi-VPC clusters, custom subnet, or specific ELB parameters):
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-elb
-spec:
-  annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "c265b187-a0a8-45cf-9cb3-7c3b757f8ff8"
-    huawei-elb.io/availability-zones: "cn-north-4a,cn-north-4b"
-    huawei-elb.io/public: "false"
-EOF
-```
-
-Use the `list-vpcs` tool (see Step 2) to look up your VPC ID and Neutron subnet ID.
-
-> **Important**: `huawei-elb.io/subnet-id` requires the **Neutron subnet ID**, NOT the VPC subnet Resource ID shown in the Huawei Cloud console. Using the wrong ID will cause ELB creation to fail.
-
-Annotation reference:
-
-| Annotation | Required | Description | Example |
-|---|---|---|---|
-| `huawei-elb.io/vpc-id` | Yes* | VPC where the ELB will be created | `0d60646b-...` |
-| `huawei-elb.io/subnet-id` | Yes* | Neutron subnet ID (NOT the VPC subnet Resource ID) | `c265b187-...` |
-| `huawei-elb.io/availability-zones` | Yes* | Comma-separated availability zone list | `cn-north-4a,cn-north-4b` |
-| `huawei-elb.io/public` | No | `true` = public ELB; `false` = internal (default) | `false` |
-
-\* Auto-detected on CCE if not specified.
-
-### Step 6: Wait for ELB to be Ready
+### Step 5: Wait for ELB to be Ready
 
 ```bash
 # Wait for the ELB to be created and active (up to 120s)
@@ -471,7 +374,7 @@ kubectl get loadbalancerconfig huawei-internal-elb -o jsonpath='{.spec.annotatio
 
 > **Important**: Wait for `ready=true` before creating a DatabaseCluster. This ensures the ELB ID is written into the LoadBalancerConfig before Percona Everest's operator reads it.
 
-### Step 7: Create a DatabaseCluster
+### Step 6: Create a DatabaseCluster
 
 Create a PostgreSQL database cluster that uses the LoadBalancerConfig:
 
@@ -518,7 +421,7 @@ EOF
 >         - "10.0.0.0/24"
 > ```
 
-### Step 8: Verify Database Access
+### Step 7: Verify Database Access
 
 ```bash
 # 1. Check the database cluster is running
@@ -554,17 +457,6 @@ The `EXTERNAL-IP` is the ELB's VIP address — this is what clients connect to.
 ## Configuration Reference
 
 ### LoadBalancerConfig Annotations
-
-#### Network Annotations (auto-detected on CCE)
-
-> On CCE, these are **optional** — the controller auto-detects them from cluster nodes if missing. You can set them manually to override.
-
-| Annotation | Description | Example |
-|---|---|---|
-| `huawei-elb.io/vpc-id` | VPC ID where the ELB will be created. Auto-detected from node IPs. | `0d60646b-...` |
-| `huawei-elb.io/subnet-id` | Neutron subnet ID (NOT the VPC subnet Resource ID). Auto-detected from node IPs. | `c265b187-...` |
-| `huawei-elb.io/availability-zones` | Comma-separated availability zone list. Auto-detected from node labels. | `cn-north-4a,cn-north-4b` |
-| `huawei-elb.io/availability-zones` | Comma-separated availability zone list | `cn-north-4a,cn-north-4b` |
 
 #### Optional Annotations
 
@@ -630,8 +522,7 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
 Common errors:
-- `missing required annotations` → check `vpc-id`, `subnet-id`, `availability-zones`
-- `vip_subnet_cidr_id not found` → you used the VPC subnet Resource ID instead of the Neutron ID
+- `auto-detection failed: ...` → check that all nodes are in the same VPC; see controller logs for details
 - `creating ELB: ...` → check controller logs for Huawei Cloud API error details
 
 ### Service Has No External IP
@@ -662,27 +553,6 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 # If the ELB was manually deleted in Huawei Cloud console,
 # the controller will detect the 404 and remove the finalizer automatically.
 ```
-
----
-
-## Multiple Clusters
-
-If you have multiple Kubernetes (CCE) clusters, **each cluster needs its own deployment** of both OpenEverest and the huawei-elb-controller. Both are cluster-scoped applications — they run as pods inside a specific cluster and only manage resources within that cluster.
-
-**Per-cluster setup:**
-
-| Component | Per cluster? | Why |
-|---|---|---|
-| OpenEverest | Yes | Manages database clusters via Kubernetes CRDs within the cluster |
-| huawei-elb-controller | Yes | Watches `LoadBalancerConfig` CRs and creates ELBs for that cluster's Services |
-| Huawei Cloud credentials | Same for all | Same AK/SK/ProjectID can be reused across clusters |
-
-**ELB placement:** Each cluster's `LoadBalancerConfig` should specify the VPC and subnet where that cluster's nodes live. If all clusters are in the same VPC, they share the same VPC ID but may use different subnets. If clusters are in different VPCs, each uses its own VPC ID.
-
-**ELB isolation:** ELBs are not shared across clusters. Each `LoadBalancerConfig` creates its own ELB. Two clusters in the same VPC will have separate ELBs with separate VIPs.
-
----
-
 
 ---
 
