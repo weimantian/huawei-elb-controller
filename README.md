@@ -177,18 +177,17 @@ git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# 2. Import the image to cluster nodes
-#    The image is not on a public registry — you must import it.
-#    See "Option B" Step 2 below for the full helper-pod import method
-#    (or push to SWR if you have a registry).
-docker save huawei-elb-controller:latest -o /tmp/huawei-elb-controller.tar
+# 2. Push the image to SWR (Huawei Cloud Container Registry)
+#    Replace <swr-registry> with your SWR address, e.g. swr.cn-north-4.myhuaweicloud.com/<your-namespace>
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
 
 # 3. Create a values file with your Huawei Cloud credentials
 cat > my-values.yaml << 'EOF'
 image:
-  repository: huawei-elb-controller
+  repository: <swr-registry>/huawei-elb-controller
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 credentials:
   ak: "<your-AK>"
@@ -218,52 +217,18 @@ kubectl create secret generic huawei-cloud-credentials \
   --from-literal=region=cn-north-4
 ```
 
-2. Build and import the container image:
+2. Build and push the container image to SWR:
 
 ```bash
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# For CCE clusters: push to SWR (Huawei Cloud Container Registry)
+# Push to SWR (Huawei Cloud Container Registry)
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
-
-# For self-managed clusters without SSH access to nodes,
-# import the image via a helper pod with hostPath access:
-docker save huawei-elb-controller:latest -o /tmp/image.tar
-
-# Create a helper pod with access to the host filesystem
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: image-importer
-spec:
-  hostNetwork: true
-  tolerations:
-    - operator: Exists
-  containers:
-    - name: importer
-      image: ubuntu
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - name: host
-          mountPath: /host
-  volumes:
-    - name: host
-      hostPath:
-        path: /
-EOF
-
-kubectl wait --for=condition=Ready pod/image-importer --timeout=120s
-
-# Copy the image tar into the helper pod, then import via ctr
-kubectl cp /tmp/image.tar image-importer:/tmp/image.tar
-kubectl exec image-importer -- chroot /host /usr/local/bin/ctr -n k8s.io image import /tmp/image.tar
-
-# Clean up
-kubectl delete pod image-importer
 ```
+
+Then update `deploy/deployment.yaml` to use `<swr-registry>/huawei-elb-controller:latest` as the container image.
 
 3. Apply the manifests:
 

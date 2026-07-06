@@ -177,18 +177,17 @@ git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# 2. 导入镜像到集群节点
-#    该镜像未发布到公共仓库——必须手动导入。
-#    详见下方“方式 B”第 2 步的 helper-pod 导入方法
-#    （或推送到 SWR，如果你有仓库的话）。
-docker save huawei-elb-controller:latest -o /tmp/huawei-elb-controller.tar
+# 2. 推送镜像到 SWR（华为云容器镜像服务）
+#    将 <swr-registry> 替换为你的 SWR 地址，如 swr.cn-north-4.myhuaweicloud.com/<你的命名空间>
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
 
 # 3. 创建包含华为云凭据的 values 文件
 cat > my-values.yaml << 'EOF'
 image:
-  repository: huawei-elb-controller
+  repository: <swr-registry>/huawei-elb-controller
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 credentials:
   ak: "<你的-AK>"
@@ -218,51 +217,18 @@ kubectl create secret generic huawei-cloud-credentials \
   --from-literal=region=cn-north-4
 ```
 
-2. 构建并导入容器镜像：
+2. 构建并推送容器镜像到 SWR：
 
 ```bash
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# CCE 集群：推送到 SWR（华为云容器镜像服务）
+# 推送到 SWR（华为云容器镜像服务）
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
-
-# 自建集群（无法 SSH 到节点时），通过 helper pod 导入镜像：
-docker save huawei-elb-controller:latest -o /tmp/image.tar
-
-# 创建一个可以访问宿主机文件系统的 helper pod
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: image-importer
-spec:
-  hostNetwork: true
-  tolerations:
-    - operator: Exists
-  containers:
-    - name: importer
-      image: ubuntu
-      command: ["sleep", "3600"]
-      volumeMounts:
-        - name: host
-          mountPath: /host
-  volumes:
-    - name: host
-      hostPath:
-        path: /
-EOF
-
-kubectl wait --for=condition=Ready pod/image-importer --timeout=120s
-
-# 将镜像 tar 拷入 helper pod，然后通过 ctr 导入
-kubectl cp /tmp/image.tar image-importer:/tmp/image.tar
-kubectl exec image-importer -- chroot /host /usr/local/bin/ctr -n k8s.io image import /tmp/image.tar
-
-# 清理
-kubectl delete pod image-importer
 ```
+
+然后修改 `deploy/deployment.yaml`，将容器镜像改为 `<swr-registry>/huawei-elb-controller:latest`。
 
 3. 应用清单：
 
