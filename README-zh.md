@@ -179,7 +179,6 @@ docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # 2. 登录 SWR 并推送镜像
 #    在 SWR 控制台总览页面获取登录指令
-#    （容器镜像服务 → 点击你的组织 → “登录执行指令”）
 docker login -u <你的命名空间> -p <登录令牌> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
@@ -227,7 +226,6 @@ docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # 登录 SWR 并推送镜像
 # 在 SWR 控制台总览页面获取登录指令
-# （容器镜像服务 → 点击你的组织 → “登录执行指令”）
 docker login -u <你的命名空间> -p <登录令牌> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest

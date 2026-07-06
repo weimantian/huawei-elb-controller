@@ -179,7 +179,6 @@ docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # 2. Login to SWR and push the image
 #    Get the login command from the SWR console overview page
-#    (Container Registry → click your organization → "Login Commands")
 docker login -u <your-namespace> -p <login-token> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
@@ -227,7 +226,6 @@ docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # Login to SWR and push the image
 # Get the login command from the SWR console overview page
-# (Container Registry → click your organization → "Login Commands")
 docker login -u <your-namespace> -p <login-token> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
