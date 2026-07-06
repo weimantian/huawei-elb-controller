@@ -14,5 +14,6 @@
 test-report-*.png
 测试报告.md
 
-# English dev guide (use DEVELOPMENT-zh.md instead)
+# Dev guides (local only, not published)
 DEVELOPMENT.md
+DEVELOPMENT-zh.md

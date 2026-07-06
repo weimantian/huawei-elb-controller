@@ -709,11 +709,6 @@ CCE + this controller:
 
 The user experience is the same: create config → get load balancer → connect. The internal flow has an extra hop (controller creates ELB separately, then CCM binds it), but this gives better control, status reporting, and deletion safety.
 
-## Development
-
-For build instructions, architecture details, and contributing guidelines, see [DEVELOPMENT-zh.md](DEVELOPMENT-zh.md).
-
----
 
 ## License
 
