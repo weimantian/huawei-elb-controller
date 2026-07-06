@@ -172,9 +172,18 @@ kubectl get pods -A | grep cloud-controller
 #### 方式 A：使用 Helm（推荐）
 
 ```bash
+# 1. 构建镜像
 git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
+docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
+# 2. 导入镜像到集群节点
+#    该镜像未发布到公共仓库——必须手动导入。
+#    详见下方“方式 B”第 2 步的 helper-pod 导入方法
+#    （或推送到 SWR，如果你有仓库的话）。
+docker save huawei-elb-controller:latest -o /tmp/huawei-elb-controller.tar
+
+# 3. 创建包含华为云凭据的 values 文件
 cat > my-values.yaml << 'EOF'
 image:
   repository: huawei-elb-controller
@@ -190,6 +199,7 @@ credentials:
 namespace: everest-system
 EOF
 
+# 4. 通过 Helm 安装
 helm install huawei-elb-controller \
   ./charts/huawei-elb-controller \
   -f my-values.yaml

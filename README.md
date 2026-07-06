@@ -172,9 +172,18 @@ kubectl get pods -A | grep cloud-controller
 #### Option A: Using Helm (Recommended)
 
 ```bash
+# 1. Build the image
 git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
+docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
+# 2. Import the image to cluster nodes
+#    The image is not on a public registry — you must import it.
+#    See "Option B" Step 2 below for the full helper-pod import method
+#    (or push to SWR if you have a registry).
+docker save huawei-elb-controller:latest -o /tmp/huawei-elb-controller.tar
+
+# 3. Create a values file with your Huawei Cloud credentials
 cat > my-values.yaml << 'EOF'
 image:
   repository: huawei-elb-controller
@@ -190,6 +199,7 @@ credentials:
 namespace: everest-system
 EOF
 
+# 4. Install via Helm
 helm install huawei-elb-controller \
   ./charts/huawei-elb-controller \
   -f my-values.yaml
