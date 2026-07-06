@@ -177,8 +177,10 @@ git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# 2. 推送镜像到 SWR（华为云容器镜像服务）
-#    将 <swr-registry> 替换为你的 SWR 地址，如 swr.cn-north-4.myhuaweicloud.com/<你的命名空间>
+# 2. 登录 SWR 并推送镜像
+#    在 SWR 控制台总览页面获取登录指令
+#    （容器镜像服务 → 点击你的组织 → “登录执行指令”）
+docker login -u <你的命名空间> -p <登录令牌> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
 
@@ -223,7 +225,10 @@ kubectl create secret generic huawei-cloud-credentials \
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# 推送到 SWR（华为云容器镜像服务）
+# 登录 SWR 并推送镜像
+# 在 SWR 控制台总览页面获取登录指令
+# （容器镜像服务 → 点击你的组织 → “登录执行指令”）
+docker login -u <你的命名空间> -p <登录令牌> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
 ```
