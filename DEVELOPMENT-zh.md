@@ -1,60 +1,60 @@
-# Development Guide
+# 开发指南
 
-This document is for developers who want to build, modify, or contribute to `huawei-elb-controller`.
+本文档面向希望构建、修改或为 `huawei-elb-controller` 贡献代码的开发者。
 
-For user-facing installation and usage, see [README.md](README.md).
+面向用户的安装和使用说明见 [README.md](README.md)。
 
-> **Note**: OpenEverest (formerly Percona Everest) is the database platform this controller integrates with. The `everest.percona.com/v1alpha1` API group is unchanged. Source code: [openeverest/everest-operator](https://github.com/openeverest/everest-operator).
-
----
-
-## Table of Contents
-
-- [Build from Source](#build-from-source)
-- [Project Structure](#project-structure)
-- [Architecture](#architecture)
-- [Reconciliation Loop](#reconciliation-loop)
-- [CRD Reference](#crd-reference)
-- [End-to-End Data Flow](#end-to-end-data-flow)
-- [Timing Protection](#timing-protection)
-- [Error Handling Strategy](#error-handling-strategy)
-- [Multi-Region Support](#multi-region-support)
-- [Testing](#testing)
-- [Contributing](#contributing)
+> **注意**：OpenEverest（原 Percona Everest）是本控制器集成的数据库平台。`everest.percona.com/v1alpha1` API group 保持不变。源代码：[openeverest/everest-operator](https://github.com/openeverest/everest-operator)。
 
 ---
 
-## Build from Source
+## 目录
 
-### Prerequisites
+- [从源码构建](#从源码构建)
+- [项目结构](#项目结构)
+- [架构](#架构)
+- [协调循环](#协调循环)
+- [CRD 参考](#crd-参考)
+- [端到端数据流](#端到端数据流)
+- [时序保护](#时序保护)
+- [错误处理策略](#错误处理策略)
+- [多区域支持](#多区域支持)
+- [测试](#测试)
+- [贡献](#贡献)
+
+---
+
+## 从源码构建
+
+### 前提条件
 
 - **Go 1.26+**
-- **Docker** (for container builds)
-- **kubectl** + a Kubernetes cluster (for deployment)
-- **Helm 3** (for chart deployment)
+- **Docker**（用于容器构建）
+- **kubectl** + Kubernetes 集群（用于部署）
+- **Helm 3**（用于 Chart 部署）
 
-### Build
+### 构建
 
 ```bash
-# Download dependencies
+# 下载依赖
 go mod tidy
 
-# Build all packages (type-check + compile)
+# 构建所有包（类型检查 + 编译）
 go build ./...
 
-# Lint
+# 代码检查
 go vet ./...
 
-# Build binary for current platform
+# 构建当前平台的二进制文件
 go build -o huawei-elb-controller ./cmd/
 
-# Cross-compile for Linux/amd64 (for container image)
+# 交叉编译 Linux/amd64（用于容器镜像）
 GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 ```
 
-### Run Locally
+### 本地运行
 
-The controller can run outside the cluster (requires kubeconfig and Huawei Cloud credentials):
+控制器可以在集群外运行（需要 kubeconfig 和华为云凭证）：
 
 ```bash
 export HUAWEI_CLOUD_AK=<your-AK>
@@ -65,24 +65,24 @@ export HUAWEI_CLOUD_REGION=cn-north-4
 go run ./cmd/
 ```
 
-### Build Container Image
+### 构建容器镜像
 
 ```bash
-# Build for linux/amd64
+# 构建 linux/amd64
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
-# For CCE clusters: push to SWR (Huawei Cloud SWR)
+# CCE 集群：推送到 SWR（华为云容器镜像仓库）
 docker tag huawei-elb-controller:latest <swr-endpoint>/<namespace>/huawei-elb-controller:latest
 docker push <swr-endpoint>/<namespace>/huawei-elb-controller:latest
 
-# For self-managed clusters: save and import via containerd
+# 自建集群：导出后通过 containerd 导入
 docker save huawei-elb-controller:latest | gzip > huawei-elb-controller.tar.gz
-# On node: ctr -n k8s.io images import huawei-elb-controller.tar.gz
+# 在节点上执行：ctr -n k8s.io images import huawei-elb-controller.tar.gz
 ```
 
-### VPC/Subnet Lookup Tool
+### VPC/子网查询工具
 
-A utility for finding the correct VPC and Neutron subnet IDs:
+用于查找正确的 VPC 和 Neutron 子网 ID 的实用工具：
 
 ```bash
 export HUAWEI_CLOUD_AK=<your-AK>
@@ -95,21 +95,21 @@ go run ./cmd/list-vpcs/
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```
 huawei-elb-controller/
 ├── cmd/
-│   ├── main.go                          # Controller entry point
+│   ├── main.go                          # 控制器入口
 │   └── list-vpcs/
-│       └── main.go                      # VPC/subnet lookup utility
+│       └── main.go                      # VPC/子网查询工具
 ├── internal/
 │   ├── controller/
-│   │   └── loadbalancerconfig_controller.go  # Core reconcile logic
+│   │   └── loadbalancerconfig_controller.go  # 核心 reconcile 逻辑
 │   └── huaweicloud/
-│       ├── client.go                    # Huawei Cloud client builder
-│       └── elb.go                       # ELB CRUD operations
-├── deploy/                              # Raw Kubernetes manifests
+│       ├── client.go                    # 华为云客户端构建器
+│       └── elb.go                       # ELB CRUD 操作
+├── deploy/                              # 原始 Kubernetes manifests
 │   ├── serviceaccount.yaml
 │   ├── clusterrole.yaml
 │   ├── clusterrolebinding.yaml
@@ -125,7 +125,7 @@ huawei-elb-controller/
 │           ├── clusterrolebinding.yaml
 │           ├── secret.yaml
 │           └── deployment.yaml
-├── examples/                            # Example LoadBalancerConfig YAMLs
+├── examples/                            # 示例 LoadBalancerConfig YAML
 │   ├── internal-elb.yaml
 │   └── public-elb.yaml
 ├── Dockerfile
@@ -136,9 +136,9 @@ huawei-elb-controller/
 
 ---
 
-## Architecture
+## 架构
 
-### Component Overview
+### 组件概览
 
 ```
                     ┌──────────────────────────────────────────┐
@@ -169,25 +169,24 @@ huawei-elb-controller/
                     └──────────────────────────────────────────┘
 ```
 
-### Key Design Decisions
+### 关键设计决策
 
-1. **`unstructured.Unstructured` for CR access** — The controller interacts with `LoadBalancerConfig` CRs via `unstructured.Unstructured` rather than generated typed clients. This avoids importing OpenEverest Go types and keeps the controller decoupled from OpenEverest's API evolution.
+1. **使用 `unstructured.Unstructured` 访问 CR** —— 控制器通过 `unstructured.Unstructured` 与 `LoadBalancerConfig` CR 交互，而非使用生成的类型化客户端。这样可以避免导入 OpenEverest 的 Go 类型，让控制器与 OpenEverest 的 API 演进保持解耦。
 
-2. **Annotations as configuration channel** — ELB creation parameters are passed via `spec.annotations` (`huawei-elb.io/*`), and the ELB ID is also written back to `spec.annotations["kubernetes.io/elb.id"]`. This design means:
-   - OpenEverest operator reads `spec.annotations` and copies them to the Service (existing OpenEverest behavior)
-   - CCM reads `kubernetes.io/elb.id` from the Service and binds the ELB (existing CCM behavior)
-   - The controller doesn't need to create or manage Services directly
+2. **以 Annotation 作为配置通道** —— ELB 创建参数通过 `spec.annotations`（`huawei-elb.io/*`）传递，ELB ID 也会被回写到 `spec.annotations["kubernetes.io/elb.id"]`。这种设计的含义：
+   - OpenEverest operator 读取 `spec.annotations` 并复制到 Service（OpenEverest 既有行为）
+   - CCM 从 Service 读取 `kubernetes.io/elb.id` 并绑定 ELB（CCM 既有行为）
+   - 控制器无需直接创建或管理 Service
 
-3. **Finalizer-based cleanup** — A finalizer (`huawei-elb.io/finalizer`) ensures the Huawei Cloud ELB is deleted before the CR is removed from the cluster, preventing orphaned cloud resources.
+3. **基于 finalizer 的清理** —— finalizer（`huawei-elb.io/finalizer`）确保在 CR 从集群中移除前删除华为云 ELB，防止云资源遗留。
 
-4. **Annotation-based filtering** — CRs with `huawei-elb.io/vpc-id` in `spec.annotations` (user-specified) or `metadata.annotations` (auto-detected) are processed. CRs without this annotation trigger auto-detection from cluster nodes. CRs using `kubernetes.io/elb.autocreate` are skipped (managed by CCE CCM directly). This allows coexistence with other ELB management solutions and enables users to create LoadBalancerConfig via the OpenEverest UI, which exposes `spec.annotations` as editable fields.
-
+4. **基于 annotation 的过滤** —— 在 `spec.annotations`（用户指定）或 `metadata.annotations`（自动探测）中包含 `huawei-elb.io/vpc-id` 的 CR 会被处理。没有此 annotation 的 CR 会触发从集群节点的自动探测。使用 `kubernetes.io/elb.autocreate` 的 CR 会被跳过（由 CCE CCM 直接管理）。这样既能与其他 ELB 管理方案共存，也允许用户通过 OpenEverest UI 创建 LoadBalancerConfig，因为 UI 把 `spec.annotations` 暴露为可编辑字段。
 
 ---
 
-## CRD Reference
+## CRD 参考
 
-The controller interacts with two OpenEverest CRDs. The field references below are from the [everest-operator source](https://github.com/openeverest/everest-operator/blob/main/api/everest/v1alpha1/databasecluster_types.go).
+控制器与两个 OpenEverest CRD 交互。下方的字段引用来自 [everest-operator 源码](https://github.com/openeverest/everest-operator/blob/main/api/everest/v1alpha1/databasecluster_types.go)。
 
 ### LoadBalancerConfig
 
@@ -197,54 +196,55 @@ kind: LoadBalancerConfig
 metadata:
   name: <config-name>
   annotations:
-    # Controller writes status here (metadata.annotations):
+    # 控制器在此写入状态（metadata.annotations）：
     huawei-elb.io/ready: "true"
     huawei-elb.io/elb-status: "ACTIVE"
     huawei-elb.io/error: ""
     spec:
   annotations:
-    # User sets these (huawei-elb.io/*):
+    # 用户设置这些字段（huawei-elb.io/*）：
     huawei-elb.io/vpc-id: "..."
     huawei-elb.io/subnet-id: "..."
     huawei-elb.io/availability-zones: "..."
     huawei-elb.io/public: "false"
-    # Controller writes ELB ID here:
+    # 控制器在此写入 ELB ID：
     kubernetes.io/elb.id: "<elb-uuid>"
 ```
 
-### DatabaseCluster — `spec.proxy.expose`
+### DatabaseCluster —— `spec.proxy.expose`
 
-From the [`Expose` struct](https://github.com/openeverest/everest-operator/blob/b296204ed61cbf540d3984c4b62451a1c572878a/api/everest/v1alpha1/databasecluster_types.go#L225-L242):
+来自 [`Expose` 结构体](https://github.com/openeverest/everest-operator/blob/b296204ed61cbf540d3984c4b62451a1c572878a/api/everest/v1alpha1/databasecluster_types.go#L225-L242)：
 
 ```go
 type Expose struct {
     // Type: ClusterIP | LoadBalancer | NodePort
-    // (legacy values "internal" and "external" are deprecated)
+    // （旧值 "internal" 和 "external" 已弃用）
     Type ExposeType `json:"type,omitempty"`
 
-    // IPSourceRanges: optional IP whitelist (CIDR notation)
+    // IPSourceRanges：可选的 IP 白名单（CIDR 格式）
     IPSourceRanges []IPSourceRange `json:"ipSourceRanges,omitempty"`
 
-    // LoadBalancerConfigName: references a LoadBalancerConfig CR
-    // ⚠️ Once set, cannot be cleared (XValidation rule)
+    // LoadBalancerConfigName：引用 LoadBalancerConfig CR
+    // ⚠️ 一旦设置，无法清除（XValidation 规则）
     LoadBalancerConfigName string `json:"loadBalancerConfigName,omitempty"`
 }
 ```
 
-### Supported Engine & Proxy Types
+### 支持的引擎与代理类型
 
-| `spec.engine.type` | Engine | `spec.proxy.type` |
+| `spec.engine.type` | 引擎 | `spec.proxy.type` |
 |---|---|---|
 | `postgresql` | PostgreSQL | `pgbouncer` |
-| `pxc` | MySQL (Percona XtraDB Cluster) | `haproxy` |
+| `pxc` | MySQL（Percona XtraDB Cluster） | `haproxy` |
 | `psmdb` | MongoDB | `mongos` |
 
-> `spec.engine.type` is immutable after creation. `spec.proxy.expose.loadBalancerConfigName` cannot be cleared once set.
+> `spec.engine.type` 在创建后不可变。`spec.proxy.expose.loadBalancerConfigName` 一旦设置也无法清除。
+
 ---
 
-## Reconciliation Loop
+## 协调循环
 
-The controller's reconcile loop follows this logic:
+控制器的 reconcile 循环遵循以下逻辑：
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -309,58 +309,57 @@ The controller's reconcile loop follows this logic:
                    └────────────────┘
 ```
 
-### Requeue Intervals
+### 重新排队间隔
 
-| State | Requeue | Reason |
+| 状态 | 重新排队 | 原因 |
 |---|---|---|
-| ELB ACTIVE and healthy | 5min | Periodic status sync |
-| ELB creating/updating | 30s | Fast feedback during provisioning |
-| Permanent error (bad params, not found) | 5min | Don't hammer API for unfixable errors |
-| Transient error (network, throttling) | 10s | Retry quickly for recoverable errors |
+| ELB ACTIVE 且健康 | 5min | 周期性状态同步 |
+| ELB 创建/更新中 | 30s | 配置过程中快速反馈 |
+| 永久性错误（参数错误、未找到） | 5min | 不要对无法修复的错误反复请求 API |
+| 临时性错误（网络、限流） | 10s | 对可恢复错误快速重试 |
 
 ---
 
-## End-to-End Data Flow
+## 端到端数据流
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         User Actions                                 │
+│                         用户操作                                    │
 └──────────────┬──────────────────────────────────┬───────────────────┘
                │                                  │
-    ① Create LoadBalancerConfig         ④ Create DatabaseCluster
-    (with label + ELB params)           (references LoadBalancerConfig)
+    ① 创建 LoadBalancerConfig         ④ 创建 DatabaseCluster
+    （包含 label + ELB 参数）          （引用 LoadBalancerConfig）
                │                                  │
                ▼                                  ▼
 ┌──────────────────────┐              ┌──────────────────────────┐
-│ OpenEverest operator     │
+│ OpenEverest operator │              │                          │
+│                      │              │ ⑤ 创建 K8s LoadBalancer  │
+│ ② 监听 CR           │              │   Service                │
+│   调用 ELB v3 API    │              │   复制 spec.annotations  │
+│   创建华为云 ELB     │              │   （包含 elb.id）        │
 │                      │              │                          │
-│ ② Watches CR         │              │ ⑤ Creates K8s LoadBalancer │
-│   Calls ELB v3 API   │              │   Service                │
-│   Creates Huawei ELB │              │   Copies spec.annotations │
-│                      │              │   (includes elb.id)       │
-│ ③ Writes elb.id to   │              │                          │
-│   spec.annotations   │              │ ⑥ CCM reads elb.id       │
-│   Sets ready=true    │              │   Binds pre-created ELB  │
-└──────────────────────┘              │   Service gets EXTERNAL-IP│
-                                      └──────────────────────────┘
+│ ③ 将 elb.id 写入     │              │ ⑥ CCM 读取 elb.id        │
+│   spec.annotations   │              │   绑定预创建的 ELB       │
+│   设置 ready=true    │              │   Service 获得 EXTERNAL-IP│
+└──────────────────────┘              └──────────────────────────┘
 ```
 
-**Step-by-step:**
+**分步骤说明：**
 
-1. User creates a `LoadBalancerConfig` CR with ELB parameters in `spec.annotations` (`huawei-elb.io/*`)
-2. `huawei-elb-controller` detects the CR, calls Huawei Cloud ELB v3 API to create an ELB
-3. Controller writes the ELB ID back to `spec.annotations["kubernetes.io/elb.id"]` and sets `ready=true`
-4. User creates a `DatabaseCluster` CR referencing the `LoadBalancerConfig`
-5. OpenEverest operator creates a K8s `LoadBalancer`-type Service, copying `spec.annotations` (including `elb.id`)
-6. CCM reads `kubernetes.io/elb.id` from the Service, binds the pre-created ELB → Service gets an external IP
+1. 用户创建 `LoadBalancerConfig` CR，在 `spec.annotations` 中填入 ELB 参数（`huawei-elb.io/*`）
+2. `huawei-elb-controller` 检测到 CR，调用华为云 ELB v3 API 创建 ELB
+3. 控制器将 ELB ID 写回 `spec.annotations["kubernetes.io/elb.id"]`，并设置 `ready=true`
+4. 用户创建 `DatabaseCluster` CR，引用该 `LoadBalancerConfig`
+5. OpenEverest operator 创建 K8s `LoadBalancer` 类型 Service，复制 `spec.annotations`（包含 `elb.id`）
+6. CCM 从 Service 读取 `kubernetes.io/elb.id`，绑定预创建的 ELB → Service 获得外部 IP
 
 ---
 
-## Timing Protection
+## 时序保护
 
-The controller and OpenEverest operator both modify `LoadBalancerConfig` CRs. To ensure correct ordering:
+控制器和 OpenEverest operator 都会修改 `LoadBalancerConfig` CR。为保证正确的顺序：
 
-### The Problem
+### 问题
 
 ```
 Time →  T1                    T2                    T3
@@ -368,76 +367,77 @@ Time →  T1                    T2                    T3
         ELB, writes elb.id    spec.annotations      to Service
 ```
 
-If the OpenEverest operator reads `spec.annotations` **before** the controller writes `elb.id`, the Service won't have the annotation, and CCM won't bind the ELB.
+如果 OpenEverest operator 在控制器写入 `elb.id` **之前**读取了 `spec.annotations`，Service 将不包含该 annotation，CCM 也就无法绑定 ELB。
 
-### The Solution: `huawei-elb.io/ready` Annotation
+### 解决方案：`huawei-elb.io/ready` Annotation
 
-| State | `ready` value | Meaning |
+| 状态 | `ready` 值 | 含义 |
 |---|---|---|
-| ELB being created | `false` | Not ready — don't create DatabaseCluster yet |
-| ELB ACTIVE + ONLINE | `true` | Ready — safe to create DatabaseCluster |
-| ELB being deleted | `false` | Not ready — cleanup in progress |
+| ELB 创建中 | `false` | 未就绪 —— 暂不要创建 DatabaseCluster |
+| ELB ACTIVE + ONLINE | `true` | 已就绪 —— 可以安全创建 DatabaseCluster |
+| ELB 删除中 | `false` | 未就绪 —— 清理进行中 |
 
-**Recommended workflow:**
+**推荐工作流：**
 
 ```bash
-# Create LoadBalancerConfig
+# 创建 LoadBalancerConfig
 kubectl apply -f examples/internal-elb.yaml
 
-# Wait for ready=true before creating DatabaseCluster
+# 等待 ready=true 后再创建 DatabaseCluster
 kubectl wait loadbalancerconfig <name> \
   --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
   --timeout=120s
 
-# Only now create the DatabaseCluster
+# 此时再创建 DatabaseCluster
 kubectl apply -f database-cluster.yaml
 ```
 
-### Concurrent Update Protection
+### 并发更新保护
 
-Both the controller and OpenEverest operator may update the CR simultaneously. The controller uses:
+控制器和 OpenEverest operator 都可能同时更新 CR。控制器采用：
 
-- **`retry.RetryOnConflict`**: Automatically re-fetches and retries on 409 Conflict errors
-- **`updateWithRetry` helper**: All CR updates go through a callback that re-gets the latest version before applying changes
+- **`retry.RetryOnConflict`**：在 409 Conflict 错误时自动重新获取并重试
+- **`updateWithRetry` 辅助函数**：所有 CR 更新都通过回调进行，在应用更改前重新获取最新版本
 
 ---
 
-## Error Handling Strategy
+## 错误处理策略
 
-### Error Classification
+### 错误分类
 
-| Type | Examples | Requeue | Annotation |
+| 类型 | 示例 | 重新排队 | Annotation |
 |---|---|---|---|
-| **Permanent** | Missing required annotations, invalid VPC ID, ELB not found | 5 minutes | `huawei-elb.io/error` set |
-| **Transient** | Network timeout, API throttling, 5xx server error | 10 seconds | `huawei-elb.io/error` set |
-| **Success** | ELB ACTIVE, status synced | 5 minutes | `huawei-elb.io/error` cleared |
+| **永久性** | 缺少必需 annotation、VPC ID 无效、ELB 未找到 | 5 分钟 | 设置 `huawei-elb.io/error` |
+| **临时性** | 网络超时、API 限流、5xx 服务器错误 | 10 秒 | 设置 `huawei-elb.io/error` |
+| **成功** | ELB ACTIVE，状态已同步 | 5 分钟 | 清除 `huawei-elb.io/error` |
 
-### `errorAnnotation` Mechanism
+### `errorAnnotation` 机制
 
-The controller records the last error message in `metadata.annotations["huawei-elb.io/error"]`. This value is:
-- Set when a reconciliation fails
-- Cleared when reconciliation succeeds
-- Only updated when the value changes (avoids unnecessary writes/conflicts)
+控制器将最近的错误信息记录在 `metadata.annotations["huawei-elb.io/error"]`。该值：
+
+- 在协调失败时设置
+- 在协调成功时清除
+- 仅在值发生变化时更新（避免不必要的写入和冲突）
 
 ---
 
-## Multi-Region Support
+## 多区域支持
 
-The controller supports deploying ELBs in different Huawei Cloud regions:
+控制器支持在不同华为云区域部署 ELB：
 
-1. **Global region** (default): Set via `HUAWEI_CLOUD_REGION` environment variable from the Secret
-2. **Per-CR override**: Set `huawei-elb.io/region` annotation on a specific `LoadBalancerConfig`
+1. **全局区域**（默认）：通过 Secret 中的 `HUAWEI_CLOUD_REGION` 环境变量设置
+2. **按 CR 覆盖**：在特定 `LoadBalancerConfig` 上设置 `huawei-elb.io/region` annotation
 
-When a CR specifies a region different from the global one, the controller creates a dedicated ELB client for that CR (reusing global AK/SK/ProjectID).
+当 CR 指定的区域与全局区域不同时，控制器会为该 CR 创建一个专用的 ELB 客户端（复用全局的 AK/SK/ProjectID）。
 
 ```go
 func (r *LoadBalancerConfigReconciler) getELBClient(lbc *unstructured.Unstructured) (*elb.ElbClient, error) {
-    // Check for per-CR region override
+    // 检查按 CR 覆盖的区域
     region := getSpecAnnotation(lbc, "huawei-elb.io/region")
     if region == "" || region == r.Creds.Region {
-        return r.ELBClient, nil // Use global client
+        return r.ELBClient, nil // 使用全局客户端
     }
-    // Create region-specific client
+    // 创建区域特定的客户端
     return huaweicloud.NewELBClient(&huaweicloud.Credentials{
         AK:        r.Creds.AK,
         SK:        r.Creds.SK,
@@ -449,66 +449,66 @@ func (r *LoadBalancerConfigReconciler) getELBClient(lbc *unstructured.Unstructur
 
 ---
 
-## Testing
+## 测试
 
-### Manual Testing Flow
+### 手动测试流程
 
 ```bash
-# 1. Deploy controller
+# 1. 部署控制器
 kubectl apply -f deploy/
 
-# 2. Create LoadBalancerConfig
+# 2. 创建 LoadBalancerConfig
 kubectl apply -f examples/internal-elb.yaml
 
-# 3. Wait for ELB creation
+# 3. 等待 ELB 创建
 kubectl wait loadbalancerconfig internal-elb \
   --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
   --timeout=120s
 
-# 4. Verify ELB exists in Huawei Cloud (should show ACTIVE)
+# 4. 验证 ELB 在华为云中存在（应显示 ACTIVE）
 kubectl get loadbalancerconfig internal-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
 
-# 5. Delete CR and verify ELB is cleaned up
+# 5. 删除 CR 并验证 ELB 已清理
 kubectl delete loadbalancerconfig internal-elb
-# Controller logs should show "deleting ELB" → "ELB deleted successfully"
+# 控制器日志应显示 "deleting ELB" → "ELB deleted successfully"
 ```
 
-### Verifying ELB Cleanup
+### 验证 ELB 清理
 
 ```bash
-# After deleting the CR, verify the ELB is gone from Huawei Cloud
-# The controller should log: "ELB deleted successfully"
+# 删除 CR 后，验证 ELB 已从华为云消失
+# 控制器应记录日志："ELB deleted successfully"
 
-# If the ELB was manually deleted in Huawei Cloud console,
-# the controller detects 404 and removes the finalizer gracefully.
+# 如果在华为云控制台手动删除了 ELB，
+# 控制器会检测到 404 并优雅地移除 finalizer。
 ```
 
 ---
 
-## Contributing
+## 贡献
 
-### Commit Convention
+### 提交规范
 
-This project follows the **DCO (Developer Certificate of Origin)**. Every commit must include:
+本项目遵循 **DCO（Developer Certificate of Origin）**。每个 commit 必须包含：
 
 ```
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
-Use `git commit -s` to automatically add the sign-off.
+使用 `git commit -s` 自动添加签名。
 
-### Code Style
+### 代码风格
 
-- Run `go vet ./...` before committing
-- Follow standard Go formatting (`gofmt`)
-- Keep the reconcile loop readable — extract complex logic into helper functions
-- All CR updates must go through `updateWithRetry` to handle conflicts
+- 提交前运行 `go vet ./...`
+- 遵循标准 Go 格式（`gofmt`）
+- 保持 reconcile 循环可读 —— 将复杂逻辑抽取到辅助函数中
+- 所有 CR 更新必须通过 `updateWithRetry`，以处理冲突
 
-### Pull Request Checklist
+### Pull Request 检查清单
 
-- [ ] `go build ./...` passes
-- [ ] `go vet ./...` passes
-- [ ] `helm lint charts/huawei-elb-controller/` passes
-- [ ] Commit includes `Signed-off-by`
-- [ ] No secrets or credentials in code/YAML
-- [ ] Documentation updated if behavior changed
+- [ ] `go build ./...` 通过
+- [ ] `go vet ./...` 通过
+- [ ] `helm lint charts/huawei-elb-controller/` 通过
+- [ ] Commit 包含 `Signed-off-by`
+- [ ] 代码或 YAML 中无密钥或凭证
+- [ ] 行为变更时同步更新文档

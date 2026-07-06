@@ -9,3 +9,10 @@
 .codeartsdoer/
 .merkle-snapshot.json
 .omo/
+
+# Test artifacts (local only, not published)
+test-report-*.png
+测试报告.md
+
+# English dev guide (use DEVELOPMENT-zh.md instead)
+DEVELOPMENT.md

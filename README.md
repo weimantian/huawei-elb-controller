@@ -711,7 +711,7 @@ The user experience is the same: create config → get load balancer → connect
 
 ## Development
 
-For build instructions, architecture details, and contributing guidelines, see [DEVELOPMENT.md](DEVELOPMENT.md).
+For build instructions, architecture details, and contributing guidelines, see [DEVELOPMENT-zh.md](DEVELOPMENT-zh.md).
 
 ---
 

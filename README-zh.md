@@ -711,7 +711,7 @@ CCE + 本控制器：
 
 ## 开发
 
-构建说明、架构详情和贡献指南请参见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+构建说明、架构详情和贡献指南请参见 [DEVELOPMENT-zh.md](DEVELOPMENT-zh.md)。
 
 ---
 
