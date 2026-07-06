@@ -221,7 +221,6 @@ kubectl create secret generic huawei-cloud-credentials \
 2. Build and push the container image to SWR:
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o huawei-elb-controller ./cmd/
 docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # Login to SWR and push the image
