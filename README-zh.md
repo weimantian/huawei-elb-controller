@@ -741,6 +741,58 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 # 控制器会检测到 404 并自动移除 finalizer。
 ```
 
+## 卸载
+
+### 1. 先删除所有 LoadBalancerConfig（重要）
+
+**顺序很重要。** 删除 `LoadBalancerConfig` 会通过 finalizer 触发控制器删除对应的华为云 ELB。如果先卸载控制器，ELB 会成为孤儿资源并**持续计费**（公网 ELB 的 EIP 按小时收费）。
+
+```bash
+# 列出所有 LoadBalancerConfig
+kubectl get loadbalancerconfig -A
+
+# 逐个删除（控制器会删除对应的华为云 ELB）
+kubectl delete loadbalancerconfig <name>
+```
+
+在继续之前，查看控制器日志确认 ELB 已删除：
+
+```bash
+kubectl logs -n everest-system deployment/huawei-elb-controller --tail=5
+# 等待看到每个 LBC 对应的 "deleted ELB" 日志
+```
+
+> 如果 `LoadBalancerConfig` 带有 `everest.percona.com/in-use-protection` finalizer，说明它仍被某个数据库集群引用。请先删除该数据库（或切换到其他 LBC）。
+
+### 2. 卸载控制器
+
+#### 方式 A：Helm
+
+```bash
+helm uninstall huawei-elb-controller
+
+# 删除凭据 Secret（Helm 可能会保留它）
+kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev/null
+```
+
+#### 方式 B：原始 Manifests
+
+```bash
+kubectl delete -f deploy/deployment.yaml
+kubectl delete -f deploy/clusterrolebinding.yaml
+kubectl delete -f deploy/clusterrole.yaml
+kubectl delete -f deploy/serviceaccount.yaml
+kubectl delete secret -n everest-system huawei-cloud-credentials
+```
+
+### 3.（可选）删除 CRD
+
+此操作会永久删除 `LoadBalancerConfig` 自定义资源定义。如果计划重新安装，请跳过此步骤。
+
+```bash
+kubectl delete crd loadbalancerconfigs.everest.percona.com
+```
+
 ---
 
 ## 与 EKS/GKE 对比
