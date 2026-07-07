@@ -43,6 +43,15 @@ Huawei Cloud CCM binds the ELB → Service gets an external IP
 You connect to your database via the ELB's IP address
 ```
 
+The controller creates a Kubernetes `Service` of type `LoadBalancer` in the `everest-system` namespace. This Service carries Huawei Cloud ELB annotations that tell the CCE Cloud Controller Manager (CCM) how to bind the Service to a Huawei Cloud ELB instance:
+
+- `kubernetes.io/elb.id: <elbID>` — binds the Service to a pre-created ELB instance (the one created by this controller)
+- `kubernetes.io/elb.class: union` — uses the Huawei Cloud ELB load balancing mode
+
+When the CCE CCM detects a `LoadBalancer` Service with these annotations, it configures the ELB listener and backend members based on the Service's ports and the pod endpoints. The controller creates the ELB via the Huawei Cloud ELB v3 API, then creates the Service with the `kubernetes.io/elb.id` annotation pointing to the new ELB. The CCE CCM then completes the binding.
+
+This is the standard mechanism for integrating external load balancers with CCE — see the [CCE documentation](https://support.huaweicloud.com/usermanual-cce/cce_10_0385.html) for details.
+
 ---
 
 ## Prerequisites
@@ -173,15 +182,25 @@ kubectl get pods -A | grep cloud-controller
 
 ```bash
 # 1. Build the image
+#    Use --provenance=false to avoid SWR's "Invalid image, fail to parse 'manifest.json'" error
 git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
-docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
+
+# Docker:
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+# nerdctl (containerd-only environments, no Docker):
+# nerdctl build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # 2. Login to SWR and push the image
 #    Get the login command from the SWR console overview page
+# Docker:
 docker login -u <your-namespace> -p <login-token> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
+# nerdctl:
+# nerdctl login -u <your-namespace> -p <login-token> <swr-registry>
+# nerdctl tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+# nerdctl push <swr-registry>/huawei-elb-controller:latest
 
 # 3. Create a values file with your Huawei Cloud credentials
 cat > my-values.yaml << 'EOF'
@@ -189,6 +208,12 @@ image:
   repository: <swr-registry>/huawei-elb-controller
   tag: latest
   pullPolicy: Always
+
+# Required on CCE: nodes have no SWR auth by default.
+# Use CCE's built-in `default-secret` (exists in every namespace)
+# or create your own image pull secret.
+imagePullSecrets:
+  - name: default-secret
 
 credentials:
   ak: "<your-AK>"
@@ -221,13 +246,21 @@ kubectl create secret generic huawei-cloud-credentials \
 2. Build and push the container image to SWR:
 
 ```bash
-docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
+# Docker:
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+# nerdctl (containerd-only environments, no Docker):
+# nerdctl build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # Login to SWR and push the image
 # Get the login command from the SWR console overview page
+# Docker:
 docker login -u <your-namespace> -p <login-token> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
+# nerdctl:
+# nerdctl login -u <your-namespace> -p <login-token> <swr-registry>
+# nerdctl tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+# nerdctl push <swr-registry>/huawei-elb-controller:latest
 ```
 
 Then update `deploy/deployment.yaml` to use `<swr-registry>/huawei-elb-controller:latest` as the container image.
@@ -599,6 +632,8 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `metadata.annotations` | `huawei-elb.io/public-ip` | EIP address (public ELB only) |
 | `metadata.annotations` | `huawei-elb.io/error` | Last error message (empty when healthy) |
 
+> ⚠️ **Important**: `credentials.region` must match your CCE cluster's region (e.g. `cn-north-4`, `sa-brazil-1`). The default value is empty — deployment will fail if you don't set it.
+
 ### Helm Values
 
 | Parameter | Default | Description |
@@ -616,6 +651,37 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `resources.requests.memory` | `128Mi` | Memory request |
 | `resources.limits.cpu` | `500m` | CPU limit |
 | `resources.limits.memory` | `256Mi` | Memory limit |
+
+---
+
+## Annotations
+
+The controller reads the following annotations from the `LoadBalancerConfig` CR's `spec.annotations` (or `metadata.annotations`). All are optional — if omitted, the controller auto-detects them from the CCE cluster nodes.
+
+| Annotation | Description | Auto-detected from |
+|---|---|---|
+| `huawei-elb.io/vpc-id` | VPC ID for ELB creation | ECS server metadata via node's `machineID` |
+| `huawei-elb.io/subnet-id` | Neutron subnet ID for ELB creation | Node label `node.kubernetes.io/subnetid` |
+| `huawei-elb.io/availability-zones` | Availability zones, comma-separated (e.g. `cn-north-4a,cn-north-4b`) | Node label `topology.kubernetes.io/zone` |
+
+### Manual override
+
+If auto-detection fails or you want to override, annotate the `LoadBalancerConfig` CR:
+
+```yaml
+apiVersion: database.openeverest.io/v1
+kind: LoadBalancerConfig
+metadata:
+  name: my-elb-config
+  annotations:
+    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
+    huawei-elb.io/subnet-id: "566342ef-db1b-4ffa-a5ec-4185f5d61d40"
+    huawei-elb.io/availability-zones: "cn-north-4a"
+spec:
+  # ... rest of spec
+```
+
+When any of these annotations is present, the controller uses the provided values and skips auto-detection for that field.
 
 ---
 

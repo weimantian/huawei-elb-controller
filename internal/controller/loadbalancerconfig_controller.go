@@ -183,7 +183,7 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 
 		// Auto-detect VPC/subnet/AZ from cluster nodes.
-		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger)
+		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger, lbc)
 		if err != nil {
 			logger.Error(err, "auto-detection failed")
 			if isInUse(lbc) {
@@ -444,70 +444,113 @@ func isInUse(lbc *unstructured.Unstructured) bool {
 }
 
 // autoDetectParams detects VPC ID, Neutron subnet ID, and availability zones
-// from the Kubernetes cluster's nodes. It reads node internal IPs and zone
-// labels, then calls the Huawei Cloud VPC API to find the matching VPC/subnet.
+// from the Kubernetes cluster's nodes.
+//
+// The VPC ID is looked up via the ECS API using the first node's
+// status.nodeInfo.machineID (the CCE-provisioned ECS server-id) — this avoids
+// the CIDR-overlap false positives of the previous "list-all-VPCs-and-match"
+// approach. The Neutron subnet ID is read from the
+// "node.kubernetes.io/subnetid" label, which the CCE Cloud Controller Manager
+// writes to every node. Availability zones come from the
+// "topology.kubernetes.io/zone" label on all nodes.
+//
+// If the caller has manually specified huawei-elb.io/vpc-id in
+// spec.annotations, that takes precedence and auto-detection is bypassed (no
+// cache write, no API call) — so changing the override on a live cluster
+// takes effect on the next reconcile without stale cached data.
+//
 // Results are cached since all nodes in a CCE cluster share the same VPC.
-func (r *LoadBalancerConfigReconciler) autoDetectParams(ctx context.Context, logger logr.Logger) (vpcID, subnetID string, azs []string, err error) {
+func (r *LoadBalancerConfigReconciler) autoDetectParams(
+	ctx context.Context, logger logr.Logger, lbc *unstructured.Unstructured,
+) (vpcID, subnetID string, azs []string, err error) {
 	r.detectMu.Lock()
 	defer r.detectMu.Unlock()
 
-	// Return cached result if available.
+	// 0. If the user manually specified vpc-id, use those values directly and
+	// skip both auto-detection and the cache. This makes manual overrides
+	// hot-reloadable: editing spec.annotations on a live LBC picks up the new
+	// values on the next reconcile without waiting for stale cached data.
+	if manualVPC := getSpecAnnotation(lbc, vpcIDAnnotation); manualVPC != "" {
+		manualSubnet := getSpecAnnotation(lbc, subnetIDAnnotation)
+		manualAZs := strings.Split(getSpecAnnotation(lbc, availabilityZonesAnnotation), ",")
+		logger.Info("Using manually specified VPC params; skipping auto-detection",
+			"vpc-id", manualVPC, "subnet-id", manualSubnet, "azs", manualAZs)
+		return manualVPC, manualSubnet, manualAZs, nil
+	}
+
+	// 1. Return cached result if available.
 	if r.detected != nil {
 		return r.detected.VPCID, r.detected.SubnetID, r.detected.AZs, nil
 	}
 
-	// 1. List all nodes.
+	// 2. List all nodes.
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList); err != nil {
 		return "", "", nil, fmt.Errorf("listing nodes: %w", err)
 	}
+	if len(nodeList.Items) == 0 {
+		return "", "", nil, fmt.Errorf("no nodes found in cluster")
+	}
 
-	// 2. Collect node internal IPs and zone labels.
-	var nodeIPs []string
+	// 3. Take the first node — all CCE nodes share the same VPC.
+	node := nodeList.Items[0]
+
+	// 4. Get the Virsubnet ID from the node label written by CCE CCM.
+	//    This is the VPC service's subnet ID; ELB needs the Neutron subnet ID,
+	//    so we convert it below via the VPC API.
+	virsubnetID := node.Labels["node.kubernetes.io/subnetid"]
+	if virsubnetID == "" {
+		return "", "", nil, fmt.Errorf(
+			"node %s has no node.kubernetes.io/subnetid label", node.Name)
+	}
+
+	// 4b. Convert the Virsubnet ID to a Neutron subnet ID for the ELB API.
+	subnetID, err = huaweicloud.GetNeutronSubnetID(r.Creds, virsubnetID)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("converting virsubnet to neutron subnet: %w", err)
+	}
+
+	// 5. Collect availability zones from every node's zone label.
 	azSet := make(map[string]bool)
-	for _, node := range nodeList.Items {
-		for _, addr := range node.Status.Addresses {
-			if addr.Type == corev1.NodeInternalIP {
-				nodeIPs = append(nodeIPs, addr.Address)
-			}
-		}
-		if az, ok := node.Labels["topology.kubernetes.io/zone"]; ok {
+	for _, n := range nodeList.Items {
+		if az, ok := n.Labels["topology.kubernetes.io/zone"]; ok {
 			azSet[az] = true
 		}
 	}
-
-	if len(nodeIPs) == 0 {
-		return "", "", nil, fmt.Errorf("no node internal IPs found in cluster")
-	}
-
-	// 3. Deduplicate and sort AZs.
 	for az := range azSet {
 		azs = append(azs, az)
 	}
 	sort.Strings(azs)
-
 	if len(azs) == 0 {
-		return "", "", nil, fmt.Errorf("no availability zones found in node labels (topology.kubernetes.io/zone)")
+		return "", "", nil, fmt.Errorf(
+			"no availability zones found in node labels (topology.kubernetes.io/zone)",
+		)
 	}
 
-	// 4. Detect VPC/subnet from node IPs via Huawei Cloud VPC API.
-	info, err := huaweicloud.DetectVPCSubnet(r.Creds, nodeIPs)
+	// 6. Get VPC ID from the ECS API via the node's machineID (ECS server-id).
+	// This is the most reliable signal: every CCE node carries the cluster's
+	// VPC ID in its server metadata, with no CIDR overlap ambiguity.
+	serverID := node.Status.NodeInfo.MachineID
+	if serverID == "" {
+		return "", "", nil, fmt.Errorf("node %s has no machineID", node.Name)
+	}
+	vpcID, err = huaweicloud.DetectVPCFromECS(r.Creds, serverID)
 	if err != nil {
 		return "", "", nil, err
 	}
 
-	// 5. Cache the result.
+	// 7. Cache the result.
 	r.detected = &autoDetectedParams{
-		VPCID:    info.VPCID,
-		SubnetID: info.SubnetID,
+		VPCID:    vpcID,
+		SubnetID: subnetID,
 		AZs:      azs,
 	}
 
 	logger.Info("Auto-detected cluster network params from nodes",
-		"vpc-id", info.VPCID, "subnet-id", info.SubnetID,
-		"azs", azs, "node-count", len(nodeIPs))
+		"vpc-id", vpcID, "subnet-id", subnetID,
+		"azs", azs, "node-count", len(nodeList.Items))
 
-	return info.VPCID, info.SubnetID, azs, nil
+	return vpcID, subnetID, azs, nil
 }
 
 // shouldReconcile returns true if the LBC should be processed by this controller.

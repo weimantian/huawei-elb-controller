@@ -4,6 +4,10 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Image pull secrets for private registries (e.g. SWR)
+imagePullSecrets: []
+# - name: swr-secret
+
 # Huawei Cloud credentials.
 # Either set credentials directly here, or set existingSecret to use a
 # pre-created Secret (recommended for production).
@@ -11,7 +15,7 @@ credentials:
   ak: ""
   sk: ""
   projectId: ""
-  region: "cn-north-4"
+  region: ""  # 必填！必须与你的 CCE 集群所在 region 一致，如 cn-north-4、sa-brazil-1
 
 # Use an existing Secret for credentials instead of creating one.
 # The Secret must have keys: ak, sk, project-id, region.

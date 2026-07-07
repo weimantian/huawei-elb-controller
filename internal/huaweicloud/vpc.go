@@ -2,91 +2,121 @@ package huaweicloud
 
 import (
 	"fmt"
-	"log"
-	"net"
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth/basic"
+	ecs "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2"
+	ecsmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2/model"
+	ecsregion "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/ecs/v2/region"
 	vpc "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3"
-	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/model"
+	vpcmodel "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/model"
 	vpcregion "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v3/region"
 )
 
 // VPCSubnetInfo holds detected VPC and subnet information.
+//
+// SubnetID is retained for callers that still need a Neutron subnet ID
+// (e.g. as VipSubnetCidrId on the ELB). The ECS-based detector returns it
+// from node labels written by the CCE Cloud Controller Manager, not from
+// the Huawei Cloud VPC API.
 type VPCSubnetInfo struct {
 	VPCID    string
 	SubnetID string // Neutron subnet ID (for VipSubnetCidrId)
 }
 
-// DetectVPCSubnet finds the VPC ID and Neutron subnet ID that contain the given
-// node IPs by listing all VPCs and subnets, then matching node IPs against
-// subnet CIDRs. Returns an error if nodes span multiple VPCs.
-func DetectVPCSubnet(creds *Credentials, nodeIPs []string) (*VPCSubnetInfo, error) {
-	if len(nodeIPs) == 0 {
-		return nil, fmt.Errorf("no node IPs provided for VPC detection")
+// DetectVPCFromECS queries the ECS API for the given server ID and returns
+// the VPC ID from the server's metadata. This is the most reliable way to
+// determine which VPC a CCE node belongs to, avoiding CIDR overlap issues
+// that plague the legacy ListVpcs+CIDR-matching approach.
+//
+// On CCE, the server's metadata["vpc_id"] is populated automatically by
+// the platform — every node in a CCE cluster carries the cluster's VPC ID.
+func DetectVPCFromECS(creds *Credentials, serverID string) (string, error) {
+	if serverID == "" {
+		return "", fmt.Errorf("no server ID provided for VPC detection")
 	}
 
-	vpcClient, err := newVPCClient(creds)
+	client, err := newECSClient(creds)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	// List all VPCs.
-	vpcResp, err := vpcClient.ListVpcs(&model.ListVpcsRequest{})
+	req := &ecsmodel.ShowServerRequest{ServerId: serverID}
+	resp, err := client.ShowServer(req)
 	if err != nil {
-		return nil, fmt.Errorf("listing VPCs: %w", err)
+		return "", fmt.Errorf("showing server %s: %w", serverID, err)
 	}
-	if vpcResp.Vpcs == nil || len(*vpcResp.Vpcs) == 0 {
-		return nil, fmt.Errorf("no VPCs found in region %s", creds.Region)
-	}
-
-	var detectedVPC string
-	var detectedSubnet string
-
-	for _, v := range *vpcResp.Vpcs {
-		vpcIDs := []string{v.Id}
-		subnetResp, err := vpcClient.ListVirsubnets(&model.ListVirsubnetsRequest{
-			VpcId: &vpcIDs,
-		})
-		if err != nil {
-			log.Printf("warning: listing subnets for VPC %s: %v", v.Id, err)
-			continue
-		}
-		if subnetResp.Virsubnets == nil {
-			continue
-		}
-
-		for _, s := range *subnetResp.Virsubnets {
-			for _, sc := range s.SubnetCidrs {
-				_, cidr, err := net.ParseCIDR(sc.Cidr)
-				if err != nil {
-					continue
-				}
-
-				for _, ip := range nodeIPs {
-					if cidr.Contains(net.ParseIP(ip)) {
-						if detectedVPC != "" && detectedVPC != v.Id {
-							return nil, fmt.Errorf(
-								"nodes span multiple VPCs: %s and %s. "+
-									"Please specify huawei-elb.io/vpc-id manually",
-								detectedVPC, v.Id,
-							)
-						}
-						detectedVPC = v.Id
-						detectedSubnet = sc.Id
-					}
-				}
-			}
-		}
+	if resp.Server == nil {
+		return "", fmt.Errorf("server %s not found", serverID)
 	}
 
-	if detectedVPC == "" {
-		return nil, fmt.Errorf("could not detect VPC for node IPs: %v", nodeIPs)
+	vpcID := resp.Server.Metadata["vpc_id"]
+	if vpcID == "" {
+		return "", fmt.Errorf("server %s has no vpc_id in metadata", serverID)
 	}
 
-	return &VPCSubnetInfo{
-		VPCID:    detectedVPC,
-		SubnetID: detectedSubnet,
-	}, nil
+	return vpcID, nil
+}
+
+// newECSClient creates a Huawei Cloud ECS v2 client from credentials.
+func newECSClient(creds *Credentials) (*ecs.EcsClient, error) {
+	auth := basic.NewCredentialsBuilder().
+		WithAk(creds.AK).
+		WithSk(creds.SK).
+		WithProjectId(creds.ProjectID).
+		Build()
+
+	reg, err := ecsregion.SafeValueOf(creds.Region)
+	if err != nil {
+		return nil, fmt.Errorf("invalid region %q: %w", creds.Region, err)
+	}
+
+	hcClient, err := ecs.EcsClientBuilder().
+		WithCredential(auth).
+		WithRegion(reg).
+		SafeBuild()
+	if err != nil {
+		return nil, fmt.Errorf("building ECS client: %w", err)
+	}
+
+	return ecs.NewEcsClient(hcClient), nil
+}
+
+// GetNeutronSubnetID converts a VPC Virsubnet ID (as written by CCE CCM to
+// the node.kubernetes.io/subnetid label) into the Neutron subnet ID required
+// by the ELB API's VipSubnetCidrId field. The two IDs are different in
+// Huawei Cloud: Virsubnet is the VPC service's subnet identifier, while
+// the Neutron subnet ID is what ELB expects.
+func GetNeutronSubnetID(creds *Credentials, virsubnetID string) (string, error) {
+	if virsubnetID == "" {
+		return "", fmt.Errorf("no virsubnet ID provided")
+	}
+
+	client, err := newVPCClient(creds)
+	if err != nil {
+		return "", err
+	}
+
+	// Query the specific Virsubnet by its ID.
+	idFilter := []string{virsubnetID}
+	resp, err := client.ListVirsubnets(&vpcmodel.ListVirsubnetsRequest{Id: &idFilter})
+	if err != nil {
+		return "", fmt.Errorf("listing virsubnet %s: %w", virsubnetID, err)
+	}
+	if resp.Virsubnets == nil || len(*resp.Virsubnets) == 0 {
+		return "", fmt.Errorf("virsubnet %s not found", virsubnetID)
+	}
+
+	vs := (*resp.Virsubnets)[0]
+	if len(vs.SubnetCidrs) == 0 {
+		return "", fmt.Errorf("virsubnet %s has no subnet CIDRs", virsubnetID)
+	}
+
+	neutronID := vs.SubnetCidrs[0].Id
+	if neutronID == "" {
+		return "", fmt.Errorf("virsubnet %s has empty Neutron subnet ID", virsubnetID)
+	}
+
+	return neutronID, nil
 }
 
 // newVPCClient creates a Huawei Cloud VPC v3 client from credentials.

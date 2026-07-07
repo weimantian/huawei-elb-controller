@@ -16,6 +16,10 @@ spec:
         {{- include "huawei-elb-controller.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "huawei-elb-controller.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

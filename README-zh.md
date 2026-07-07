@@ -43,6 +43,15 @@ OpenEverest operator 创建 LoadBalancer 类型 Service
 你通过 ELB 的 IP 连接数据库
 ```
 
+控制器在 `everest-system` 命名空间创建一个类型为 `LoadBalancer` 的 Kubernetes `Service`。这个 Service 携带华为云 ELB 注解，告诉 CCE 云控制器管理器（CCM）如何将 Service 绑定到华为云 ELB 实例：
+
+- `kubernetes.io/elb.id: <elbID>` — 将 Service 绑定到预创建的 ELB 实例（即本控制器创建的 ELB）
+- `kubernetes.io/elb.class: union` — 使用华为云 ELB 负载均衡模式
+
+当 CCE CCM 检测到带有这些注解的 `LoadBalancer` Service 时，会根据 Service 的端口和 Pod 端点配置 ELB 监听器和后端服务器组。控制器先通过华为云 ELB v3 API 创建 ELB，然后创建带有 `kubernetes.io/elb.id` 注解的 Service 指向新创建的 ELB，CCE CCM 随后完成绑定。
+
+这是 CCE 集成外部负载均衡器的标准机制 — 详见 [CCE 文档](https://support.huaweicloud.com/usermanual-cce/cce_10_0385.html)。
+
 ---
 
 ## 使用前提
@@ -173,15 +182,25 @@ kubectl get pods -A | grep cloud-controller
 
 ```bash
 # 1. 构建镜像
+#    加 --provenance=false 避免 SWR 报 "Invalid image, fail to parse 'manifest.json'" 错误
 git clone https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
-docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
+
+# Docker:
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+# nerdctl（仅有 containerd 的环境，无 Docker）:
+# nerdctl build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # 2. 登录 SWR 并推送镜像
 #    在 SWR 控制台总览页面获取登录指令
+# Docker:
 docker login -u <你的命名空间> -p <登录令牌> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
+# nerdctl:
+# nerdctl login -u <你的命名空间> -p <登录令牌> <swr-registry>
+# nerdctl tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+# nerdctl push <swr-registry>/huawei-elb-controller:latest
 
 # 3. 创建包含华为云凭据的 values 文件
 cat > my-values.yaml << 'EOF'
@@ -189,6 +208,12 @@ image:
   repository: <swr-registry>/huawei-elb-controller
   tag: latest
   pullPolicy: Always
+
+# CCE 必需：节点默认没有 SWR 认证。
+# 使用 CCE 内置的 `default-secret`（每个命名空间都有）
+# 或创建自己的 image pull secret。
+imagePullSecrets:
+  - name: default-secret
 
 credentials:
   ak: "<你的-AK>"
@@ -221,13 +246,21 @@ kubectl create secret generic huawei-cloud-credentials \
 2. 构建并推送容器镜像到 SWR：
 
 ```bash
-docker buildx build --platform linux/amd64 -t huawei-elb-controller:latest .
+# Docker:
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+# nerdctl（仅有 containerd 的环境，无 Docker）:
+# nerdctl build --platform linux/amd64 -t huawei-elb-controller:latest .
 
 # 登录 SWR 并推送镜像
 # 在 SWR 控制台总览页面获取登录指令
+# Docker:
 docker login -u <你的命名空间> -p <登录令牌> <swr-registry>
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
+# nerdctl:
+# nerdctl login -u <你的命名空间> -p <登录令牌> <swr-registry>
+# nerdctl tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+# nerdctl push <swr-registry>/huawei-elb-controller:latest
 ```
 
 然后修改 `deploy/deployment.yaml`，将容器镜像改为 `<swr-registry>/huawei-elb-controller:latest`。
@@ -599,6 +632,8 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `metadata.annotations` | `huawei-elb.io/public-ip` | EIP 地址（仅公网 ELB） |
 | `metadata.annotations` | `huawei-elb.io/error` | 最近一次错误信息（正常时为空） |
 
+> ⚠️ **重要**：`credentials.region` 必须与你的 CCE 集群所在 region 一致（如 `cn-north-4`、`sa-brazil-1`）。默认值为空，不设置会导致部署失败。
+
 ### Helm Values
 
 | 参数 | 默认值 | 说明 |
@@ -616,6 +651,37 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `resources.requests.memory` | `128Mi` | 内存请求 |
 | `resources.limits.cpu` | `500m` | CPU 限制 |
 | `resources.limits.memory` | `256Mi` | 内存限制 |
+
+---
+
+## 注解
+
+控制器从 `LoadBalancerConfig` CR 的 `spec.annotations`（或 `metadata.annotations`）读取以下注解。所有注解均为可选 — 如未设置，控制器会从 CCE 集群节点自动检测。
+
+| 注解 | 说明 | 自动检测来源 |
+|---|---|---|
+| `huawei-elb.io/vpc-id` | 创建 ELB 所在的 VPC ID | 通过节点 `machineID` 查询 ECS 服务器元数据 |
+| `huawei-elb.io/subnet-id` | 创建 ELB 所在的 Neutron 子网 ID | 节点 label `node.kubernetes.io/subnetid` |
+| `huawei-elb.io/availability-zones` | 可用区，逗号分隔（如 `cn-north-4a,cn-north-4b`） | 节点 label `topology.kubernetes.io/zone` |
+
+### 手动指定
+
+如果自动检测失败或需要手动指定，给 `LoadBalancerConfig` CR 加注解：
+
+```yaml
+apiVersion: database.openeverest.io/v1
+kind: LoadBalancerConfig
+metadata:
+  name: my-elb-config
+  annotations:
+    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
+    huawei-elb.io/subnet-id: "566342ef-db1b-4ffa-a5ec-4185f5d61d40"
+    huawei-elb.io/availability-zones: "cn-north-4a"
+spec:
+  # ... 其余 spec
+```
+
+只要设置了这些注解，控制器就会使用提供的值，跳过对应字段的自动检测。
 
 ---
 
