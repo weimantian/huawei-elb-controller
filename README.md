@@ -601,9 +601,20 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 # Public ELB example:  mongosh "mongodb://clusterAdmin:<password>@<EIP-address>:27017/?replicaSet=rs0"
 ```
 
-> **Note**: For internal ELBs, the VIP is only reachable from within the VPC. If testing from your local machine outside the VPC, use a public ELB, or connect from within a Pod:
+> **Note**: Choose the right connection path based on ELB type:
+> - **Public ELB (EIP)**: Test from **outside** the cluster (your local machine). Connecting to the public EIP from inside a Pod may time out due to CCE network restrictions.
+> - **Internal ELB (VIP)**: Only reachable from **within** the VPC. Test from a Pod inside the cluster.
+>
+> Connecting from inside a Pod (for internal ELB, or to verify the ELB is working):
 > ```bash
-> kubectl exec -it <pod-name> -n everest -- psql -h <IP> -U postgres -d <db-name>
+> # PostgreSQL
+> kubectl exec -it <pod-name> -n everest -- psql -h <ELB-VIP> -U postgres -d <db-name>
+>
+> # MySQL / PXC
+> kubectl exec -it <pxc-pod-name> -c pxc -n everest -- mysql -h <ELB-VIP> -u root -p
+>
+> # MongoDB / PSMDB
+> kubectl exec -it <psmdb-pod-name> -c mongos -n everest -- mongosh "mongodb://clusterAdmin:<password>@<ELB-VIP>:27017/?replicaSet=rs0"
 > ```
 
 ---

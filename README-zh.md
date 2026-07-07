@@ -601,9 +601,20 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 # 公网 ELB 示例：  mongosh "mongodb://clusterAdmin:<password>@<EIP-address>:27017/?replicaSet=rs0"
 ```
 
-> **注意**：内网 ELB 的 VIP 只能在 VPC 内部访问。如果从本地电脑（VPC 外）测试，请使用公网 ELB，或者在 Pod 内部连接：
+> **注意**：根据 ELB 类型选择正确的连接路径：
+> - **公网 ELB (EIP)**：从集群**外部**（本地电脑）测试。从 Pod 内部连接公网 EIP 可能因 CCE 网络限制超时。
+> - **内网 ELB (VIP)**：只能在 VPC **内部**访问。从集群内的 Pod 测试。
+>
+> 从 Pod 内部连接（用于内网 ELB，或验证 ELB 是否正常工作）：
 > ```bash
-> kubectl exec -it <pod-name> -n everest -- psql -h <IP> -U postgres -d <db-name>
+> # PostgreSQL
+> kubectl exec -it <pod-name> -n everest -- psql -h <ELB-VIP> -U postgres -d <db-name>
+>
+> # MySQL / PXC
+> kubectl exec -it <pxc-pod-name> -c pxc -n everest -- mysql -h <ELB-VIP> -u root -p
+>
+> # MongoDB / PSMDB
+> kubectl exec -it <psmdb-pod-name> -c mongos -n everest -- mongosh "mongodb://clusterAdmin:<password>@<ELB-VIP>:27017/?replicaSet=rs0"
 > ```
 
 ---
