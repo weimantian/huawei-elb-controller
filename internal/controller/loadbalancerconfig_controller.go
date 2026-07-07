@@ -87,6 +87,18 @@ const (
 	uiGracePeriod = 5 * time.Second
 )
 
+// foreignCloudAnnotationPrefixes are spec.annotation key prefixes that
+// indicate the LBC targets a different cloud provider (AWS, GKE, Azure,
+// Alibaba). The controller skips these to avoid creating Huawei Cloud ELBs
+// for LBCs meant for other clouds (e.g. OpenEverest's built-in eks-default).
+var foreignCloudAnnotationPrefixes = []string{
+	"service.beta.kubernetes.io/aws-",
+	"service.beta.kubernetes.io/azure-",
+	"service.beta.kubernetes.io/alibaba-",
+	"cloud.google.com/",
+	"networking.gke.io/",
+}
+
 // lbcGVR is the GroupVersionKind for OpenEverest V1's LoadBalancerConfig CR.
 var lbcGVR = schema.GroupVersionKind{
 	Group:   "everest.percona.com",
@@ -162,6 +174,14 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if !isControlled(lbc) {
 		// Skip if using CCM autocreate (user chose the native CCE path).
 		if getSpecAnnotation(lbc, ccmAutocreateAnnotation) != "" {
+			return ctrl.Result{}, nil
+		}
+
+		// Skip LBCs that target a different cloud provider (AWS, GKE, Azure, etc.).
+		// OpenEverest ships an eks-default LBC template with aws-load-balancer-type
+		// annotation; without this filter the controller would create a Huawei Cloud
+		// ELB for it.
+		if hasForeignCloudAnnotations(lbc) {
 			return ctrl.Result{}, nil
 		}
 
@@ -434,6 +454,25 @@ func isControlled(lbc *unstructured.Unstructured) bool {
 	}
 	anns := lbc.GetAnnotations()
 	return anns[vpcIDAnnotation] != ""
+}
+
+// hasForeignCloudAnnotations returns true if the LBC's spec.annotations
+// contains keys that target a different cloud provider (AWS, GKE, Azure,
+// Alibaba). This prevents the controller from creating Huawei Cloud ELBs
+// for LBCs meant for other clouds (e.g. OpenEverest's built-in eks-default).
+func hasForeignCloudAnnotations(lbc *unstructured.Unstructured) bool {
+	specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
+	if !found || specAnns == nil {
+		return false
+	}
+	for key := range specAnns {
+		for _, prefix := range foreignCloudAnnotationPrefixes {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isInUse returns true if the CR has status.inUse == true,
