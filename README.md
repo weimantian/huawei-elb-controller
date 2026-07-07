@@ -219,7 +219,7 @@ credentials:
   ak: "<your-AK>"
   sk: "<your-SK>"
   projectId: "<your-ProjectID>"
-  region: "cn-north-4"
+  region: "<your-region>"  # e.g. cn-north-4, sa-brazil-1
 
 namespace: everest-system
 EOF
