@@ -76,79 +76,17 @@ OpenEverest 已认证的平台：
 
 ### 2. OpenEverest（原 Percona Everest）
 
-> **注意**：原 "Percona Everest" 项目已改名为 **OpenEverest**。`everest.percona.com/v1alpha1` API group 保持不变。旧的 Percona Helm 仓库仍然可用，但推荐使用新的 OpenEverest 仓库。
+集群中必须已安装并运行 OpenEverest。使用 `everest.percona.com/v1alpha1` API group（名称沿用原 "Percona Everest" 项目）。
 
-如果尚未安装 OpenEverest：
-
-**前提条件**：工作站需安装 Helm v3 和 [yq](https://github.com/mikefarah/yq)。不支持离线环境。
-
-#### 方式 A：Helm（推荐）
+安装方法和管理员密码获取请参考 [OpenEverest 文档](https://openeverest.io/documentation/current/)。快速检查：
 
 ```bash
-# 添加 OpenEverest Helm 仓库
-helm repo add openeverest https://openeverest.github.io/helm-charts/
-helm repo update
-
-# 安装 OpenEverest
-helm install everest-core openeverest/openeverest \
-    --namespace everest-system \
-    --create-namespace
-```
-
-这会安装：
-- Everest operator 和 server（`everest-system` 命名空间）
-- 数据库引擎 operator（PostgreSQL、MongoDB、PXC）（`everest` 命名空间）
-
-**可选参数**：
-
-| 参数 | 用途 |
-|---|---|
-| `--set dbNamespace.enabled=false` | 不自动创建 `everest` 数据库命名空间 |
-| `--set dbNamespace.namespaceOverride=<name>` | 使用自定义数据库命名空间名 |
-| `--set dbNamespace.pxc=false` | 跳过 PXC operator 安装 |
-| `--set dbNamespace.postgresql=false` | 跳过 PostgreSQL operator 安装 |
-| `--set dbNamespace.psmdb=false` | 跳过 MongoDB operator 安装 |
-| `--set server.tls.enabled=true` | 为 Everest 组件通信启用 TLS |
-
-> ⚠️ 不要使用 `--no-hooks` —— 不支持无 hook 安装。
-
-#### 方式 B：everestctl 命令行工具
-
-```bash
-# 下载 everestctl（macOS Apple Silicon）
-curl -sSL -o everestctl-darwin-arm64 \
-  https://github.com/openeverest/openeverest/releases/latest/download/everestctl-darwin-arm64
-sudo install -m 555 everestctl-darwin-arm64 /usr/local/bin/everestctl
-rm everestctl-darwin-arm64
-
-# 交互式安装
-everestctl install
-
-# 或无头安装
-everestctl install \
-  --namespaces everest \
-  --operator.postgresql=true \
-  --operator.mysql=true \
-  --operator.mongodb=true \
-  --skip-wizard
-```
-
-#### 验证安装
-
-```bash
-# 检查 Everest pod 运行状态
 kubectl get pods -n everest-system
+# 预期：everest-operator 和 everest-server pod 处于 Running 状态
 
-# 检查数据库引擎 operator 已注册
 kubectl get dbengine -n everest
 # 预期：percona-postgresql-operator、percona-psmdb-operator、percona-pxc-operator
-
-# 获取管理员密码
-kubectl get secret everest-accounts -n everest-system \
-  -o jsonpath='{.data.users\.yaml}' | base64 --decode | yq '.admin.passwordHash'
 ```
-
-> 更多详情请参考 [OpenEverest 快速安装指南](https://docs.percona.com/everest/quick-install.html) 或 [OpenEverest 文档](https://openeverest.io/documentation/current/)。
 
 ### 3. 华为云账号
 
@@ -160,23 +98,7 @@ kubectl get secret everest-accounts -n everest-system \
 
 ## 快速开始
 
-### 步骤 1：验证前提条件
-
-```bash
-# 检查 OpenEverest 运行状态
-kubectl get pods -n everest-system
-# 预期：everest-operator 和 everest-server pod 处于 Running 状态
-
-# 检查数据库引擎 operator 已注册
-kubectl get dbengine -n everest
-# 预期：percona-postgresql-operator、percona-psmdb-operator、percona-pxc-operator
-
-# 检查 CCM 运行状态（华为云）
-kubectl get pods -A | grep cloud-controller
-# 预期：cloud-controller-manager pod 处于 Running 状态
-```
-
-### 步骤 2：部署控制器
+### 步骤 1：部署控制器
 
 #### 方式 A：使用 Helm（推荐）
 
@@ -274,7 +196,7 @@ kubectl apply -f deploy/clusterrolebinding.yaml
 kubectl apply -f deploy/deployment.yaml
 ```
 
-### 步骤 3：验证控制器运行状态
+### 步骤 2：验证控制器运行状态
 
 ```bash
 kubectl get pods -n everest-system -l app.kubernetes.io/name=huawei-elb-controller
@@ -298,7 +220,7 @@ INFO    Starting Controller               {"controller": "loadbalancerconfig"}
 INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
-### 步骤 4：创建 LoadBalancerConfig
+### 步骤 3：创建 LoadBalancerConfig
 
 在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。默认 ELB 类型为**公网**（带 EIP）。设 `huawei-elb.io/public: "false"` 创建内网 ELB。
 
@@ -367,16 +289,7 @@ EOF
 | `huawei-elb.io/subnet-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
 | `huawei-elb.io/availability-zones` | ✅ 从节点标签自动探测 | 需要时覆盖 |
 | `huawei-elb.io/public` | 默认 `true`（公网） | 设为 `"false"` 创建内网 ELB |
-
-公网 ELB 可选参数（仅 `public: "true"` 时生效）：
-
-| 注解 | 默认值 | 说明 |
-|---|---|---|
-| `huawei-elb.io/bandwidth-size` | `10` | EIP 带宽（Mbit/s） |
-| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
-| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型 |
-
-### 步骤 5：等待 ELB 就绪
+### 步骤 4：等待 ELB 就绪
 
 ```bash
 # 等待 ELB 创建完成并激活（最多 120 秒）
@@ -395,235 +308,85 @@ kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.spec.annotations}'
 
 > **重要**：在创建 DatabaseCluster 之前，务必等待 `ready=true`。这确保 ELB ID 已写入 LoadBalancerConfig，OpenEverest operator 读取时能获取到。
 
-### 步骤 6：创建数据库集群
+### 步骤 5：创建数据库集群
 
-创建一个使用步骤 4 中创建的 LoadBalancerConfig 的数据库集群。
+创建数据库集群时引用步骤 4 创建的 LoadBalancerConfig。完整的 UI/kubectl 流程请参考 [OpenEverest 文档](https://openeverest.io/documentation/current/)，关键字段是 `spec.proxy.expose.loadBalancerConfigName`：
 
-#### 方式 A（推荐）：via OpenEverest UI
-
-1. 在 OpenEverest UI 中进入 **Databases**。
-2. 点击 **Create database**。
-3. **Step 1 — Basic Information**：选择引擎（例如 PostgreSQL），填写名称（例如 `my-pg`），选择版本。
-4. **Step 2 — Resources**：设置 CPU、内存、磁盘大小和节点数。
-5. **Step 3 — Backups**：配置备份存储（或跳过）。
-6. **Step 4 — Advanced Configurations**：
-   - 设置 **Storage class**（例如 `csi-disk`）。
-   - 启用 **External access**（LoadBalancer）。
-   - 选择步骤 4 中创建的 **Load Balancer config**（例如 `huawei-elb`）。
-7. **Step 5 — Monitoring**：配置监控（或跳过）。
-8. 点击 **Create database**。
-
-> **注意**：如果 LoadBalancer config 下拉菜单显示 “- No configuration -”，可能是 ELB 尚未就绪。请返回步骤 5 等待 `ready=true`。
-
-#### 方式 B：via kubectl
-
-创建一个 PostgreSQL 数据库集群：
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: DatabaseCluster
-metadata:
-  name: my-pg
-  namespace: everest
+```yaml
 spec:
-  engine:
-    type: postgresql
-    version: "17.9"
-    replicas: 1
-    resources:
-      cpu: "1"
-      memory: 2G
-    storage:
-      size: 10Gi
-      class: csi-disk
   proxy:
-    type: pgbouncer
-    replicas: 1
-    resources:
-      cpu: "1"
-      memory: 30M
-    storage:
-      size: 1Gi
     expose:
       type: LoadBalancer
-      loadBalancerConfigName: huawei-elb
-EOF
+      loadBalancerConfigName: huawei-elb  # 步骤 4 创建的 LBC
 ```
 
-> **支持的引擎类型**：`postgresql`、`pxc`（MySQL）、`psmdb`（MongoDB）。支持的代理类型：`pgbouncer`（PostgreSQL）、`haproxy`（MySQL）、`mongos`（MongoDB）。
->
-> **可选**：在 `expose` 下添加 `ipSourceRanges` 限制仅受信任 IP 访问（CIDR 格式）：
-> ```yaml
->     expose:
->       type: LoadBalancer
->       loadBalancerConfigName: huawei-elb
->       ipSourceRanges:
->         - "10.0.0.0/24"
-> ```
+> **注意**：如果 UI 中 LoadBalancer config 下拉菜单显示 "- No configuration -"，说明 ELB 还未就绪。请回到步骤 5 等待 `ready=true`。
 
-### 步骤 7：验证数据库访问
+### 步骤 6：验证连接
 
-#### 1. 检查数据库集群运行状态
+数据库运行后，验证 ELB 已正确绑定并获取连接 IP。
+
+#### 1. 验证 ELB 已绑定到数据库 Service
 
 ```bash
-# 列出所有数据库集群及其状态
-kubectl get databasecluster -n everest
+# 从 Service 获取 ELB ID（应与 LBC 的 elb.id 一致）
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
+
+# 验证与 LBC 一致
+kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.spec.annotations.kubernetes\.io/elb\.id}'
 ```
 
-预期输出：
-```
-NAME        SIZE   READY   STATUS   HOSTNAME        AGE
-my-pg       1      1       ready    <ELB-VIP>   5m
-```
+#### 2. 获取连接 IP
 
-- `READY`：就绪副本数 / 总副本数（应与 `SIZE` 一致）
-- `STATUS`：应为 `ready`
-- `HOSTNAME`：ELB 的 VIP 地址（内网 IP）
-
-#### 2. 查找 LoadBalancer Service
-
+**公网 ELB (EIP)** — 从集群外部连接：
 ```bash
-# 列出 OpenEverest 为数据库创建的 Service
-# 将 <db-name> 替换为你的数据库名称（如 my-pg）
-kubectl get svc -n everest -l app.kubernetes.io/instance=<db-name>
-```
-
-预期输出：
-```
-NAME                TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)          AGE
-my-pg-pgbouncer     LoadBalancer   <CLUSTER-IP>   <ELB-VIP>    5432:31234/TCP   5m
-```
-
-- `TYPE`：应为 `LoadBalancer`
-- `EXTERNAL-IP`：ELB 的 VIP 地址（内网和公网 ELB 都显示内网 VIP）
-- `PORT(S)`：数据库端口 —— PostgreSQL 5432、MySQL 3306、MongoDB 27017
-
-#### 3. 获取连接 IP
-
-**内网 ELB**（仅 VPC 内访问）：
-
-步骤 2 中的 `EXTERNAL-IP` 就是连接地址：
-```bash
-# 从 Service 状态提取内网 VIP
-kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-# 输出：<ELB-VIP>
-```
-
-**公网 ELB**（互联网访问）：
-
-从 LoadBalancerConfig 获取公网 IP（EIP）：
-```bash
-# 读取控制器写入的公网 IP 注解
 kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/public-ip}'
 # 输出：<EIP-address>
 ```
 
-#### 4. 验证 ELB 已绑定到 Service
-
+**内网 ELB (VIP)** — 从 VPC 内部连接：
 ```bash
-# 检查 Service 是否携带 ELB ID 注解
-# 这是 ELB 的 UUID（不是 IP）—— CCM 用它来将预创建的 ELB 绑定到 Service
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-# 输出：<ELB-UUID>（ELB UUID，不是 IP）
+kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+# 输出：<ELB-VIP>
 ```
 
-该值应与 LoadBalancerConfig 中的 ELB ID 一致：
+#### 3. 连接数据库
+
+完整连接指南（密码获取、客户端安装、各引擎连接命令）请参考 [OpenEverest 文档](https://openeverest.io/documentation/current/)。速查表：
+
+| 引擎 | 端口 | 密码键 | 连接命令 |
+|---|---|---|---|
+| PostgreSQL | 5432 | `.data.postgres` | `psql -h <IP> -U postgres -d <db-name>` |
+| MySQL / PXC | 3306 | `.data.root` | `mysql -h <IP> -u root -p` |
+| MongoDB / PSMDB | 27017 | `.data.clusterAdmin` | `mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"` |
+
+获取密码：
 ```bash
-# 验证 LBC CR 中存储了相同的 ELB ID
-kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.spec.annotations.kubernetes\.io/elb\.id}'
-```
-
-> **注意**：ELB ID 是 CCM 内部使用的 UUID。连接数据库请使用步骤 3 中的 IP，不是这个 UUID。
-
-#### 5. 安装数据库客户端（如未安装）
-
-**PostgreSQL (`psql`)**：
-
-| 操作系统 | 命令 |
-|---|---|
-| macOS | `brew install postgresql` |
-| Ubuntu/Debian | `sudo apt install postgresql-client` |
-| CentOS/RHEL | `sudo yum install postgresql` |
-
-**MySQL (`mysql`)**：
-
-| 操作系统 | 命令 |
-|---|---|
-| macOS | `brew install mysql-client` |
-| Ubuntu/Debian | `sudo apt install mysql-client` |
-| CentOS/RHEL | `sudo yum install mysql` |
-
-**MongoDB (`mongosh`)**：
-
-| 操作系统 | 命令 |
-|---|---|
-| macOS | `brew install mongosh` |
-| Ubuntu/Debian | 参考[官方安装指南](https://www.mongodb.com/docs/mongodb-shell/install/) |
-| CentOS/RHEL | 参考[官方安装指南](https://www.mongodb.com/docs/mongodb-shell/install/) |
-
-#### 6. 连接数据库
-
-将 `<IP>` 替换为步骤 3 中的 IP，`<db-name>` 替换为你的数据库名称。
-
-**PostgreSQL**（端口 5432）：
-
-```bash
-# 获取数据库密码
-kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.postgres}' | base64 -d
-
-# 通过 psql 连接
-psql -h <IP> -U postgres -d <db-name>
-# 公网 ELB 示例：  psql -h <EIP-address> -U postgres -d my-pg
-# 内网 ELB 示例：  psql -h <ELB-VIP> -U postgres -d my-pg
-```
-
-**MySQL / PXC**（端口 3306）：
-
-```bash
-# 获取数据库密码
-kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.root}' | base64 -d
-
-# 通过 mysql 客户端连接
-mysql -h <IP> -u root -p -e "SELECT VERSION();"
-# 公网 ELB 示例：  mysql -h <EIP-address> -u root -p
-# 内网 ELB 示例：  mysql -h <ELB-VIP> -u root -p
-```
-
-**MongoDB / PSMDB**（端口 27017）：
-
-```bash
-# 获取数据库密码
-kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.clusterAdmin}' | base64 -d
-
-# 通过 mongosh 连接
-mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
-# 公网 ELB 示例：  mongosh "mongodb://clusterAdmin:<password>@<EIP-address>:27017/?replicaSet=rs0"
+kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.<password-key>}' | base64 -d
 ```
 
 > **注意**：根据 ELB 类型选择正确的连接路径：
 > - **公网 ELB (EIP)**：从集群**外部**（本地电脑）测试。从 Pod 内部连接公网 EIP 可能因 CCE 网络限制超时。
-> - **内网 ELB (VIP)**：只能在 VPC **内部**访问。从集群内的 Pod 测试。
->
-> 从 Pod 内部连接（用于内网 ELB，或验证 ELB 是否正常工作）：
-> ```bash
-> # PostgreSQL
-> kubectl exec -it <pod-name> -n everest -- psql -h <ELB-VIP> -U postgres -d <db-name>
->
-> # MySQL / PXC
-> kubectl exec -it <pxc-pod-name> -c pxc -n everest -- mysql -h <ELB-VIP> -u root -p
->
-> # MongoDB / PSMDB
-> kubectl exec -it <psmdb-pod-name> -c mongos -n everest -- mongosh "mongodb://clusterAdmin:<password>@<ELB-VIP>:27017/?replicaSet=rs0"
-> ```
+> - **内网 ELB (VIP)**：只能在 VPC **内部**访问。从集群内的 Pod 测试：
+>   ```bash
+>   kubectl exec -it <pod-name> -n everest -- mysql -h <ELB-VIP> -u root -p
+>   ```
 
 ---
 
 ## 配置参考
 
-### LoadBalancerConfig Annotation
+### 自动检测注解
 
-#### 可选 Annotation
+以下注解在 CCE 上会从集群节点自动检测。均为可选 — 如未设置，控制器会自动填充。如需覆盖，在 `metadata.annotations` 中手动设置。
+
+| Annotation | 自动检测来源 |
+|---|---|
+| `huawei-elb.io/vpc-id` | 通过节点 `machineID` 查询 ECS 服务器元数据 |
+| `huawei-elb.io/subnet-id` | Neutron 子网 ID（通过 VPC API 从 Virsubnet ID 转换） |
+| `huawei-elb.io/availability-zones` | 节点 label `topology.kubernetes.io/zone` |
+
+### 可选 Annotation
 
 | Annotation | 默认值 | 说明 |
 |---|---|---|
@@ -633,7 +396,7 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型；`5_bgp` 为 BGP |
 | `huawei-elb.io/region` | 全局 REGION | 为特定 CR 覆盖华为云区域 |
 
-#### 控制器写入的 Annotation
+### 控制器写入的 Annotation
 
 | 位置 | Annotation | 说明 |
 |---|---|---|
@@ -643,7 +406,24 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `metadata.annotations` | `huawei-elb.io/public-ip` | EIP 地址（仅公网 ELB） |
 | `metadata.annotations` | `huawei-elb.io/error` | 最近一次错误信息（正常时为空） |
 
-> ⚠️ **重要**：`credentials.region` 必须与你的 CCE 集群所在 region 一致（如 `cn-north-4`、`sa-brazil-1`）。默认值为空，不设置会导致部署失败。
+### 手动覆盖
+
+如果自动检测失败或需要覆盖，给 `LoadBalancerConfig` CR 加注解：
+
+```yaml
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: my-elb-config
+  annotations:
+    huawei-elb.io/vpc-id: "<your-vpc-id>"
+    huawei-elb.io/subnet-id: "<your-subnet-id>"
+    huawei-elb.io/availability-zones: "cn-north-4a"
+spec:
+  # ... 其余 spec
+```
+
+只要设置了这些注解，控制器就会使用提供的值，跳过对应字段的自动检测。
 
 ### Helm Values
 
@@ -663,36 +443,7 @@ mongosh "mongodb://clusterAdmin:<password>@<IP>:27017/?replicaSet=rs0"
 | `resources.limits.cpu` | `500m` | CPU 限制 |
 | `resources.limits.memory` | `256Mi` | 内存限制 |
 
----
-
-## 注解
-
-控制器从 `LoadBalancerConfig` CR 的 `spec.annotations`（或 `metadata.annotations`）读取以下注解。所有注解均为可选 — 如未设置，控制器会从 CCE 集群节点自动检测。
-
-| 注解 | 说明 | 自动检测来源 |
-|---|---|---|
-| `huawei-elb.io/vpc-id` | 创建 ELB 所在的 VPC ID | 通过节点 `machineID` 查询 ECS 服务器元数据 |
-| `huawei-elb.io/subnet-id` | 创建 ELB 所在的 Neutron 子网 ID | 节点 label `node.kubernetes.io/subnetid` |
-| `huawei-elb.io/availability-zones` | 可用区，逗号分隔（如 `cn-north-4a,cn-north-4b`） | 节点 label `topology.kubernetes.io/zone` |
-
-### 手动指定
-
-如果自动检测失败或需要手动指定，给 `LoadBalancerConfig` CR 加注解：
-
-```yaml
-apiVersion: database.openeverest.io/v1
-kind: LoadBalancerConfig
-metadata:
-  name: my-elb-config
-  annotations:
-    huawei-elb.io/vpc-id: "<your-vpc-id>"
-    huawei-elb.io/subnet-id: "<your-subnet-id>"
-    huawei-elb.io/availability-zones: "cn-north-4a"
-spec:
-  # ... 其余 spec
-```
-
-只要设置了这些注解，控制器就会使用提供的值，跳过对应字段的自动检测。
+> ⚠️ **重要**：`credentials.region` 必须与你的 CCE 集群所在 region 一致（如 `cn-north-4`、`sa-brazil-1`）。默认值为空，不设置会导致部署失败。
 
 ---
 
