@@ -674,8 +674,8 @@ kind: LoadBalancerConfig
 metadata:
   name: my-elb-config
   annotations:
-    huawei-elb.io/vpc-id: "0d60646b-e3b7-4ad9-b422-015ee7da9a48"
-    huawei-elb.io/subnet-id: "566342ef-db1b-4ffa-a5ec-4185f5d61d40"
+    huawei-elb.io/vpc-id: "<your-vpc-id>"
+    huawei-elb.io/subnet-id: "<your-subnet-id>"
     huawei-elb.io/availability-zones: "cn-north-4a"
 spec:
   # ... 其余 spec
