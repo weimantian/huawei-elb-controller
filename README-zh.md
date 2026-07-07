@@ -277,7 +277,7 @@ kubectl apply -f deploy/deployment.yaml
 ### 步骤 3：验证控制器运行状态
 
 ```bash
-kubectl get pods -n everest-system -l app=huawei-elb-controller
+kubectl get pods -n everest-system -l app.kubernetes.io/name=huawei-elb-controller
 ```
 
 预期输出：
@@ -690,7 +690,7 @@ spec:
 ### 控制器 Pod 无法启动
 
 ```bash
-kubectl describe pod -n everest-system -l app=huawei-elb-controller
+kubectl describe pod -n everest-system -l app.kubernetes.io/name=huawei-elb-controller
 ```
 
 常见原因：

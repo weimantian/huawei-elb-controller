@@ -277,7 +277,7 @@ kubectl apply -f deploy/deployment.yaml
 ### Step 3: Verify the Controller is Running
 
 ```bash
-kubectl get pods -n everest-system -l app=huawei-elb-controller
+kubectl get pods -n everest-system -l app.kubernetes.io/name=huawei-elb-controller
 ```
 
 Expected:
@@ -690,7 +690,7 @@ When any of these annotations is present, the controller uses the provided value
 ### Controller Pod Won't Start
 
 ```bash
-kubectl describe pod -n everest-system -l app=huawei-elb-controller
+kubectl describe pod -n everest-system -l app.kubernetes.io/name=huawei-elb-controller
 ```
 
 Common causes:
