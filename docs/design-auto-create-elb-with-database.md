@@ -257,7 +257,16 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 - 同步等 ELB 创建（最多 120s）占用 webhook 请求--需确认 Q3（webhook timeout 上限）
 - webhook 需要单独 RBAC + Service + Deployment
 
----
+| 方案 | 拦截点 | 设计意图 |
+|---|---|---|
+| 0 脚本 | 无（不改代码） | 过渡方案，立即可用 |
+| 1 watch DBC | DBC 创建事件 | **首选**——复用 LBC Reconciler，改动最小 |
+| 2 watch Service+autocreate | Service 创建事件 | CCM 原生建 ELB，但 VPC/子网需手动填 |
+| 3 watch Service+elb.id | Service 创建事件 | 控制器建 ELB，但不保留 LBC，状态可见性差 |
+| 4 Webhook | API 请求到达 API Server 之前 | 无裸奔窗口，但高可用要求高 |
+
+> **为何枚举 5 个方案？** DBC → Service → ELB 链路上有多个可拦截的点（DBC CR 创建、Service 创建、API 请求准入阶段），每个点都有不同的安全窗口、代码复用、依赖关系权衡。穷举全部候选再收敛是标准系统设计方法。
+
 
 ## 4. 方案对比矩阵
 
@@ -314,6 +323,31 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 
 > **opt-in 设计的意义**：用户显式声明"我要自动建 ELB"，控制器才行动。存量 DBC 不受影响。OpenEverest UI 如果不支持加这个注解，用户可通过 `kubectl annotate` 或 Helm post-install hook 添加。
 
+### 5.4 当前方案 vs 推荐方案（方案 1）对比
+
+| 维度 | 当前方案（手动两步） | 推荐方案（方案 1：DBC 自动建 LBC） |
+|---|---|---|
+| **用户步骤** | 2 步（建 LBC → 等 ready → 建 DBC） | 1 步（建 DBC，加 `auto-elb` 注解） |
+| **操作界面** | kubectl 或 UI | kubectl annotate（当前）；未来 UI 支持后一键 |
+| **用户等待** | 必须等 LBC ready 后才能建 DBC | 只需等 DBC ready（LBC+ELB 在后台自动完成） |
+| **前提知识** | 理解 LBC 概念、知道要建 LBC | 只需知道加 `auto-elb: "true"` 注解 |
+| **VPC/子网/AZ** | 自动探测（无需手动） | 自动探测（共享同一探测逻辑） |
+| **ELB 生命周期** | 控制器 finalizer 管理 | 同左（复用） |
+| **状态可见性** | LBC 上的 `ready`/`elb-status`/`error`/`public-ip` | 同左（LBC 仍然存在，用户可查看） |
+| **删除流程** | 删 DBC → 控制器等 in-use-protection 移除 → 删 ELB | 删 DBC → DBC Reconciler 等 in-use-protection 移除 → 删 LBC → LBC Reconciler 删 ELB |
+| **异常回滚** | 删除 LBC 即删 ELB | 删除 DBC 时自动清理 LBC；DBC patch 失败时有补偿清理逻辑（R2） |
+| **多 DB 共享 ELB** | 支持（多 DBC 引用同一 LBC） | 不支持（每个 DBC 独立 LBC）；如需共享，手动建 LBC 即可（不设 auto-elb） |
+| **ELB 配置精细度** | 完整（LBC 注解） | 完整（自动建的 LBC 仍可手动加注解） |
+| **与当前方案兼容** | — | 完全兼容——已设 `loadBalancerConfigName` 的 DBC 不触发 |
+| **代码复用** | — | ~80% 复用（LBC Reconciler 完全不动，只新增 DBC Reconciler） |
+
+```
+当前：LBC → [等 ready] → DBC（用户感知两步、等待一次）
+  ↑ 用户操作        ↑ 用户操作
+
+方案1：DBC + auto-elb → LBC → ELB → patch DBC → Service → CCM 绑定
+       ↑ 用户操作（一步）       └──── 控制器自动完成 ────┘
+```
 ---
 
 ## 6. 方案 1 详细设计
