@@ -426,7 +426,70 @@ Reconcile 三步循环:
 
 > 关键理解：**控制器不是"建 LBC → 等 ELB → patch DBC"这条同步线，而是多次 Reconcile 协作的异步过程。** 每次 Reconcile 只做一小步，然后 return。
 
-### 6.1 架构
+### 6.1 核心步骤详解
+
+#### patch DBC：连接两个 Reconciler 的关键关节
+
+将 `spec.proxy.expose.loadBalancerConfigName` 从空字符串 `""` 改成 `"elb-<ns>-<dbc-name>"`：
+
+```
+patch 前：                              patch 后：
+spec:                                   spec:
+  proxy:                                  proxy:
+    expose:                                 expose:
+      type: LoadBalancer                      type: LoadBalancer
+      loadBalancerConfigName: ""      →       loadBalancerConfigName: "elb-default-my-db"
+```
+
+没有这一步，DBC 的 `loadBalancerConfigName` 永远是空，OpenEverest 永远不会去读 LBC 的注解。LBC 上有 `elb.id` 也没用——Service 永远是空注解，CCM 永远不动。
+
+**(F4) CEL 规则保证可行**：允许 `loadBalancerConfigName` 从 `""` 改成有值。
+
+#### CCM 绑定触发机制
+
+CCM 通过 K8s 原生 watch 机制检测，**没有显式调用**。CCM 内部有一个 controller，一直在 watch 集群里的 `type: LoadBalancer` Service：
+
+```
+CCM 的 Reconcile 循环
+
+  ① watch 检测到 Service annotations 里出现 kubernetes.io/elb.id: "xxx"
+  ② 调华为云 ELB API：查 ELB → 创建 listener + backend
+  ③ 写 Service.status.loadBalancer.ingress = [{ip: "<VIP>"}]
+  ④ EXTERNAL-IP 从 <pending> 变成 VIP
+```
+
+整条链路每一步都是事件驱动：
+
+```
+Service annotations 变 ──→ CCM 自动检测（watch 触发）──→ 调 API ──→ 写 status
+       ↑
+  OpenEverest update
+```
+
+#### 时序：数据库 ready vs ELB 绑定
+
+数据库初始化和 ELB 创建是**并行**的，可能出现数据库先 ready 但外部 IP 还没到位的边界情况。
+
+**正常（数据库慢、ELB 快）**：
+```
+创建 DBC ──── 数据库 Pod 初始化（~3min）───────────── DBC ready
+    │                                                    │
+    └─ 建 LBC → 建 ELB(15s) → patch → Service 更新      │
+       → CCM 绑定(5s) ──────────────────────────────────┘
+                      ↑ ELB 在数据库 ready 前就绑定好了 ✓
+```
+
+**边界（数据库快、ELB 慢）**：
+```
+创建 DBC ── 数据库 Pod 秒起（~1min）── DBC ready
+    │                                    │
+    └─ 建 LBC → 建 ELB(120s) → patch → Service → CCM 绑定
+                                                ↑ 数据库 ready 但外部 IP 还在 pending
+```
+
+> **这不是 bug**——EKS/GKE 也一样，LB 创建和数据库初始化并行。`DBC.status.state == Ready` 代表**数据库引擎正常**，不是"外部可达"。外部可达要看 Service 的 `EXTERNAL-IP` 或 LBC 的 `ready` 注解。
+
+### 6.2 架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -451,7 +514,7 @@ Reconcile 三步循环:
 
 两个 Reconciler 在同一个 manager 中运行（同一个 Pod），共享 ELB client 和凭证。
 
-### 6.2 DBC Reconciler 流程
+### 6.3 DBC Reconciler 流程
 
 ```
 Reconcile(ctx, req)
@@ -493,7 +556,7 @@ Reconcile(ctx, req)
      (CEL 规则允许从 "" 设为有值 ✓ F4)
 ```
 
-### 6.3 LBC 命名规则
+### 6.4 LBC 命名规则
 
 ```
 elb-<namespace>-<dbc-name>
@@ -506,7 +569,7 @@ elb-<namespace>-<dbc-name>
 
 **长度保护**：如果 `len(namespace) + len(dbc-name) > 60`，截断 dbc-name 并加 SHA256 前 8 字符 hex 后缀。碰撞概率 `1/2^32`，冲突时直接报错不重试。
 
-### 6.4 DBC 删除链路
+### 6.5 DBC 删除链路
 
 ```
 用户删 DBC
@@ -531,7 +594,7 @@ DBC Reconciler 检测到 DeletionTimestamp
 **解决**：DBC 删除时，DBC Reconciler 轮询 LBC 的 finalizers，确认 `in-use-protection` 已移除后再删 LBC（轮询间隔 5s，超时 10 分钟；超时后在 DBC 的 `huawei-elb.io/error` 注解写错误信息，控制器继续重试）。
 
 > ⚠️ **F11 待验证**："OpenEverest 会先清理 engine CR → `in-use-protection` 随之解除" 是推断，未在源码中确认。若实际行为是先删 DBC 再清理 engine CR（或并发），则 `in-use-protection` 可能在控制器尝试删 LBC 时仍存在。兜底：超时后打印告警日志，人工介入。
-### 6.5 新增常量与注解
+### 6.6 新增常量与注解
 
 ```go
 const (
@@ -553,7 +616,7 @@ const (
 )
 ```
 
-### 6.6 RBAC 新增
+### 6.7 RBAC 新增
 
 DBC Reconciler 需要额外权限：
 
@@ -567,7 +630,7 @@ DBC Reconciler 需要额外权限：
   verbs: ["get", "list", "watch", "create", "delete"]
 ```
 
-### 6.7 共享探测缓存
+### 6.8 共享探测缓存
 
 两个 Reconciler 共享 `autoDetectedParams` 缓存。DBC Reconciler 调用 LBC Reconciler 的 `autoDetectParams` 方法（需提取为公共方法或共享 detector 结构）。
 
