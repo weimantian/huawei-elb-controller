@@ -366,6 +366,31 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 
 ## 6. 方案 1 详细设计
 
+### 6.0 基础概念：Reconcile 循环
+
+> controller-runtime 框架的核心机制。每个 Reconciler 实现一个 `Reconcile(ctx, req)` 方法，框架在资源变化时自动调用。**不可重入、最终一致性、需幂等**——同一资源可能被多次 Reconcile，每次都必须得到相同结果。
+
+```
+Reconcile 三步循环:
+
+① Observe  — Get 资源当前状态（从 API Server / informer cache）
+② Diff     — 对比"当前状态"与"期望状态"，找出差异
+③ Act      — 执行操作消除差异，完成后 return / requeue
+
+每次 K8s 资源变化（创建、修改、删除），框架自动调一次 Reconcile。
+控制器通过 return error 或 requeue 来等待下次触发。
+```
+
+**对本方案的影响**:
+- DBC 创建后 17ms 内触发 DBC Reconciler → 判断触发条件 → 建 LBC →
+  **return（不等 ELB ready）**
+- LBC 创建后 17ms 内触发 LBC Reconciler → 探测 VPC/子网/AZ → 调华为云 API 建 ELB →
+  写 elb.id → **return**
+- LBC 的 elb.id 被写回后，再次触发 DBC Reconciler（因为 LBC 状态变了）→
+  检测到 LBC ready → patch DBC 的 loadBalancerConfigName → **完成**
+
+> 关键理解：**控制器不是"建 LBC → 等 ELB → patch DBC"这条同步线，而是多次 Reconcile 协作的异步过程。** 每次 Reconcile 只做一小步，然后 return。
+
 ### 6.1 架构
 
 ```
