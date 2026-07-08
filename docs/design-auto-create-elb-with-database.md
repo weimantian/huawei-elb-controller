@@ -47,13 +47,24 @@
 | F9 | engine CR 与 DBC 同名、同 namespace | `providers/pxc/provider.go` L67-L72 | DBC 名 = engine CR 名 |
 | F10 | `kubernetes.io/elb.id` 注解走 LBC `spec.annotations` -> engine CR `ServiceExpose.Annotations` -> Service `metadata.annotations` | `helper.go` L698-L729 | 注解传播路径已验证 |
 
-### 2.1 待确认问题（决定部分方案可行性）
+### 2.1 关键问题确认
 
-| # | 问题 | 影响 |
+> Q1 已通过 CCE 官方文档与开源 CCM 文档确认，结论如下。Q2/Q3 仍待实测。
+
+**Q1 结论：CCE 内置 CCM 与开源 CCM 行为不同，方案 1 对 CCE 场景安全。**
+
+| CCM 类型 | 无 `elb.id` 无 `autocreate` 的 LoadBalancer Service 行为 | 来源 |
 |---|---|---|
-| Q1 | **CCE CCM 对无 `elb.id` 无 `autocreate` 的 LoadBalancer Service 做什么？** | 决定"Service 裸奔窗口"是否产生孤儿 ELB |
-| Q2 | OpenEverest UI 创建 DBC 时，`loadBalancerConfigName` 下拉能否留空提交？ | 决定 UI 路径是否走得通 |
-| Q3 | K8s Mutating Webhook 的 timeout 可配置上限？CCE 默认值？ | 决定 webhook 方案的同步等待可行性 |
+| **CCE 内置 CCM**（CCE 集群预装，主要场景） | **不创建 ELB，Service 停在 `<pending>`** | [cce_10_0385](https://support.huaweicloud.com/usermanual-cce/cce_10_0385.html)、[cce_10_0681](https://support.huaweicloud.com/usermanual-cce/cce_10_0681.html) |
+| **开源 CCM**（kubernetes-sigs/cloud-provider-huaweicloud，ECS 自建集群） | **自动创建 ELB**（`elb.id` 为空即触发） | [usage-guide.md](https://github.com/kubernetes-sigs/cloud-provider-huaweicloud/blob/master/docs/usage-guide.md) |
+
+证据链：
+
+1. CCE 文档只定义两种互斥场景："使用已有ELB"（必填 `elb.id`）与"自动创建ELB"（必填 `elb.autocreate`），无第三种"都不填"场景。
+2. CCE 注解全集页明确：`elb.autocreate` 为"仅自动创建ELB的场景：必填"，`elb.id` 为"仅关联已有ELB的场景需填写"，两者"不能同时填写"。
+3. 开源 CCM 文档则相反：`elb.id` "If empty, a new ELB service will be created automatically"，Example 2 无 `elb.id` 无 `autocreate` 即自动建 ELB。
+4. **对本控制器主要场景（CCE 集群）**：方案 1 的 Service 裸奔窗口安全——CCM 不会抢跑建 ELB，Service 停在 pending，等控制器 patch DBC 后 OpenEverest 补 elb.id，CCM 才绑定。**方案 1 可推进。**
+5. **对 ECS 自建集群（开源 CCM）**：裸奔窗口内 CCM 会自动建 ELB，需额外处理（检测开源 CCM 时走不同路径，或在 Service 创建瞬间立即注入 elb.id）。当前控制器 README 主要面向 CCE，此场景作为已知限制记录。
 
 ---
 
@@ -272,11 +283,12 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 
 ### 5.1 推荐结论
 
-**首选：方案 1（watch DBC -> 自动建 LBC）作为 opt-in 增量功能**，前提是 Q1 答案为"CCM 对无注解 LoadBalancer Service 不 autocreate"。
+**首选：方案 1（watch DBC -> 自动建 LBC）作为 opt-in 增量功能**。Q1 已确认：CCE 内置 CCM 对无注解 LoadBalancer Service 不 autocreate，Service 停在 `<pending>`，裸奔窗口安全无孤儿 ELB 风险。
+
 
 **退选：方案 0（脚本封装）作为立即可用的过渡方案**，无需等 Q1 确认。
 
-**备选：方案 4（Webhook）**，如果 Q1 答案为"CCM 会 autocreate 孤儿 ELB"且需要严格无裸奔窗口。
+**备选：方案 4（Webhook）**，仅当未来需要严格无裸奔窗口或支持 ECS 自建集群（开源 CCM）场景时启用。
 
 ### 5.2 推荐理由
 
@@ -467,7 +479,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 
 | # | 风险 | 影响 | 概率 | 缓解措施 |
 |---|---|---|---|---|
-| R1 | **Service 裸奔窗口：CCM 对无注解 LoadBalancer Service autocreate 孤儿 ELB** | 孤儿 ELB 持续计费 | 依赖 Q1 | ① 先确认 Q1；② 若会 autocreate，方案 1 不可行，转方案 4 或在 DBC 创建瞬间抢先 patch |
+| R1 | **Service 裸奔窗口：CCM 对无注解 LoadBalancer Service autocreate 孤儿 ELB** | 孤儿 ELB 持续计费 | **已解除**（Q1 确认 CCE CCM 不 autocreate） | ✅ CCE 场景安全；⚠️ ECS 自建集群（开源 CCM）会 autocreate，当前作为已知限制，文档注明仅支持 CCE 场景 |
 | R2 | **patch DBC 失败导致孤儿 LBC+ELB** | LBC+ELB 存在但无人引用，持续计费 | 中 | 补偿逻辑：定期扫描有 `auto-lbc-name` 注解但 DBC 已删的 LBC，清理 |
 | R3 | **DBC 删除时 `in-use-protection` finalizer 阻止 LBC 删除** | DBC 卡在删除中 | 高 | DBC Reconciler 轮询 LBC finalizers，等 `in-use-protection` 移除后再删 LBC；超时后报错 |
 | R4 | **LBC 命名冲突（cluster-scoped）** | 创建 LBC 失败 | 低 | 命名加 namespace 前缀 + 长度截断 + hash |
@@ -481,9 +493,9 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 
 ## 8. 实现计划
 
-### Phase 0：确认关键问题（阻塞）
+### Phase 0：确认关键问题
 
-- [ ] **Q1**：测试 CCE CCM 对无注解 LoadBalancer Service 的行为（建个空 Service 观察）
+- [x] **Q1**：CCE CCM 对无注解 LoadBalancer Service 的行为——**已确认**：CCE 内置 CCM 不 autocreate（Service 停 pending），开源 CCM 会 autocreate。方案 1 对 CCE 场景可行。
 - [ ] **Q2**：确认 OpenEverest UI 能否留空 loadBalancerConfigName 提交
 - [ ] **Q3**：确认 K8s webhook timeout 上限（备选方案 4 用）
 
@@ -506,7 +518,9 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 - [ ] 集成测试（kind + mock 华为云 API）
 - [ ] 文档更新（README + 配置参考）
 
-### Phase 3：方案 4 Webhook（如 Q1 不通过）
+### Phase 3：方案 4 Webhook（备选，暂不实施）
+
+> Q1 已通过，方案 1 为首选。Phase 3 仅在需要支持 ECS 自建集群（开源 CCM 场景）或严格无裸奔窗口时启动。
 
 - [ ] webhook server 搭建（controller-runtime）
 - [ ] 同步建 LBC+ELB 逻辑
