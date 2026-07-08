@@ -473,6 +473,8 @@ error_message: incorrect IAM authentication, information: unauthorized
 1. **Project ID 与 region 不匹配** -- 每个 region 有独立的 Project ID。在 IAM -> 我的凭证 -> 项目 中核对，确保 Project ID 与 `credentials.region` 一致。
 2. **临时 AK/SK 缺少 Security Token** -- 临时凭据（STS）需要三件套：AK + SK + Security Token。在 values.yaml 中设置 `credentials.securityToken`。
 3. **AK/SK 填错或已禁用** -- 在 IAM -> 我的凭证 -> 访问密钥 中检查。
+4. **时钟偏差超过 15 分钟** -- 华为云 API 网关拒绝时间戳与服务器时间相差超过 15 分钟的请求。请用 NTP 同步主机时钟（`ntpdate`、`chronyd` 或 `systemd-timesyncd`）。
+5. **账号欠费冻结** -- 检查华为云费用中心；冻结账号即使 AK/SK 正确也无法调用 API。
 
 ```bash
 # 查看 LBC 的错误注解

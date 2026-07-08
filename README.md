@@ -473,6 +473,8 @@ This means the Huawei Cloud API gateway rejected the credentials. Causes:
 1. **Project ID doesn't match region** - each region has its own Project ID. Verify at IAM -> My Credentials -> Projects, and ensure the Project ID matches your `credentials.region`.
 2. **Using temporary AK/SK without Security Token** - temporary credentials (STS) require all three: AK + SK + Security Token. Set `credentials.securityToken` in values.yaml.
 3. **AK/SK incorrect or disabled** - verify at IAM -> My Credentials -> Access Keys.
+4. **Clock skew exceeds 15 minutes** - the Huawei Cloud API gateway rejects requests whose timestamp differs from server time by more than 15 minutes. Sync the host clock with NTP (`ntpdate`, `chronyd`, or `systemd-timesyncd`).
+5. **Account in arrears (frozen)** - check the Huawei Cloud billing center; a frozen account cannot make API calls even with valid AK/SK.
 
 ```bash
 # Check the error annotation on the LBC
