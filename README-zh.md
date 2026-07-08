@@ -406,6 +406,27 @@ kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.<pas
 | `metadata.annotations` | `huawei-elb.io/public-ip` | EIP 地址（仅公网 ELB） |
 | `metadata.annotations` | `huawei-elb.io/error` | 最近一次错误信息（正常时为空） |
 
+
+### 使用预创建的 ELB
+
+你可以绑定一个在华为云控制台预创建的 ELB，而不是让控制器创建。创建 LoadBalancerConfig 时在 `spec.annotations` 中设置 `kubernetes.io/elb.id`：
+
+```yaml
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: my-elb
+spec:
+  annotations:
+    kubernetes.io/elb.id: "<预创建的-ELB-ID>"
+```
+
+控制器检测到已有 ELB ID 后，会跳过 ELB 创建，只监控 ELB 状态。
+
+> ⚠️ **注意事项 1：删除 LBC 会删除 ELB。** 控制器不区分“自己创建的 ELB”和“用户预绑定的 ELB”。删除 LoadBalancerConfig 时，控制器会调用华为云 API 删除 `kubernetes.io/elb.id` 对应的 ELB。如果你只想解绑（保留 ELB），请在删除 LBC 之前先移除 `kubernetes.io/elb.id` 注解。
+
+> ⚠️ **注意事项 2：无效的 ELB ID 不会被自动清除。** 如果预填的 ELB ID 在华为云中不存在（填错或已被手动删除），`ShowELB` 返回 404，控制器会报 transient error 并无限重试，不会自动移除无效的 ID。恢复方法：手动从 `spec.annotations` 中删除 `kubernetes.io/elb.id` 注解，控制器会重新创建新 ELB。
+
 ### 手动覆盖
 
 如果自动检测失败或需要覆盖，给 `LoadBalancerConfig` CR 加注解：

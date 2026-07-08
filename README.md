@@ -406,6 +406,27 @@ These annotations are auto-detected from cluster nodes on CCE. All are optional 
 | `metadata.annotations` | `huawei-elb.io/public-ip` | EIP address (public ELB only) |
 | `metadata.annotations` | `huawei-elb.io/error` | Last error message (empty when healthy) |
 
+
+### Using a Pre-created ELB
+
+You can bind a pre-created Huawei Cloud ELB (e.g. one created in the console) instead of letting the controller create one. Set `kubernetes.io/elb.id` in `spec.annotations` when creating the LoadBalancerConfig:
+
+```yaml
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: my-elb
+spec:
+  annotations:
+    kubernetes.io/elb.id: "<pre-created-ELB-ID>"
+```
+
+The controller detects the existing ELB ID, skips ELB creation, and only monitors the ELB status.
+
+> ⚠️ **Caveat 1: Deleting the LBC deletes the ELB.** The controller does not distinguish between ELBs it created and ELBs you pre-bound. When you delete a LoadBalancerConfig, the controller calls the Huawei Cloud API to delete the ELB identified by `kubernetes.io/elb.id`. If you only want to unbind (keep the ELB), remove the `kubernetes.io/elb.id` annotation from the LBC before deleting it.
+
+> ⚠️ **Caveat 2: Invalid ELB IDs are not auto-cleared.** If the pre-filled ELB ID does not exist in Huawei Cloud (typo or already deleted manually), `ShowELB` returns 404 and the controller reports a transient error, retrying indefinitely. It will not remove the invalid ID for you. To recover, manually delete the `kubernetes.io/elb.id` annotation from `spec.annotations` - the controller will then create a new ELB.
+
 ### Manual Override
 
 If auto-detection fails or you want to override, annotate the `LoadBalancerConfig` CR:
