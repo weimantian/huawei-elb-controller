@@ -153,6 +153,41 @@ EOF
 ⑥ CCM 绑定 ELB
 ```
 
+> **「Service 裸奔窗口」详解**
+
+步骤 ②-⑤ 之间，Service 已作为 `type: LoadBalancer` 存在，但 `metadata.annotations` 里**没有任何 ELB 相关注解**（无 `elb.id`，无 `elb.autocreate`）。
+
+```
+时间线:
+
+  ② OpenEverest 建 Service
+  │  此时 Service 长这样:
+  │  - type: LoadBalancer
+  │  - annotations: {}  ← 空的！没有 elb.id 也没有 autocreate
+  │  - status.loadBalancer: {}  ← CCM 还没绑定
+  │
+  │  ┌──────────── 裸奔窗口（几秒到几十秒）────────────┐
+  │  │ CCE CCM 检查 Service → 没 elb.id 也没 autocreate │
+  │  │ → 什么都不做，Service 停在 <pending>           │
+  │  │ （开源 CCM 则相反：会趁这个窗口自动建 ELB）       │
+  │  └────────────────────────────────────────────────┘
+  │
+  ③ 控制器建 LBC → LBC Reconciler 建 ELB → 写 elb.id
+  ④ 控制器 patch DBC（loadBalancerConfigName = elb-xxx）
+  ⑤ OpenEverest Reconcile: GetAnnotations() 读到 LBC 上的 elb.id
+     → 更新 engine CR → engine operator update Service annotations:
+     → {kubernetes.io/elb.id: xxx, kubernetes.io/elb.class: union}
+  │  ← 裸奔窗口结束，Service 终于有了 elb.id
+  │
+  ⑥ CCM 检测到 Service 有了 elb.id → 调华为云 API 绑定 → Service 获得外部 IP
+```
+
+> **为什么叫「裸奔」？** 就像一个 LoadBalancer Service 光着身子跑出去——它告诉 CCM"我需要一个 LB"，但没告诉 CCM"用哪一个"或"帮我建一个"。CCM 只能干瞪眼。
+
+**Q1 已确认**：CCE 内置 CCM 在这个窗口里**不会**自动建 ELB（Service 老实停在 `<pending>`），所以方案 1 的窗口安全。
+
+**对比 EKS/GKE**：它们没有这个窗口——因为 CCM 从 Service 注解里直接读 LB 配置、自己调云 API 建 LB。Service 出生时注解已经就位，CCM 直接建完绑定，不存在"Service 有了、LB 还没建"的中间状态。这就是 CCE 架构差异的根本来源：CCE CCM 只会绑定不会建，必须由外部（控制器）提前建好 ELB。
+
 **触发条件**：
 - `spec.proxy.expose.type == LoadBalancer`
 - `spec.proxy.expose.loadBalancerConfigName == ""`
