@@ -49,7 +49,7 @@
 
 ### 2.1 关键问题确认
 
-> Q1 已通过 CCE 官方文档与开源 CCM 文档确认，结论如下。Q2/Q3 仍待实测。
+> Q1 已通过 CCE 官方文档与开源 CCM 文档确认。Q2-Q5 待实测。
 
 **Q1 结论：CCE 内置 CCM 与开源 CCM 行为不同，方案 1 对 CCE 场景安全。**
 
@@ -62,10 +62,24 @@
 
 1. CCE 文档只定义两种互斥场景："使用已有ELB"（必填 `elb.id`）与"自动创建ELB"（必填 `elb.autocreate`），无第三种"都不填"场景。
 2. CCE 注解全集页明确：`elb.autocreate` 为"仅自动创建ELB的场景：必填"，`elb.id` 为"仅关联已有ELB的场景需填写"，两者"不能同时填写"。
-3. 开源 CCM 文档则相反：`elb.id` "If empty, a new ELB service will be created automatically"，Example 2 无 `elb.id` 无 `autocreate` 即自动建 ELB。
-4. **对本控制器主要场景（CCE 集群）**：方案 1 的 Service 裸奔窗口安全——CCM 不会抢跑建 ELB，Service 停在 pending，等控制器 patch DBC 后 OpenEverest 补 elb.id，CCM 才绑定。**方案 1 可推进。**
-5. **对 ECS 自建集群（开源 CCM）**：裸奔窗口内 CCM 会自动建 ELB，需额外处理（检测开源 CCM 时走不同路径，或在 Service 创建瞬间立即注入 elb.id）。当前控制器 README 主要面向 CCE，此场景作为已知限制记录。
+3. 开源 CCM 文档则相反：`elb.id` "If empty, a new ELB service will be created automatically"。
+4. **对本控制器主要场景（CCE 集群）**：方案 1 的 Service 裸奔窗口安全——CCM 不会抢跑建 ELB。
+5. **对 ECS 自建集群（开源 CCM）**：裸奔窗口内 CCM 会自动建 ELB，需额外处理。当前作为已知限制记录。
 
+### 2.2 待实测问题
+
+| # | 问题 | 影响 |
+|---|---|---|
+| Q2 | OpenEverest UI 创建 DBC 时 `loadBalancerConfigName` 能否留空？ | 决定 UI 路径是否走得通 |
+| Q3 | K8s Mutating Webhook timeout 可配置上限？CCE 默认值？ | 决定 webhook 备选方案可行性 |
+| Q4 | 华为云 ELB 名称长度限制（64 字符？） | 影响 §6.3 命名截断逻辑 |
+| Q5 | OpenEverest engine operator 创建的 Service 命名规则（PXC/PSMDB/PG 各自）？ | 影响调试与日志关联 |
+
+### 2.3 待验证事实
+
+| # | 事实 | 确认方式 |
+|---|---|---|
+| F11 | DBC 删除时，OpenEverest 先清理 engine CR → `in-use-protection` 随之解除 | 需在 CCE 环境实测或再次溯源 OpenEverest 源码 |
 ---
 
 ## 3. 候选方案
@@ -314,7 +328,7 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 1. `spec.proxy.expose.type == LoadBalancer`
 2. `spec.proxy.expose.loadBalancerConfigName == ""`
 3. DBC 有注解 `huawei-elb.io/auto-elb: "true"`（opt-in 开关）
-4. DBC 创建超过 grace period（5s，避免与 OpenEverest UI 冲突）
+4. DBC 创建超过 grace period（5s）——OpenEverest UI 可能先创建 DBC 再立即 patch 设 `loadBalancerConfigName`（两次 API 调用），grace period 避免控制器在 UI 两次调用之间抢跑创建不必要的 LBC。若 UI 不支持两步创建（单次请求即设好值），此条件可移除。
 5. 不含其他云提供商注解（复用现有 `hasForeignCloudAnnotations` 逻辑）
 
 **不触发的情况**：
@@ -404,7 +418,9 @@ Reconcile(ctx, req)
   │   │   ├─ LBC 存在 -> 检查 LBC ready
   │   │   │   ├─ ready=true 且 DBC.loadBalancerConfigName 已设 -> 完成，长轮询
   │   │   │   ├─ ready=true 且 DBC.loadBalancerConfigName 未设 -> patch DBC
-  │   │   │   └─ ready=false -> requeue (等 LBC controller 建 ELB)
+  │   │   │   └─ ready=false
+│   │   │       ├─ elb-status == PENDING_CREATE -> requeue (正常等待)
+│   │   │       └─ elb-status 含错误 -> mirror 错误信息到 DBC 的 huawei-elb.io/error 注解，requeue（让用户直接在 DBC 上看到故障原因）
   │   │   └─ LBC 不存在 -> 异常，重建（记录错误）
   │   └─ 无 auto-lbc-name 注解 -> 首次处理
   │       ├─ 自动探测 VPC/子网/AZ (复用 autoDetectParams)
@@ -428,7 +444,7 @@ elb-<namespace>-<dbc-name>
 - ELB 名 = `elb-<namespace>-<dbc-name>`（ELBNamePrefix `elb-` + LBC 名）
 - 华为云 ELB 名长度限制 64 字符；`<namespace>-<dbc-name>` 需约束长度
 
-**长度保护**：如果 `len(namespace) + len(dbc-name) > 60`，截断 dbc-name 并加 8 字符 hash 后缀。
+**长度保护**：如果 `len(namespace) + len(dbc-name) > 60`，截断 dbc-name 并加 SHA256 前 8 字符 hex 后缀。碰撞概率 `1/2^32`，冲突时直接报错不重试。
 
 ### 6.4 DBC 删除链路
 
@@ -437,7 +453,7 @@ elb-<namespace>-<dbc-name>
   ↓
 DBC Reconciler 检测到 DeletionTimestamp
   ↓
-检查 LBC (elb-<ns>-<name>) 是否还被其他 DBC 引用
+检查 LBC (elb-<ns>-<name>) 是否还被其他 DBC 引用——通过 `List` 全集群 DBC，检查是否有其他 DBC 的 `loadBalancerConfigName` 或 `auto-lbc-name` 注解指向此 LBC。考虑到每个 auto-elb DBC 都有独立 LBC，此场景罕见，仅在删除时执行一次，无需高频调用。
   ├─ 被引用 -> 直接移除 dbc-finalizer（LBC 保留）
   └─ 无引用 -> 删 LBC
       ↓
@@ -452,8 +468,9 @@ DBC Reconciler 检测到 DeletionTimestamp
 
 **关键**：必须等 DBC 的 `loadBalancerConfigName` 不再指向 LBC 后，OpenEverest 才会移除 LBC 的 `in-use-protection` finalizer。但 DBC 正在删除，CEL 规则禁止清空 `loadBalancerConfigName`（F4）。
 
-**解决**：DBC 删除时，OpenEverest 会先清理 engine CR，`in-use-protection` 随之解除。DBC Reconciler 轮询 LBC 的 finalizers，确认 `in-use-protection` 已移除后再删 LBC。
+**解决**：DBC 删除时，DBC Reconciler 轮询 LBC 的 finalizers，确认 `in-use-protection` 已移除后再删 LBC（轮询间隔 5s，超时 10 分钟；超时后在 DBC 的 `huawei-elb.io/error` 注解写错误信息，控制器继续重试）。
 
+> ⚠️ **F11 待验证**："OpenEverest 会先清理 engine CR → `in-use-protection` 随之解除" 是推断，未在源码中确认。若实际行为是先删 DBC 再清理 engine CR（或并发），则 `in-use-protection` 可能在控制器尝试删 LBC 时仍存在。兜底：超时后打印告警日志，人工介入。
 ### 6.5 新增常量与注解
 
 ```go
@@ -467,8 +484,8 @@ const (
     // DBC finalizer
     dbcFinalizerName = "huawei-elb.io/dbc-finalizer"
 
-    // DBC GVR
-    dbcGVR = schema.GroupVersionKind{
+    // DBC GVK
+    dbcGVK = schema.GroupVersionKind{
         Group:   "everest.percona.com",
         Version: "v1alpha1",
         Kind:    "DatabaseCluster",
@@ -507,6 +524,8 @@ func (d *NetworkDetector) Detect(ctx, logger, client) (vpcID, subnetID, azs, err
 
 LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 
+**缓存策略**：探测结果缓存 10 分钟（`detected` + `detectedAt`），过期后重新探测。两个 Reconciler 创建时 NetworkDetector 初始为空，首次调用自动触发探测。不缓存主要是避免跨 Reconciler 共享状态的复杂性——探测本身只调用一次 ECS API，开销很小。
+
 ---
 
 ## 7. 风险点与缓解
@@ -514,9 +533,9 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 | # | 风险 | 影响 | 概率 | 缓解措施 |
 |---|---|---|---|---|
 | R1 | **Service 裸奔窗口：CCM 对无注解 LoadBalancer Service autocreate 孤儿 ELB** | 孤儿 ELB 持续计费 | **已解除**（Q1 确认 CCE CCM 不 autocreate） | ✅ CCE 场景安全；⚠️ ECS 自建集群（开源 CCM）会 autocreate，当前作为已知限制，文档注明仅支持 CCE 场景 |
-| R2 | **patch DBC 失败导致孤儿 LBC+ELB** | LBC+ELB 存在但无人引用，持续计费 | 中 | 补偿逻辑：定期扫描有 `auto-lbc-name` 注解但 DBC 已删的 LBC，清理 |
-| R3 | **DBC 删除时 `in-use-protection` finalizer 阻止 LBC 删除** | DBC 卡在删除中 | 高 | DBC Reconciler 轮询 LBC finalizers，等 `in-use-protection` 移除后再删 LBC；超时后报错 |
-| R4 | **LBC 命名冲突（cluster-scoped）** | 创建 LBC 失败 | 低 | 命名加 namespace 前缀 + 长度截断 + hash |
+| R2 | **patch DBC 失败导致孤儿 LBC+ELB** | LBC+ELB 存在但无人引用，持续计费 | 中 | ① patch 失败时立即删 LBC（最终一致性）；② 补偿：独立 goroutine 每 5 分钟全集群扫描——有 `auto-lbc-name` 但 DBC 不存在则删 LBC |
+| R3 | **DBC 删除时 `in-use-protection` finalizer 阻止 LBC 删除** | DBC 卡在删除中 | 高 | DBC Reconciler 轮询 LBC finalizers（5s 间隔），等 `in-use-protection` 移除后再删 LBC；超时 10 分钟后在 DBC 的 `huawei-elb.io/error` 写错误信息，继续重试 |
+| R4 | **LBC 命名冲突（cluster-scoped）** | 创建 LBC 失败 | 低 | 命名加 namespace 前缀 + 长度截断 + SHA256 前 8 位 hex hash；冲突时直接报错不重试 |
 | R5 | **OpenEverest UI 不支持给 DBC 加 `auto-elb` 注解** | 用户无法通过 UI 触发自动建 | 高 | 提供 kubectl annotate 命令；或 Helm post-install hook；或文档说明 |
 | R6 | **engine operator 重建 Service 覆盖注解** | elb.id 丢失，ELB 解绑 | 低 | 方案 1 不直接改 Service（走 LBC -> engine CR -> Service 路径），engine operator 重建时会重新 GetAnnotations，不受影响 |
 | R7 | **两个 Reconciler 并发写 LBC** | resourceVersion 冲突 | 中 | LBC 写操作已有 `updateWithRetry`（RetryOnConflict），DBC Reconciler 创建 LBC 后不直接改，交给 LBC Reconciler |
@@ -551,6 +570,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 - [ ] 单元测试
 - [ ] 集成测试（kind + mock 华为云 API）
 - [ ] 文档更新（README + 配置参考）
+- [ ] 实现孤儿 LBC 补偿清理（独立 goroutine，每 5 分钟全集群扫描）
 
 ### Phase 3：方案 4 Webhook（备选，暂不实施）
 
@@ -590,14 +610,14 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 
 ---
 
-## 11. 待确认问题清单
+## 11. 待确认问题（状态同步自 §2.1-2.3）
 
-- [ ] **Q1**：CCE CCM 对无 `elb.id` 无 `autocreate` 的 LoadBalancer Service 的行为？
+- [x] **Q1**：CCE CCM 对无注解 LoadBalancer Service 的行为（✅ CCE 不 autocreate）
 - [ ] **Q2**：OpenEverest UI 创建 DBC 时 loadBalancerConfigName 能否留空？
 - [ ] **Q3**：K8s Mutating Webhook timeout 上限（CCE 环境）？
-- [ ] **Q4**：华为云 ELB 名长度限制（64 字符？）确认
-- [ ] **Q5**：OpenEverest engine operator 创建的 Service 命名规则（PXC/PSMDB/PG 各自）？
-
+- [ ] **Q4**：华为云 ELB 名长度限制（64 字符？）
+- [ ] **Q5**：OpenEverest engine operator 创建的 Service 命名规则
+- [ ] **F11**：DBC 删除时 OpenEverest 的 `in-use-protection` 解除时序
 ---
 
 ## 附录 A：研究证据来源
