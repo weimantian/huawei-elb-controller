@@ -12,20 +12,23 @@ import (
 
 // Credentials holds Huawei Cloud authentication credentials.
 type Credentials struct {
-	AK        string
-	SK        string
-	Region    string
-	ProjectID string
+	AK            string
+	SK            string
+	Region        string
+	ProjectID     string
+	SecurityToken string // Optional: STS token for temporary AK/SK
 }
 
 // LoadCredentials reads Huawei Cloud credentials from environment variables.
 // Required env vars: HUAWEI_CLOUD_AK, HUAWEI_CLOUD_SK,
 // HUAWEI_CLOUD_REGION, HUAWEI_CLOUD_PROJECT_ID.
+// Optional: HUAWEI_CLOUD_SECURITY_TOKEN (for temporary AK/SK).
 func LoadCredentials() (*Credentials, error) {
 	ak := os.Getenv("HUAWEI_CLOUD_AK")
 	sk := os.Getenv("HUAWEI_CLOUD_SK")
 	regionStr := os.Getenv("HUAWEI_CLOUD_REGION")
 	projectID := os.Getenv("HUAWEI_CLOUD_PROJECT_ID")
+	securityToken := os.Getenv("HUAWEI_CLOUD_SECURITY_TOKEN")
 
 	if ak == "" || sk == "" || regionStr == "" || projectID == "" {
 		return nil, fmt.Errorf(
@@ -35,20 +38,26 @@ func LoadCredentials() (*Credentials, error) {
 	}
 
 	return &Credentials{
-		AK:        ak,
-		SK:        sk,
-		Region:    regionStr,
-		ProjectID: projectID,
+		AK:            ak,
+		SK:            sk,
+		Region:        regionStr,
+		ProjectID:     projectID,
+		SecurityToken: securityToken,
 	}, nil
 }
 
 // NewELBClient creates a Huawei Cloud ELB v3 client from credentials.
 func NewELBClient(creds *Credentials) (*elb.ElbClient, error) {
-	auth := basic.NewCredentialsBuilder().
+	authBuilder := basic.NewCredentialsBuilder().
 		WithAk(creds.AK).
 		WithSk(creds.SK).
-		WithProjectId(creds.ProjectID).
-		Build()
+		WithProjectId(creds.ProjectID)
+
+	if creds.SecurityToken != "" {
+		authBuilder = authBuilder.WithSecurityToken(creds.SecurityToken)
+	}
+
+	auth := authBuilder.Build()
 
 	reg, err := elbregion.SafeValueOf(creds.Region)
 	if err != nil {

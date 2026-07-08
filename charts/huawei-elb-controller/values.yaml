@@ -16,9 +16,11 @@ credentials:
   sk: ""
   projectId: ""
   region: ""  # 必填！必须与你的 CCE 集群所在 region 一致，如 cn-north-4、sa-brazil-1
+  securityToken: ""  # 可选：临时凭据的 STS token，永久 AK/SK 留空
 
 # Use an existing Secret for credentials instead of creating one.
 # The Secret must have keys: ak, sk, project-id, region.
+# Optional key: security-token (for temporary AK/SK).
 # If set, credentials.* values are ignored.
 existingSecret: ""
 

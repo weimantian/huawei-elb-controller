@@ -91,8 +91,8 @@ kubectl get dbengine -n everest
 ### 3. 华为云账号
 
 - 已开通 ELB 服务的华为云账号
-- **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
-- **Project ID** —— 在控制台右上角用户名下拉菜单中找到
+- **AK**（Access Key）和 **SK**（Secret Key）-- 在 IAM -> 我的凭证 -> 访问密钥 中创建。支持永久密钥（主账号或 IAM 子账号）或临时密钥（STS）。临时密钥需额外设置 `securityToken` 字段。
+- **Project ID** -- 在 IAM -> 我的凭证 -> 项目 中查看。必须与集群所在 region 一致（每个 region 有独立的 Project ID）。
 
 ---
 
@@ -436,6 +436,7 @@ spec:
 | `credentials.sk` | `""` | 华为云 SK |
 | `credentials.projectId` | `""` | 华为云 Project ID |
 | `credentials.region` | `cn-north-4` | 华为云区域 |
+| `credentials.securityToken` | `""` | STS 安全令牌（仅临时 AK/SK 需要） |
 | `existingSecret` | `""` | 使用已有 Secret（覆盖 credentials） |
 | `namespace` | `everest-system` | 部署命名空间 |
 | `resources.requests.cpu` | `100m` | CPU 请求 |
@@ -459,6 +460,28 @@ kubectl describe pod -n everest-system -l app.kubernetes.io/name=huawei-elb-cont
 - **镜像未找到** → 确保镜像已导入集群
 - **Secret 缺失** → 检查 `everest-system` 命名空间中是否存在 `huawei-cloud-credentials` Secret
 - **RBAC 权限不足** → 检查 ClusterRole 和 ClusterRoleBinding
+
+### 401 IAM 认证失败 (apigw.0301)
+
+```
+error_code: apigw.0301
+error_message: incorrect IAM authentication, information: unauthorized
+```
+
+这是华为云 API 网关拒绝了凭据。原因：
+
+1. **Project ID 与 region 不匹配** -- 每个 region 有独立的 Project ID。在 IAM -> 我的凭证 -> 项目 中核对，确保 Project ID 与 `credentials.region` 一致。
+2. **临时 AK/SK 缺少 Security Token** -- 临时凭据（STS）需要三件套：AK + SK + Security Token。在 values.yaml 中设置 `credentials.securityToken`。
+3. **AK/SK 填错或已禁用** -- 在 IAM -> 我的凭证 -> 访问密钥 中检查。
+
+```bash
+# 查看 LBC 的错误注解
+kubectl get lbc <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/error}'
+
+# 查看控制器日志详情
+kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
+```
+
 
 ### ELB 创建失败
 

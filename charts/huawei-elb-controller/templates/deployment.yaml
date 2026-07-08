@@ -47,6 +47,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "huawei-elb-controller.secretName" . }}
                   key: region
+            {{- if .Values.credentials.securityToken }}
+            - name: HUAWEI_CLOUD_SECURITY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "huawei-elb-controller.secretName" . }}
+                  key: security-token
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8081

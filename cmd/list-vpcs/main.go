@@ -22,11 +22,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	auth := basic.NewCredentialsBuilder().
+	authBuilder := basic.NewCredentialsBuilder().
 		WithAk(creds.AK).
 		WithSk(creds.SK).
-		WithProjectId(creds.ProjectID).
-		Build()
+		WithProjectId(creds.ProjectID)
+
+	if creds.SecurityToken != "" {
+		authBuilder = authBuilder.WithSecurityToken(creds.SecurityToken)
+	}
+
+	auth := authBuilder.Build()
 
 	reg, err := vpcregion.SafeValueOf(creds.Region)
 	if err != nil {

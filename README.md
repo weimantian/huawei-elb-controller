@@ -91,8 +91,8 @@ kubectl get dbengine -n everest
 ### 3. Huawei Cloud Account
 
 - An active Huawei Cloud account with **ELB service enabled**
-- **AK** (Access Key) and **SK** (Secret Key) — create at: IAM → My Credentials → Access Keys
-- **Project ID** — found in the console top-right dropdown under your username
+- **AK** (Access Key) and **SK** (Secret Key) - create at: IAM -> My Credentials -> Access Keys. Either permanent keys (account or IAM sub-account) or temporary keys (STS) work. For temporary keys, also set the `securityToken` field.
+- **Project ID** - found at IAM -> My Credentials -> Projects. Must match your cluster's region (each region has its own Project ID).
 
 ---
 
@@ -436,6 +436,7 @@ When any of these annotations is present, the controller uses the provided value
 | `credentials.sk` | `""` | Huawei Cloud SK |
 | `credentials.projectId` | `""` | Huawei Cloud Project ID |
 | `credentials.region` | `cn-north-4` | Huawei Cloud region |
+| `credentials.securityToken` | `""` | STS security token (for temporary AK/SK only) |
 | `existingSecret` | `""` | Use an existing Secret (overrides credentials) |
 | `namespace` | `everest-system` | Deployment namespace |
 | `resources.requests.cpu` | `100m` | CPU request |
@@ -459,6 +460,28 @@ Common causes:
 - **Image not found** → ensure the image is imported into the cluster
 - **Secret missing** → check `huawei-cloud-credentials` Secret exists in `everest-system`
 - **RBAC insufficient** → check ClusterRole and ClusterRoleBinding
+
+### 401 IAM Authentication Failed (apigw.0301)
+
+```
+error_code: apigw.0301
+error_message: incorrect IAM authentication, information: unauthorized
+```
+
+This means the Huawei Cloud API gateway rejected the credentials. Causes:
+
+1. **Project ID doesn't match region** - each region has its own Project ID. Verify at IAM -> My Credentials -> Projects, and ensure the Project ID matches your `credentials.region`.
+2. **Using temporary AK/SK without Security Token** - temporary credentials (STS) require all three: AK + SK + Security Token. Set `credentials.securityToken` in values.yaml.
+3. **AK/SK incorrect or disabled** - verify at IAM -> My Credentials -> Access Keys.
+
+```bash
+# Check the error annotation on the LBC
+kubectl get lbc <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/error}'
+
+# Check controller logs for details
+kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
+```
+
 
 ### ELB Creation Failed
 

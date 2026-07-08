@@ -59,11 +59,16 @@ func DetectVPCFromECS(creds *Credentials, serverID string) (string, error) {
 
 // newECSClient creates a Huawei Cloud ECS v2 client from credentials.
 func newECSClient(creds *Credentials) (*ecs.EcsClient, error) {
-	auth := basic.NewCredentialsBuilder().
+	authBuilder := basic.NewCredentialsBuilder().
 		WithAk(creds.AK).
 		WithSk(creds.SK).
-		WithProjectId(creds.ProjectID).
-		Build()
+		WithProjectId(creds.ProjectID)
+
+	if creds.SecurityToken != "" {
+		authBuilder = authBuilder.WithSecurityToken(creds.SecurityToken)
+	}
+
+	auth := authBuilder.Build()
 
 	reg, err := ecsregion.SafeValueOf(creds.Region)
 	if err != nil {
@@ -121,11 +126,16 @@ func GetNeutronSubnetID(creds *Credentials, virsubnetID string) (string, error) 
 
 // newVPCClient creates a Huawei Cloud VPC v3 client from credentials.
 func newVPCClient(creds *Credentials) (*vpc.VpcClient, error) {
-	auth := basic.NewCredentialsBuilder().
+	authBuilder := basic.NewCredentialsBuilder().
 		WithAk(creds.AK).
 		WithSk(creds.SK).
-		WithProjectId(creds.ProjectID).
-		Build()
+		WithProjectId(creds.ProjectID)
+
+	if creds.SecurityToken != "" {
+		authBuilder = authBuilder.WithSecurityToken(creds.SecurityToken)
+	}
+
+	auth := authBuilder.Build()
 
 	reg, err := vpcregion.SafeValueOf(creds.Region)
 	if err != nil {
