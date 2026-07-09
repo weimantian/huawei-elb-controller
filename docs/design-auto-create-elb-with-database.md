@@ -1,4 +1,4 @@
-# 设计：创建数据库时自动创建 ELB（一步到位方案）
+# 设计：创建数据库时自动创建 ELB
 
 > **分支**: `design/auto-create-elb-with-database`
 > **状态**: 设计阶段，待确认关键问题后进入实现
@@ -166,10 +166,10 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 
 - **代码改动**：+300~400 行（新 Reconciler）
 - **用户体验**：UI 点一下创建数据库，ELB 全自动
-- **竞态**：⚠️ Service 裸奔窗口（步骤 ②-⑤），依赖 Q1 答案
+- **竞态**：⚠️ Service 裸奔窗口（步骤 ②-⑤），Q1 已确认 CCE 场景安全
 - **patch DBC**：会修改用户的 DBC 资源（设 loadBalancerConfigName）
 
-### 3.5 方案选择理由
+### 3.5 设计理由
 
 1. **复用现有代码最多**：LBC Reconciler 全部逻辑（探测、创建、删除、finalizer、状态注解）原样复用，新增的 DBC Reconciler 只是触发器 + patch 逻辑。
 2. **状态可见性完整**：LBC 上的 `ready`/`elb-status`/`error`/`public-ip` 注解全保留，运维体验不变。
