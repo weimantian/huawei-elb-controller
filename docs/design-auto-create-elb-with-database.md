@@ -171,7 +171,7 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 
 ### 3.5 设计理由
 
-1. **复用现有代码最多**：LBC Reconciler 全部逻辑（探测、创建、删除、finalizer、状态注解）原样复用，新增的 DBC Reconciler 只是触发器 + patch 逻辑。
+1. **最大化复用现有代码**：LBC Reconciler 全部逻辑（探测、创建、删除、finalizer、状态注解）原样复用，新增的 DBC Reconciler 只是触发器 + patch 逻辑。
 2. **状态可见性完整**：LBC 上的 `ready`/`elb-status`/`error`/`public-ip` 注解全保留，运维体验不变。
 3. **与现有方案完全兼容**：用户已设 `loadBalancerConfigName` 的 DBC 不受影响，新功能仅对空值触发。
 
