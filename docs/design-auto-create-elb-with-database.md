@@ -1022,3 +1022,95 @@ AWS CCM 读 service.beta.kubernetes.io/aws-load-balancer-* 注解
 3. 仅 CCE 可用（开源 CCM 不支持 autocreate）
 4. 5/14 字段为独享 ELB 专有
 5. Tags 需独立注解，不在 JSON 内
+
+---
+
+## 附录 D：`spec.loadBalancerSourceRanges` 与华为云访问控制机制冲突
+
+> 目的：解释 §9 Q7 中 `no access-controll (source ranges enabled)` 错误的背景。
+
+### D.1 `spec.loadBalancerSourceRanges` 是什么
+
+Kubernetes `Service` 的一个**标准字段**，用来限制**哪些源 IP 可以访问这个 LoadBalancer Service**。
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-db
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:   # ← 这个字段
+    - 192.168.1.0/24          # 只允许公司办公网访问
+    - 10.0.0.0/8              # 只允许 VPC 内网访问
+  ports:
+    - port: 5432
+```
+
+效果：**只有来自 `192.168.1.0/24` 和 `10.0.0.0/8` 的流量能到达数据库**，其他 IP 在负载均衡器层面被拒绝。
+
+`loadBalancerSourceRanges` 为空 = **0.0.0.0/0** = 全公网可访问（数据库直接暴露在公网，有安全风险）。
+
+### D.2 各云实现差异
+
+| 云 | 实现方式 | 认 `loadBalancerSourceRanges`？ |
+|---|---|---|
+| **AWS** | CCM 把 CIDR 转成 ELB 的 listener 规则 / 安全组 | ✅ |
+| **GCP** | CCM 把 CIDR 转成 VPC 防火墙规则 | ✅ |
+| **华为云 CCE** | CCM **不认这个字段**，改用 `elb.acl-*` 注解 + 预创建的 IP 地址组 | ❌ |
+
+### D.3 OpenEverest 如何使用
+
+OpenEverest UI 有「Source range」输入框，用户填了 CIDR 后，OpenEverest 把它写进 `spec.loadBalancerSourceRanges`。
+
+OpenEverest 源码确认（commit `a4519bd`，三个数据库 provider 都有）：
+
+```go
+// internal/controller/everest/providers/pg/applier.go L222-L226
+case everestv1alpha1.ExposeTypeLoadBalancer:
+    pg.Spec.Proxy.PGBouncer.ServiceExpose = &pgv2.ServiceExpose{
+        Type:                     string(corev1.ServiceTypeLoadBalancer),
+        LoadBalancerSourceRanges: p.DB.Spec.Proxy.Expose.IPSourceRangesStringArray(),
+    }
+```
+
+CRD 字段定义：`spec.proxy.expose.ipSourceRanges`（`[]IPSourceRange`）
+
+OpenEverest 是云无关的，它只用 K8s 通用标准字段。在 AWS/GCP 上自动生效；在华为云 CCE 上 CCM 不认，就报错。
+
+### D.4 华为云的正确做法：`elb.acl-*` 注解
+
+华为云 ELB 的访问控制（access control）是 listener 级别的 IP 白/黑名单，必须用华为专有注解：
+
+| 注解 | 作用 |
+|---|---|
+| `kubernetes.io/elb.acl-id` | ELB 控制台**预先创建的 IP 地址组**的 ID（不能写裸 CIDR） |
+| `kubernetes.io/elb.acl-status` | `on` 启用 / `off` 关闭 |
+| `kubernetes.io/elb.acl-type` | `white`（白名单/trustlist）/ `black`（黑名单/blocklist） |
+
+**关键差异**：`loadBalancerSourceRanges` 直接写 CIDR 即可；`elb.acl-*` 必须先在 ELB 控制台创建一个「IP 地址组」对象（把 CIDR 填进去），再引用它的 ID。不能在 Service 注解里直接写裸 CIDR。
+
+### D.5 冲突发生过程
+
+```
+① 用户在 OpenEverest UI 填 Source range（CIDR）
+② OpenEverest 把 CIDR 写进 Service.spec.loadBalancerSourceRanges
+③ CCE CCM 检测到 loadBalancerSourceRanges 非空 -> "(source ranges enabled)"
+④ CCE CCM 发现 Service 没有 elb.acl-* 注解 -> "no access-controll"
+⑤ 报错：no access-controll (source ranges enabled)
+```
+
+### D.6 对本方案的影响
+
+- **当前控制器**：完全没处理 source ranges 和 access control，是一个已知的 parity gap
+- **方案 1**：用户在 LBC 注解里配 `elb.acl-*` 可以生效（LBC 注解会传播到 Service），但仍需 OpenEverest 侧清空 Source range 避免 `loadBalancerSourceRanges` 触发报错
+- **方案 2**：同理，需在注入 autocreate 时同时注入 `elb.acl-*` 注解
+- **长期方案**：控制器可自动调 ELB API 创建 IP 地址组，把用户在 LBC 里写的 CIDR 转成 IP 地址组 ID 并注入 `elb.acl-id`，实现与 AWS/GCP 对等的体验
+
+### D.7 证据来源
+
+- OpenEverest 源码：`openeverest/openeverest-operator` SHA `a4519bd`，`internal/controller/everest/providers/{pg,pxc,psmdb}/applier.go`
+- OpenEverest 文档：[GKE 指南博客](https://openeverest.io/blog/running-openeverest-on-gke/) 确认 Source range -> loadBalancerSourceRanges 映射
+- 华为云 CCE 文档：[cce_10_0831](https://support.huaweicloud.com/usermanual-cce/cce_10_0831.html)（访问控制）、[cce_10_0385](https://support.huaweicloud.com/usermanual-cce/cce_10_0385.html)（注解全集，无 loadBalancerSourceRanges）
+- 华为云 ELB 文档：[elb_03_0003](https://support.huaweicloud.com/usermanual-elb/elb_03_0003.html)（listener 级访问控制）
+- 开源 CCM：`kubernetes-sigs/cloud-provider-huaweicloud` SHA `e4d2b145` 无 `elb.acl` 逻辑（确认该错误来自闭源 CCE CCM）
