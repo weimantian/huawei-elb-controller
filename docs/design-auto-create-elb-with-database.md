@@ -811,6 +811,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 - [ ] **Q5**：OpenEverest engine operator 创建的 Service 命名规则
 - [ ] **F11**：DBC 删除时 OpenEverest 的 `in-use-protection` 解除时序
 - [ ] **Q6**：是否移除 `auto-elb` opt-in 注解以实现完全 EKS/GKE 对等？权衡：移除后存量空值 DBC 会触发自动建 ELB（破坏性），需评估影响面
+- [ ] **Q7**：CCE CCM 对 `spec.loadBalancerSourceRanges` 的实际行为（告警还是阻塞？）。已知华为云访问控制用 `elb.acl-*` 注解而非 `loadBalancerSourceRanges`，OpenEverest 设置后者会触发 `no access-controll (source ranges enabled)` 错误。需实测确认错误级别及 `elb.acl-*` 注解能否正确生效。
 ---
 
 ## 附录 A：研究证据来源
