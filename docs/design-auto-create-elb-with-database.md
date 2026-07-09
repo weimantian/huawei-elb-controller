@@ -64,7 +64,7 @@
 2. CCE 注解全集页明确：`elb.autocreate` 为"仅自动创建ELB的场景：必填"，`elb.id` 为"仅关联已有ELB的场景需填写"，两者"不能同时填写"。
 3. 开源 CCM 文档则相反：`elb.id` "If empty, a new ELB service will be created automatically"。
 4. **对本控制器主要场景（CCE 集群）**：本方案的 Service 裸奔窗口安全--CCM 不会抢跑建 ELB。
-5. **对 ECS 自建集群（开源 CCM）**：裸奔窗口内 CCM 会自动建 ELB，需额外处理。当前作为已知限制记录。
+5. **本方案仅支持 CCE 集群**：不考虑 ECS 自建集群（开源 CCM 场景）；裸奔窗口内的 autocreate 风险不在本方案处理范围内。
 
 ### 2.2 待实测问题
 
@@ -73,6 +73,7 @@
 | Q2 | OpenEverest UI 创建 DBC 时 `loadBalancerConfigName` 能否留空？ | 决定 UI 路径是否走得通 |
 | Q4 | 华为云 ELB 名称长度限制（64 字符？） | 影响 §4.4 命名截断逻辑 |
 | Q5 | OpenEverest engine operator 创建的 Service 命名规则（PXC/PSMDB/PG 各自）？ | 影响调试与日志关联 |
+> 注：Q3（开源 CCM 行为）已合并入 Q1；本方案仅支持 CCE，不再单独追踪。
 
 ### 2.3 待验证事实
 
@@ -82,7 +83,7 @@
 ---
 
 ## 3. 方案设计
-经过分析，形成两个候选方案，都对标 EKS/GKE 的零配置体验（创建 DBC 即获得 ELB，无额外注解）。§3.1-3.5 详述方案 1，§3.6 详述方案 2，§3.7 给出两方案对比，§3.8 给出当前方案与自动方案的对比。
+经过分析，形成两个候选方案，都对标 EKS/GKE 的零配置体验（创建 DBC 即获得 ELB，无额外注解）。§3.1-3.5 详述方案 1，§3.6 详述方案 2，§3.7 分析精细控制与 LBC UI 可见性，§3.8 给出方案 1 与方案 2 的对比，§3.9 给出当前方案与自动方案的对比。
 
 
 ### 3.1 方案 1：watch DBC -> 自动建 LBC + ELB -> patch DBC
@@ -197,7 +198,7 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 **触发条件**：
 - Service `type == LoadBalancer`
 - Service 不含 `kubernetes.io/elb.id` 和 `kubernetes.io/elb.autocreate`（未配置 ELB）
-- Service 由 OpenEverest engine operator 创建（通过 ownerReference 或命名规则识别）
+- Service 由 OpenEverest engine operator 创建（识别机制待 Q5 确认后定稿：ownerReference 链跨 DBC->engine CR->Service 两层，或按命名规则）
 - 不含其他云提供商注解
 
 **ELB 删除**：CCM 原生处理。Service 被删时，CCM 根据 `kubernetes.io/elb.instance-reclaim-policy` 注解决定保留或删除 ELB（默认删除）。控制器无需 finalizer。
@@ -232,7 +233,7 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 > Tags 不在 autocreate JSON 内，是独立注解 `kubernetes.io/elb.tags`（格式 `key1=value1,key2=value2`）。
 
 **方案 2 的限制**：
-1. **仅 CCE 可用**：`elb.autocreate` 是 CCE CCM 专有注解，开源 CCM（`kubernetes-sigs/cloud-provider-huaweicloud`）不支持，使用完全不同的注解集。ECS 自建集群场景失效。
+1. **仅 CCE 可用**：`elb.autocreate` 是 CCE CCM 专有注解（本方案仅支持 CCE，非额外限制）。
 2. **无 Region 覆盖**：autocreate JSON 无 region 字段，ELB 永远建在集群所在 Region。（EKS/GKE 也不支持跨 Region，不是 parity gap）
 3. **ELB 创建后不可变**：autocreate 注解创建后不可修改。可变的属性（端口、健康检查）通过 Service spec 改即可；不可变的（带宽、EIP 类型、AZ）需重建 ELB。虽然 EKS/GKE 也不支持大部分属性变更，但华为云 ELB 有带宽计费模型，用户大概率需要事后调带宽--这使得不可变性在华为云场景下是真实痛点而非理论问题（详见 §3.7）
 4. **状态可见性弱**：无 LBC，ELB 状态只有 Service events 和 `status.loadBalancer.ingress`，缺少 `ready`/`error`/`public-ip` 等结构化状态注解。
@@ -375,16 +376,16 @@ EKS/GKE 能同时实现“默认无 LBC”+“事后可改”，是因为它的 
 | **ELB 创建后可变** | **支持**（改 LBC 注解 -> 重 reconcile -> 更新 ELB） | ❌ 不可变（带宽/EIP/AZ 不可改；华为云带宽计费场景下是真实痛点，见 §3.7） |
 | **ELB 生命周期** | 控制器 + finalizer | **CCM 原生**（含删除，reclaim-policy 注解） |
 | **删除安全** | 高（finalizer 保证 ELB 删除） | **高**（CCM 按 reclaim-policy 处理） |
-| **平台适用性** | **CCE + ECS 自建**（开源 CCM 也兼容） | **仅 CCE**（开源 CCM 不支持 autocreate） |
+| **平台适用性** | 仅 CCE | 仅 CCE |
 | **多 DB 共享 ELB** | 不支持（每 DBC 独立 LBC） | 不支持（每 Service 独立 ELB） |
 | **ELB Tags** | 支持（LBC 注解 → API） | 支持（独立 `elb.tags` 注解） |
 
 **关键差异总结**：
 - 方案 2 **架构更优雅**、代码更少、裸奔窗口更短、不 patch 用户 DBC
-- 方案 1 **状态可见性更好**、ELB 控制更精细、平台适用性更广（ECS 自建也支持）
+- 方案 1 **状态可见性更好**、ELB 控制更精细
 - 方案 1 **精细控制可事后调整**（LBC UI 编辑注解），方案 2 autocreate 不可变，华为云带宽计费场景下失去唯一调参途径（见 §3.7）
 - 两者 UX 都对标 EKS/GKE（创建 DBC 即获得 ELB，零额外操作）
-- 方案 2 的「仅 CCE 可用」是最大限制--如果未来需要支持 ECS 自建集群，方案 2 不可行
+- 平台适用性：两方案均仅支持 CCE（本设计不考虑 ECS 自建集群），无差异
 
 ### 3.9 当前方案 vs 自动方案对比
 
@@ -401,7 +402,7 @@ EKS/GKE 能同时实现“默认无 LBC”+“事后可改”，是因为它的 
 | **多 DB 共享 ELB** | 支持（多 DBC 引用同一 LBC） | 不支持；如需共享手动建 LBC | 不支持 |
 | **ELB 配置精细度** | 完整（LBC 注解） | 完整（自动建 LBC 仍可手动加注解） | 受限（autocreate 14 字段） |
 | **与当前方案兼容** | - | 完全兼容 | 完全兼容 |
-| **平台适用性** | CCE + ECS 自建 | CCE + ECS 自建 | 仅 CCE |
+| **平台适用性** | 仅 CCE | 仅 CCE | 仅 CCE |
 
 ```
 当前：     LBC -> [等 ready] -> DBC（用户感知两步、等待一次）
@@ -434,9 +435,9 @@ Reconcile 三步循环:
 ```
 
 **对本方案的影响**:
-- DBC 创建后 17ms 内触发 DBC Reconciler → 判断触发条件 → 建 LBC →
+- DBC 创建后毫秒级触发 DBC Reconciler -> 判断触发条件 -> 建 LBC ->
   **return（不等 ELB ready）**
-- LBC 创建后 17ms 内触发 LBC Reconciler → 探测 VPC/子网/AZ → 调华为云 API 建 ELB →
+- LBC 创建后毫秒级触发 LBC Reconciler -> 探测 VPC/子网/AZ -> 调华为云 API 建 ELB ->
   写 elb.id → **return**
 - LBC 的 elb.id 被写回后，再次触发 DBC Reconciler（因为 LBC 状态变了）→
   检测到 LBC ready → patch DBC 的 loadBalancerConfigName → **完成**
@@ -626,8 +627,8 @@ Reconcile(ctx, req)
   │   │   │   ├─ ready=true 且 DBC.loadBalancerConfigName 已设 -> 完成，长轮询
   │   │   │   ├─ ready=true 且 DBC.loadBalancerConfigName 未设 -> patch DBC
   │   │   │   └─ ready=false
-│   │   │       ├─ elb-status == PENDING_CREATE -> requeue (正常等待)
-│   │   │       └─ elb-status 含错误 -> mirror 错误信息到 DBC 的 huawei-elb.io/error 注解，requeue（让用户直接在 DBC 上看到故障原因）
+  │   │   │       ├─ elb-status == PENDING_CREATE -> requeue (正常等待)
+  │   │   │       └─ elb-status 含错误 -> mirror 错误信息到 DBC 的 huawei-elb.io/error 注解，requeue（让用户直接在 DBC 上看到故障原因）
   │   │   └─ LBC 不存在 -> 异常，重建（记录错误）
   │   └─ 无 auto-lbc-name 注解 -> 首次处理
   │       ├─ 自动探测 VPC/子网/AZ (复用 autoDetectParams)
@@ -673,7 +674,7 @@ DBC Reconciler 检测到 DeletionTimestamp
       DBC 被删
 ```
 
-**关键**：必须等 DBC 的 `loadBalancerConfigName` 不再指向 LBC 后，OpenEverest 才会移除 LBC 的 `in-use-protection` finalizer。但 DBC 正在删除，CEL 规则禁止清空 `loadBalancerConfigName`（F4）。
+**关键**：DBC 删除时，`loadBalancerConfigName` 字段随 DBC 一起被删除，无需也无法单独清空（CEL 禁止）。OpenEverest 需通过清理 engine CR 解除 `in-use-protection`（F11 待验证）。
 
 **解决**：DBC 删除时，DBC Reconciler 轮询 LBC 的 finalizers，确认 `in-use-protection` 已移除后再删 LBC（轮询间隔 5s，超时 10 分钟；超时后在 DBC 的 `huawei-elb.io/error` 注解写错误信息，控制器继续重试）。
 
@@ -739,7 +740,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 
 | # | 风险 | 影响 | 概率 | 缓解措施 |
 |---|---|---|---|---|
-| R1 | **Service 裸奔窗口：CCM 对无注解 LoadBalancer Service autocreate 孤儿 ELB** | 孤儿 ELB 持续计费 | **已解除**（Q1 确认 CCE CCM 不 autocreate） | ✅ CCE 场景安全；⚠️ ECS 自建集群（开源 CCM）会 autocreate，当前作为已知限制，文档注明仅支持 CCE 场景 |
+| R1 | **Service 裸奔窗口：CCM 对无注解 LoadBalancer Service autocreate 孤儿 ELB** | 孤儿 ELB 持续计费 | **已解除**（Q1 确认 CCE CCM 不 autocreate） | ✅ CCE 场景安全；本方案仅支持 CCE 集群 |
 | R2 | **patch DBC 失败导致孤儿 LBC+ELB** | LBC+ELB 存在但无人引用，持续计费 | 中 | ① patch 失败时立即删 LBC（最终一致性）；② 补偿：独立 goroutine 每 5 分钟全集群扫描——有 `auto-lbc-name` 但 DBC 不存在则删 LBC |
 | R3 | **DBC 删除时 `in-use-protection` finalizer 阻止 LBC 删除** | DBC 卡在删除中 | 高 | DBC Reconciler 轮询 LBC finalizers（5s 间隔），等 `in-use-protection` 移除后再删 LBC；超时 10 分钟后在 DBC 的 `huawei-elb.io/error` 写错误信息，继续重试 |
 | R4 | **LBC 命名冲突（cluster-scoped）** | 创建 LBC 失败 | 低 | 命名加 namespace 前缀 + 长度截断 + SHA256 前 8 位 hex hash；冲突时直接报错不重试 |
@@ -771,6 +772,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 - [ ] 集成测试（kind + mock 华为云 API）
 - [ ] 文档更新（README + 配置参考）
 - [ ] 实现孤儿 LBC 补偿清理（独立 goroutine，每 5 分钟全集群扫描）
+> 注：以上实现计划对应方案 1。方案 2（Service Reconciler）的实现计划待方案确认后补充。
 
 ---
 
@@ -792,6 +794,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 
 | 决策 | 选择 | 理由 |
 |---|---|---|
+| 方案选择 | 待定（方案 1 vs 方案 2，见 §3.8/§3.9） | 待用户确认后定稿 |
 | 触发方式 | opt-in 注解 `huawei-elb.io/auto-elb: "true"` | 不影响存量，用户显式声明 |
 | LBC 命名 | `elb-<ns>-<dbc-name>` | cluster-scoped 唯一性 |
 | 是否 patch DBC | 是（设 loadBalancerConfigName） | F4 允许从空设值，F5 保证注解传播 |
@@ -807,6 +810,7 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 - [ ] **Q4**：华为云 ELB 名长度限制（64 字符？）
 - [ ] **Q5**：OpenEverest engine operator 创建的 Service 命名规则
 - [ ] **F11**：DBC 删除时 OpenEverest 的 `in-use-protection` 解除时序
+- [ ] **Q6**：是否移除 `auto-elb` opt-in 注解以实现完全 EKS/GKE 对等？权衡：移除后存量空值 DBC 会触发自动建 ELB（破坏性），需评估影响面
 ---
 
 ## 附录 A：研究证据来源
@@ -1009,11 +1013,11 @@ AWS CCM 读 service.beta.kubernetes.io/aws-load-balancer-* 注解
 | EIP 类型 | `eip_type` | ✅ |
 | ELB 标签 | `elb.tags`（独立注解） | ⚠️ 需两个注解 |
 | Region 覆盖 | 无 | ❌ |
-| 创建后可变 | 不可变 | ❌（EKS/GKE 也不支持大部分变更） |
+| 创建后可变 | 不可变 | ❌（华为云带宽计费场景下是真实痛点，见 §3.7） |
 
 **关键限制**：
 1. 无 Region 覆盖（EKS/GKE 也不支持跨 Region，不是 parity gap）
-2. 创建后不可变（EKS/GKE 也不支持大部分属性变更，不是 parity gap）
+2. 创建后不可变（华为云带宽计费场景下是真实痛点，详见 §3.7）
 3. 仅 CCE 可用（开源 CCM 不支持 autocreate）
 4. 5/14 字段为独享 ELB 专有
 5. Tags 需独立注解，不在 JSON 内
