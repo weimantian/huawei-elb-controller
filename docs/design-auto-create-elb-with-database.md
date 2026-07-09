@@ -822,3 +822,145 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 - `internal/controller/everest/loadbalancerconfig_controller.go` - LBC controller（inUse + finalizer）
 - `internal/controller/everest/providers/{pxc,pg,psmdb}/applier.go` - Service 创建逻辑
 - `test/integration/features/lbc_custom_pg/` - 集成测试（证明注解重新同步）
+
+## 附录 B：AWS EKS 注解传播路径源码分析
+
+> 目的：从 OpenEverest 源码确认注解传播是平台无关的纯透传，AWS 和 CCE 走同一条代码路径。差异 100% 在 OpenEverest 之下（CCM 层）。
+
+### B.1 结论
+
+OpenEverest 的注解传播路径**没有任何云平台分支逻辑**。`GetAnnotations()` 读 LBC 的 `spec.annotations`（一个 `map[string]string`），可选地展开 Go 模板，然后原样返回。三个引擎 applier（PXC/PG/PSMDB）将返回值直接赋给 engine CR 的 `ServiceExpose.Annotations`。上游 Percona engine operator 再把注解 stamp 到 Service 上。
+
+AWS EKS 和 CCE 在 OpenEverest 层**完全相同**，唯一区别是用户在 LBC 里放什么注解。
+
+### B.2 LBC 类型定义--纯注解 map
+
+```go
+// api/everest/v1alpha1/loadbalancerconfig_types.go L23-L33
+type LoadBalancerConfigSpec struct {
+    Annotations map[string]string `json:"annotations,omitempty"`
+}
+```
+
+没有云平台字段，没有 region，没有类型区分。`LoadBalancerConfig` 是 cluster-scoped CRD，只存这一个 map。
+
+### B.3 DBC 如何引用 LBC
+
+```go
+// api/everest/v1alpha1/databasecluster_types.go L322-L334
+type Expose struct {
+    Type                   ExposeType `json:"type,omitempty"`
+    LoadBalancerConfigName string     `json:"loadBalancerConfigName,omitempty"`
+}
+```
+
+DBC 通过 `Spec.Proxy.Expose.LoadBalancerConfigName` **按名字引用** LBC，没有云平台提示。
+
+### B.4 GetAnnotations()--整个传播逻辑
+
+```go
+// internal/controller/everest/common/helper.go L699-L729
+func GetAnnotations(ctx, c, database) (map[string]string, error) {
+    lbc, err := GetLoadBalancerConfig(ctx, c, database)
+    if err != nil {
+        if errors.Is(err, ErrEmptyLbc) {
+            return map[string]string{}, nil  // 空名 -> 返回空 map
+        }
+        return nil, err
+    }
+
+    annotations := lbc.Spec.Annotations  // 直接读 map
+
+    for key, value := range annotations {
+        if strings.Contains(value, "{{") && strings.Contains(value, "}}") {
+            updatedVal, err := SetTemplateValues(value, database)
+            if err != nil {
+                return map[string]string{}, err
+            }
+            annotations[key] = updatedVal
+        }
+    }
+
+    return annotations, nil  // 原样返回
+}
+```
+
+**没有 key 过滤，没有云平台判断，没有白名单校验。** `service.beta.kubernetes.io/aws-load-balancer-type` 和 `kubernetes.io/elb.class` 被一视同仁--都是 `map[string]string` 条目。唯一的转换是 Go 模板展开（如 `{{ .ObjectMeta.Name }}`），本身也是平台无关的。
+
+### B.5 三个引擎 applier--同一模式
+
+PXC、PG、PSMDB 三个 provider 的 `ExposeTypeLoadBalancer` 分支都是同一套代码：
+
+```go
+// PXC applier.go L613-L624（PG L222、PSMDB L295 同理）
+case everestv1alpha1.ExposeTypeLoadBalancer:
+    annotations, err := common.GetAnnotations(p.ctx, p.C, p.DB)
+    if err != nil {
+        return err
+    }
+    expose = pxcv1.ServiceExpose{
+        Enabled:     true,
+        Type:        corev1.ServiceTypeLoadBalancer,
+        Annotations: annotations,  // 直接赋值，无过滤
+    }
+```
+
+对 `ClusterIP`/`NodePort` 类型，annotations 设为空 `map[string]string{}`--LBC 注解**只在 `Type == LoadBalancer` 时**生效。
+
+### B.6 唯一的两处 AWS 相关代码--都与注解传播无关
+
+**`GetClusterType`（helper.go L127-L142）**：通过 StorageClass 的 provisioner 检测 EKS，但结果存了不读：
+
+| Provider | 赋值位置 | 读取 `p.clusterType` |
+|---|---|---|
+| PXC | provider.go:107 | **无** |
+| PG | provider.go:87 | **无** |
+| PSMDB | provider.go:102 | **无** |
+
+全代码库 grep `p.clusterType` 只返回结构体声明和单次赋值，零读取。对 LB 路径而言是死代码。
+
+**`defaultEKSLoadBalancerConfigName = "eks-default"`（migrator.go L43）**：定义了但全代码库**零引用**。`eks-default` LBC 是预置的 CR 数据（YAML），不是代码按云类型创建的。用户同样可以创建名为 `cce-default` 的 LBC 放华为云注解，operator 一视同仁。
+
+**PSMDB `engine_features_applier.go` L290-L297**：读取 `svc.Status.LoadBalancer.Ingress` 的 `.IP` 和 `.Hostname`（AWS NLB 返回 DNS hostname 而非 IP），这是**读回**方向，用于 split-horizon DNS，不影响**设置**注解的逻辑。
+
+### B.7 AWS EKS 完整流程（源码确认）
+
+```
+用户创建 LBC "my-aws-lbc"：
+  spec.annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/scheme: "internet-facing"
+     │
+     ▼
+用户创建 DBC，loadBalancerConfigName: "my-aws-lbc"
+     │
+     ▼  DBC Reconciler -> engine applier
+common.GetAnnotations()              [helper.go:699]
+  └─ GetLoadBalancerConfig()         [helper.go:660]
+  └─ annotations = lbc.Spec.Annotations
+  └─ (可选 Go 模板展开)
+  └─ return annotations               ← 纯 map，不过滤
+     │
+     ▼
+engine CR.Spec.ServiceExpose.Annotations = annotations  [applier.go:618]
+     │
+     ▼  上游 Percona engine operator（OpenEverest 仓库之外）
+Service.metadata.annotations = ServiceExpose.Annotations
+     │
+     ▼  AWS CCM（Kubernetes 上游，非 OpenEverest）
+AWS CCM 读 service.beta.kubernetes.io/aws-load-balancer-* 注解
+  -> 调 AWS API 建 NLB
+  -> 写 status.loadBalancer.ingress.hostname
+```
+
+### B.8 AWS vs CCE 对比
+
+| 步骤 | AWS EKS | CCE |
+|---|---|---|
+| LBC.spec.annotations | AWS 注解（配置指令） | `elb.id`（已建好的 ELB ID） |
+| `GetAnnotations()` | **相同代码** | **相同代码** |
+| engine CR 注解赋值 | **相同代码** | **相同代码** |
+| Service annotations | **相同传播** | **相同传播** |
+| 谁建 LB | AWS CCM（读注解 -> 调 AWS API） | huawei-elb-controller（调华为云 API -> 写 ID 回 LBC） |
+
+**核心结论**：OpenEverest 层完全平台无关。差异 100% 在 OpenEverest 之下--AWS CCM 自己能建 LB，CCE 需要外部控制器先建好再填 ID。这也是为什么这个控制器只存在于华为云场景，AWS 上不需要。
