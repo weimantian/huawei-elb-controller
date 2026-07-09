@@ -234,11 +234,72 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 **方案 2 的限制**：
 1. **仅 CCE 可用**：`elb.autocreate` 是 CCE CCM 专有注解，开源 CCM（`kubernetes-sigs/cloud-provider-huaweicloud`）不支持，使用完全不同的注解集。ECS 自建集群场景失效。
 2. **无 Region 覆盖**：autocreate JSON 无 region 字段，ELB 永远建在集群所在 Region。（EKS/GKE 也不支持跨 Region，不是 parity gap）
-3. **ELB 创建后部分不可变**：autocreate 注解创建后不可修改。可变的属性（端口、健康检查）通过 Service spec 改即可；不可变的（带宽、EIP 类型、AZ）需重建 ELB。（EKS/GKE 同样不支持大部分属性变更，不是 parity gap）
+3. **ELB 创建后不可变**：autocreate 注解创建后不可修改。可变的属性（端口、健康检查）通过 Service spec 改即可；不可变的（带宽、EIP 类型、AZ）需重建 ELB。虽然 EKS/GKE 也不支持大部分属性变更，但华为云 ELB 有带宽计费模型，用户大概率需要事后调带宽--这使得不可变性在华为云场景下是真实痛点而非理论问题（详见 §3.7）
 4. **状态可见性弱**：无 LBC，ELB 状态只有 Service events 和 `status.loadBalancer.ingress`，缺少 `ready`/`error`/`public-ip` 等结构化状态注解。
 5. **ELB 精细控制受限**：autocreate JSON 14 个字段（名称、类型、带宽、EIP、子网、AZ、flavor），控制器直接 API 支持更多参数。
 
-### 3.7 方案 1 vs 方案 2 对比
+### 3.7 精细控制与 LBC UI 可见性分析
+
+> 本节分析两个方案在 ELB 参数配置入口和创建后可变性上的差异。这是方案选择的关键决策点。
+
+#### 当前精细控制机制
+
+ELB 参数通过 LBC 的 `spec.annotations` 配置。用户在 OpenEverest LBC UI 页面填写注解，控制器的 `parseELBOptions()` 读取后调 ELB v3 API：
+
+| 注解 | 说明 | 默认值 |
+|---|---|---|
+| `huawei-elb.io/public` | 公网/内网 | `true` |
+| `huawei-elb.io/bandwidth-size` | 带宽大小（Mbit/s） | `10` |
+| `huawei-elb.io/bandwidth-charge-mode` | 计费模式 | `traffic` |
+| `huawei-elb.io/public-ip-network-type` | EIP 类型 | `5_bgp` |
+| `huawei-elb.io/region` | Region 覆盖 | 集群 Region |
+
+**关键**：DBC 创建 UI 里没有 ELB 参数配置入口，只有一个 LBC 下拉框。ELB 参数全部在 LBC 配置 UI 里通过注解设置。当前方案支持创建后修改：用户改 LBC 注解 -> 控制器重新 reconcile -> 调 API 更新 ELB 参数（如带宽扩容）。
+
+#### 方案 1：LBC 仍出现在 UI 中，精细控制保留
+
+控制器自动建的 LBC **会出现在 OpenEverest LBC UI 中**，用户可见可编辑：
+
+```
+创建 DBC -> 控制器自动建 LBC（默认参数：公网/10Mbit/s/traffic/5_bgp）
+  -> ELB 建好
+  -> 用户去 LBC UI 找到自动创建的 LBC
+  -> 加注解 huawei-elb.io/bandwidth-size: "100"
+  -> 控制器检测 LBC 变化 -> 调 ELB API 更新带宽为 100Mbit/s ✓
+```
+
+精细控制保留，只是延后到创建之后。默认值开箱即用，需要定制时事后改 LBC 注解。
+
+#### 方案 2：无 LBC，精细控制丢失
+
+方案 2 不建 LBC，控制器直接把 `elb.autocreate` JSON 注入 Service。但 autocreate 注解**创建后不可变**（CCE 官方文档明确：“该参数在创建完成后不可修改”）：
+
+```
+创建 DBC -> OpenEverest 建 Service -> 控制器注入 autocreate JSON（默认值）
+  -> CCM 建 ELB（10Mbit/s，不可变）
+  -> 用户想改带宽？❌ autocreate 不可改，只能删 Service 重建
+  -> 用户在哪里配置？❌ DBC UI 无 ELB 配置，LBC UI 无对应 LBC
+```
+
+| | 方案 1 | 方案 2 |
+|---|---|---|
+| LBC 出现在 UI 中？ | ✅ 是（自动创建的 LBC 可见可编辑） | ❌ 无 LBC |
+| 创建时用默认值？ | 是 | 是 |
+| 创建后可改带宽？ | ✅ 改 LBC 注解 -> 控制器调 API 更新 | ❌ autocreate 不可变 |
+| 创建后可改公网/内网？ | ✅ 同上 | ❌ 不可变 |
+| 创建后可改 EIP 类型？ | ✅ 同上 | ❌ 不可变 |
+| 用户配置入口 | LBC UI（事后编辑） | 无 |
+
+#### 为什么这对华为云场景是硬伤
+
+之前分析说“autocreate 不可变不是 parity gap，因为 EKS/GKE 也不支持大部分属性变更”。这个判断在纯 EKS/GKE parity 视角下成立，但忽略了一个关键差异：
+
+- **EKS/GKE 没有带宽概念**--AWS 和 GCP 的网络自动扩展，用户不设带宽上限
+- **华为云 ELB 有带宽计费**--带宽大小直接影响费用和性能，用户大概率需要事后调（如数据库流量增大要扩带宽）
+
+方案 1 保留 LBC 作为配置入口，用户随时可调。方案 2 没有 LBC，autocreate 又不可变，**用户失去了唯一的精细控制途径**。这使得方案 2 的“不可变”限制在华为云场景下是真实痛点，而非理论问题。
+
+### 3.8 方案 1 vs 方案 2 对比
 
 | 维度 | 方案 1（watch DBC -> LBC+ELB） | 方案 2（watch Service -> autocreate） |
 |---|---|---|
@@ -246,11 +307,11 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 | **Service 裸奔窗口** | 长（建LBC→建ELB→patchDBC→更新Service） | **短**（仅探测→注入注解） |
 | **代码量** | +300~400 行 | **+200 行** |
 | **patch 用户资源** | 是（patch DBC `loadBalancerConfigName`） | 否（patch Service 注解） |
-| **LBC 资源** | 需要（内部实现细节，用户不可见） | **不需要** |
+| **LBC 资源** | 需要（出现在 UI 中，用户可编辑） | **不需要** |
 | **状态可见性** | **完整**（LBC: ready/error/elb-status/public-ip） | 弱（Service events + status.ingress） |
 | **ELB 精细控制** | **完整**（直接 ELB v3 API，全参数） | 受限（autocreate 14 字段） |
 | **Region 覆盖** | **支持**（huawei-elb.io/region） | 不支持（autocreate 无 region；EKS/GKE 也不支持） |
-| **ELB 创建后可变** | **支持**（改 LBC 注解 → 重 reconcile → 更新 ELB） | 部分（带宽/EIP/AZ 不可变；EKS/GKE 同样不可变） |
+| **ELB 创建后可变** | **支持**（改 LBC 注解 -> 重 reconcile -> 更新 ELB） | ❌ 不可变（带宽/EIP/AZ 不可改；华为云带宽计费场景下是真实痛点，见 §3.7） |
 | **ELB 生命周期** | 控制器 + finalizer | **CCM 原生**（含删除，reclaim-policy 注解） |
 | **删除安全** | 高（finalizer 保证 ELB 删除） | **高**（CCM 按 reclaim-policy 处理） |
 | **平台适用性** | **CCE + ECS 自建**（开源 CCM 也兼容） | **仅 CCE**（开源 CCM 不支持 autocreate） |
@@ -260,10 +321,11 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 **关键差异总结**：
 - 方案 2 **架构更优雅**、代码更少、裸奔窗口更短、不 patch 用户 DBC
 - 方案 1 **状态可见性更好**、ELB 控制更精细、平台适用性更广（ECS 自建也支持）
+- 方案 1 **精细控制可事后调整**（LBC UI 编辑注解），方案 2 autocreate 不可变，华为云带宽计费场景下失去唯一调参途径（见 §3.7）
 - 两者 UX 都对标 EKS/GKE（创建 DBC 即获得 ELB，零额外操作）
 - 方案 2 的「仅 CCE 可用」是最大限制--如果未来需要支持 ECS 自建集群，方案 2 不可行
 
-### 3.8 当前方案 vs 自动方案对比
+### 3.9 当前方案 vs 自动方案对比
 
 | 维度 | 当前方案（手动两步） | 方案 1（DBC 自动建 LBC） | 方案 2（Service 注入 autocreate） |
 |---|---|---|---|
