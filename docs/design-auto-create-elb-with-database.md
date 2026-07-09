@@ -82,8 +82,10 @@
 ---
 
 ## 3. 方案设计
+经过分析，形成两个候选方案，都对标 EKS/GKE 的零配置体验（创建 DBC 即获得 ELB，无额外注解）。§3.1-3.5 详述方案 1，§3.6 详述方案 2，§3.7 给出两方案对比，§3.8 给出当前方案与自动方案的对比。
 
-### 3.1 思路
+
+### 3.1 方案 1：watch DBC -> 自动建 LBC + ELB -> patch DBC
 
 新增 DBC Reconciler，watch DBC 创建事件，自动建 LBC+ELB，再 patch DBC 的 `loadBalancerConfigName`。
 
@@ -169,36 +171,124 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 - **竞态**：⚠️ Service 裸奔窗口（步骤 ②-⑤），Q1 已确认 CCE 场景安全
 - **patch DBC**：会修改用户的 DBC 资源（设 loadBalancerConfigName）
 
-### 3.5 设计理由
+### 3.5 方案 1 设计理由
 
 1. **最大化复用现有代码**：LBC Reconciler 全部逻辑（探测、创建、删除、finalizer、状态注解）原样复用，新增的 DBC Reconciler 只是触发器 + patch 逻辑。
 2. **状态可见性完整**：LBC 上的 `ready`/`elb-status`/`error`/`public-ip` 注解全保留，运维体验不变。
 3. **与现有方案完全兼容**：用户已设 `loadBalancerConfigName` 的 DBC 不受影响，新功能仅对空值触发。
 
-### 3.6 当前方案 vs 本方案对比
+### 3.6 方案 2：watch Service -> 注入 autocreate 注解 -> CCM 建 ELB
 
-| 维度 | 当前方案（手动两步） | 本方案（DBC 自动建 LBC） |
+**思路**：新增 Service Reconciler，watch LoadBalancer Service，自动探测 VPC/子网/AZ，构造 `elb.autocreate` JSON 注入到 Service，让 CCE CCM 原生建 ELB。架构最接近 EKS/GKE--CCM 直接建 ELB，控制器只负责探测注入。
+
+**流程时序**：
+```
+① 用户建 DBC（loadBalancerConfigName 留空）
+② OpenEverest 建 Service（空注解）← ⚠️ Service 裸奔窗口开始
+③ 控制器检测到 Service，自动探测 VPC/子网/AZ
+④ 控制器构造 autocreate JSON + elb.class + elb.tags，patch 到 Service
+   ← Service 裸奔窗口结束
+⑤ CCE CCM 检测到 autocreate 注解，创建 ELB + 绑定
+⑥ CCM 写 Service.status.loadBalancer.ingress
+```
+
+**Service 裸奔窗口**：与方案 1 相同，步骤 ②-④ 之间 Service 无 ELB 注解。但窗口更短--方案 1 需要建 LBC + 建 ELB + patch DBC + 更新 Service（4 步），方案 2 只需探测 + 注入注解（1 步）。
+
+**触发条件**：
+- Service `type == LoadBalancer`
+- Service 不含 `kubernetes.io/elb.id` 和 `kubernetes.io/elb.autocreate`（未配置 ELB）
+- Service 由 OpenEverest engine operator 创建（通过 ownerReference 或命名规则识别）
+- 不含其他云提供商注解
+
+**ELB 删除**：CCM 原生处理。Service 被删时，CCM 根据 `kubernetes.io/elb.instance-reclaim-policy` 注解决定保留或删除 ELB（默认删除）。控制器无需 finalizer。
+
+**新增组件**：
+```
+internal/controller/service_controller.go   # 新增 Service Reconciler
+internal/controller/loadbalancerconfig_controller.go # 不变
+```
+
+- **代码改动**：+200 行（新 Service Reconciler，无 ELB CRUD 逻辑）
+- **用户体验**：与 EKS/GKE 完全一致--创建 DBC 即获得外部 IP，无额外注解
+- **竞态**：⚠️ Service 裸奔窗口（步骤 ②-④），比方案 1 短，Q1 已确认 CCE 场景安全
+- **patch 用户资源**：patch Service（注入注解），不 patch DBC
+- **LBC**：不需要
+
+**`elb.autocreate` JSON schema 摘要**（完整 14 字段见附录 C）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | String | 否 | ELB 名称，默认 `cce-lb-<service.UID>` |
+| `type` | String | 否 | `public`（公网）/ `inner`（内网），默认 `inner` |
+| `bandwidth_name` | String | 公网必填 | 带宽名称 |
+| `bandwidth_chargemode` | String | 公网必填 | `bandwidth` / `traffic` |
+| `bandwidth_size` | Integer | 公网必填 | 1-2000 Mbit/s |
+| `bandwidth_sharetype` | String | 公网必填 | `PER`（独享带宽） |
+| `eip_type` | String | 公网必填 | `5_bgp` / `5_sbgp` / `5_telcom` / `5_union` |
+| `vip_subnet_cidr_id` | String | 否 | IPv4 子网 ID |
+| `available_zone` | []String | 独享必填 | 可用区（独享 ELB 专有） |
+| `l4_flavor_name` | String | 否 | L4 flavor（独享 ELB 专有） |
+
+> Tags 不在 autocreate JSON 内，是独立注解 `kubernetes.io/elb.tags`（格式 `key1=value1,key2=value2`）。
+
+**方案 2 的限制**：
+1. **仅 CCE 可用**：`elb.autocreate` 是 CCE CCM 专有注解，开源 CCM（`kubernetes-sigs/cloud-provider-huaweicloud`）不支持，使用完全不同的注解集。ECS 自建集群场景失效。
+2. **无 Region 覆盖**：autocreate JSON 无 region 字段，ELB 永远建在集群所在 Region。（EKS/GKE 也不支持跨 Region，不是 parity gap）
+3. **ELB 创建后部分不可变**：autocreate 注解创建后不可修改。可变的属性（端口、健康检查）通过 Service spec 改即可；不可变的（带宽、EIP 类型、AZ）需重建 ELB。（EKS/GKE 同样不支持大部分属性变更，不是 parity gap）
+4. **状态可见性弱**：无 LBC，ELB 状态只有 Service events 和 `status.loadBalancer.ingress`，缺少 `ready`/`error`/`public-ip` 等结构化状态注解。
+5. **ELB 精细控制受限**：autocreate JSON 14 个字段（名称、类型、带宽、EIP、子网、AZ、flavor），控制器直接 API 支持更多参数。
+
+### 3.7 方案 1 vs 方案 2 对比
+
+| 维度 | 方案 1（watch DBC -> LBC+ELB） | 方案 2（watch Service -> autocreate） |
 |---|---|---|
-| **用户步骤** | 2 步（建 LBC -> 等 ready -> 建 DBC） | 1 步（建 DBC，加 `auto-elb` 注解） |
-| **操作界面** | kubectl 或 UI | kubectl annotate（当前）；未来 UI 支持后一键 |
-| **用户等待** | 必须等 LBC ready 后才能建 DBC | 只需等 DBC ready（LBC+ELB 在后台自动完成） |
-| **前提知识** | 理解 LBC 概念、知道要建 LBC | 只需知道加 `auto-elb: "true"` 注解 |
-| **VPC/子网/AZ** | 自动探测（无需手动） | 自动探测（共享同一探测逻辑） |
-| **ELB 生命周期** | 控制器 finalizer 管理 | 同左（复用） |
-| **状态可见性** | LBC 上的 `ready`/`elb-status`/`error`/`public-ip` | 同左（LBC 仍然存在，用户可查看） |
-| **删除流程** | 删 DBC -> 控制器等 in-use-protection 移除 -> 删 ELB | 删 DBC -> DBC Reconciler 等 in-use-protection 移除 -> 删 LBC -> LBC Reconciler 删 ELB |
-| **异常回滚** | 删除 LBC 即删 ELB | 删除 DBC 时自动清理 LBC；DBC patch 失败时有补偿清理逻辑（R2） |
-| **多 DB 共享 ELB** | 支持（多 DBC 引用同一 LBC） | 不支持（每个 DBC 独立 LBC）；如需共享，手动建 LBC 即可（不设 auto-elb） |
-| **ELB 配置精细度** | 完整（LBC 注解） | 完整（自动建的 LBC 仍可手动加注解） |
-| **与当前方案兼容** | - | 完全兼容--已设 `loadBalancerConfigName` 的 DBC 不触发 |
-| **代码复用** | - | ~80% 复用（LBC Reconciler 完全不动，只新增 DBC Reconciler） |
+| **架构接近 EKS/GKE** | 中（控制器建 ELB，CCM 只绑定） | **高**（CCM 原生建 ELB，控制器只探测注入） |
+| **Service 裸奔窗口** | 长（建LBC→建ELB→patchDBC→更新Service） | **短**（仅探测→注入注解） |
+| **代码量** | +300~400 行 | **+200 行** |
+| **patch 用户资源** | 是（patch DBC `loadBalancerConfigName`） | 否（patch Service 注解） |
+| **LBC 资源** | 需要（内部实现细节，用户不可见） | **不需要** |
+| **状态可见性** | **完整**（LBC: ready/error/elb-status/public-ip） | 弱（Service events + status.ingress） |
+| **ELB 精细控制** | **完整**（直接 ELB v3 API，全参数） | 受限（autocreate 14 字段） |
+| **Region 覆盖** | **支持**（huawei-elb.io/region） | 不支持（autocreate 无 region；EKS/GKE 也不支持） |
+| **ELB 创建后可变** | **支持**（改 LBC 注解 → 重 reconcile → 更新 ELB） | 部分（带宽/EIP/AZ 不可变；EKS/GKE 同样不可变） |
+| **ELB 生命周期** | 控制器 + finalizer | **CCM 原生**（含删除，reclaim-policy 注解） |
+| **删除安全** | 高（finalizer 保证 ELB 删除） | **高**（CCM 按 reclaim-policy 处理） |
+| **平台适用性** | **CCE + ECS 自建**（开源 CCM 也兼容） | **仅 CCE**（开源 CCM 不支持 autocreate） |
+| **多 DB 共享 ELB** | 不支持（每 DBC 独立 LBC） | 不支持（每 Service 独立 ELB） |
+| **ELB Tags** | 支持（LBC 注解 → API） | 支持（独立 `elb.tags` 注解） |
+
+**关键差异总结**：
+- 方案 2 **架构更优雅**、代码更少、裸奔窗口更短、不 patch 用户 DBC
+- 方案 1 **状态可见性更好**、ELB 控制更精细、平台适用性更广（ECS 自建也支持）
+- 两者 UX 都对标 EKS/GKE（创建 DBC 即获得 ELB，零额外操作）
+- 方案 2 的「仅 CCE 可用」是最大限制--如果未来需要支持 ECS 自建集群，方案 2 不可行
+
+### 3.8 当前方案 vs 自动方案对比
+
+| 维度 | 当前方案（手动两步） | 方案 1（DBC 自动建 LBC） | 方案 2（Service 注入 autocreate） |
+|---|---|---|---|
+| **用户步骤** | 2 步（建 LBC -> 等 ready -> 建 DBC） | 1 步（建 DBC） | 1 步（建 DBC） |
+| **用户等待** | 必须等 LBC ready 后才能建 DBC | 只需等 DBC ready | 只需等 DBC ready |
+| **前提知识** | 理解 LBC 概念、知道要建 LBC | 无需了解 LBC | 无需了解 LBC |
+| **VPC/子网/AZ** | 自动探测 | 自动探测（共享逻辑） | 自动探测（共享逻辑） |
+| **ELB 生命周期** | 控制器 finalizer 管理 | 同左（复用） | CCM 原生管理 |
+| **状态可见性** | LBC 注解（ready/error/public-ip） | 同左 | Service events + status.ingress |
+| **删除流程** | 删 DBC -> 等 in-use-protection 移除 -> 删 ELB | 删 DBC -> Reconciler 等 in-use-protection -> 删 LBC -> 删 ELB | 删 DBC -> CCM 按 reclaim-policy 删 ELB |
+| **异常回滚** | 删 LBC 即删 ELB | 删 DBC 时自动清理 LBC；patch 失败有补偿（R2） | CCM 处理，无孤儿风险 |
+| **多 DB 共享 ELB** | 支持（多 DBC 引用同一 LBC） | 不支持；如需共享手动建 LBC | 不支持 |
+| **ELB 配置精细度** | 完整（LBC 注解） | 完整（自动建 LBC 仍可手动加注解） | 受限（autocreate 14 字段） |
+| **与当前方案兼容** | - | 完全兼容 | 完全兼容 |
+| **平台适用性** | CCE + ECS 自建 | CCE + ECS 自建 | 仅 CCE |
 
 ```
-当前：LBC -> [等 ready] -> DBC（用户感知两步、等待一次）
-  ↑ 用户操作        ↑ 用户操作
+当前：     LBC -> [等 ready] -> DBC（用户感知两步、等待一次）
+           ↑ 用户操作        ↑ 用户操作
 
-本方案：DBC + auto-elb -> LBC -> ELB -> patch DBC -> Service -> CCM 绑定
-       ↑ 用户操作（一步）       └──── 控制器自动完成 ────┘
+方案 1：   DBC -> LBC -> ELB -> patch DBC -> Service -> CCM 绑定
+           ↑ 用户操作     └──── 控制器自动完成 ────┘
+
+方案 2：   DBC -> Service -> 控制器注入 autocreate -> CCM 建ELB+绑定
+           ↑ 用户操作     └──── 控制器+CCM自动完成 ────┘
 ```
 
 ---
@@ -750,3 +840,57 @@ AWS CCM 读 service.beta.kubernetes.io/aws-load-balancer-* 注解
 | 谁建 LB | AWS CCM（读注解 -> 调 AWS API） | huawei-elb-controller（调华为云 API -> 写 ID 回 LBC） |
 
 **核心结论**：OpenEverest 层完全平台无关。差异 100% 在 OpenEverest 之下--AWS CCM 自己能建 LB，CCE 需要外部控制器先建好再填 ID。这也是为什么这个控制器只存在于华为云场景，AWS 上不需要。
+
+## 附录 C：`elb.autocreate` JSON schema 完整参考
+
+> 来源：华为云 CCE 官方文档 [cce_10_0385](https://support.huaweicloud.com/usermanual-cce/cce_10_0385.html) Table 25（更新于 2026-06-18）。`elb.autocreate` 是 CCE CCM 专有注解，开源 CCM 不支持。
+
+**全部 14 个字段**：
+
+| # | 字段 | 类型 | 必填 | 说明 | 默认值 |
+|---|---|---|---|---|---|
+| 1 | `name` | String | 否 | ELB 名称，1-64 字符 | `cce-lb-<service.UID>` |
+| 2 | `type` | String | 否 | `public`（公网）/ `inner`（内网） | `inner` |
+| 3 | `bandwidth_name` | String | 公网必填 | 带宽名称 | - |
+| 4 | `bandwidth_chargemode` | String | 公网必填 | `bandwidth` / `traffic` | - |
+| 5 | `bandwidth_size` | Integer | 公网必填 | 1-2000 Mbit/s | - |
+| 6 | `bandwidth_sharetype` | String | 公网必填 | `PER`（独享带宽） | - |
+| 7 | `eip_type` | String | 公网必填 | `5_bgp` / `5_sbgp` / `5_telcom` / `5_union` | - |
+| 8 | `vip_subnet_cidr_id` | String | 否 | IPv4 子网 ID | 集群同子网 |
+| 9 | `ipv6_vip_virsubnet_id` | String | 否 | IPv6 子网 ID（独享 ELB 专有） | - |
+| 10 | `elb_virsubnet_ids` | []String | 否 | 后端子网 ID 列表（独享 ELB 专有） | 同 `vip_subnet_cidr_id` |
+| 11 | `vip_address` | String | 否 | ELB 私网 IP | 自动分配 |
+| 12 | `available_zone` | []String | 独享必填 | 可用区（独享 ELB 专有） | - |
+| 13 | `l4_flavor_name` | String | 否 | L4 flavor 名称（独享 ELB 专有） | - |
+| 14 | `l7_flavor_name` | String | 否 | L7 flavor 名称（独享 ELB 专有） | - |
+
+**不在 autocreate JSON 内的独立注解**：
+
+| 注解 | 说明 |
+|---|---|
+| `kubernetes.io/elb.class` | `union`（共享）/ `performance`（独享），须与 autocreate 同时设置 |
+| `kubernetes.io/elb.tags` | ELB 标签，格式 `key1=value1,key2=value2`（v1.23.11-r0+） |
+| `kubernetes.io/elb.enterpriseID` | 企业项目 ID |
+| `kubernetes.io/elb.instance-reclaim-policy` | 回收策略：`retain` / `alwaysDelete`（v1.28.15-r60+） |
+
+**与当前控制器功能映射**：
+
+| 控制器功能 | autocreate 对应 | 状态 |
+|---|---|---|
+| ELB 名称 | `name` | ✅ |
+| 子网 ID | `vip_subnet_cidr_id` | ✅ |
+| 可用区 | `available_zone` | ✅（独享 ELB） |
+| 公网/内网 | `type` | ✅ |
+| 带宽大小 | `bandwidth_size` | ✅ |
+| 带宽计费模式 | `bandwidth_chargemode` | ✅ |
+| EIP 类型 | `eip_type` | ✅ |
+| ELB 标签 | `elb.tags`（独立注解） | ⚠️ 需两个注解 |
+| Region 覆盖 | 无 | ❌ |
+| 创建后可变 | 不可变 | ❌（EKS/GKE 也不支持大部分变更） |
+
+**关键限制**：
+1. 无 Region 覆盖（EKS/GKE 也不支持跨 Region，不是 parity gap）
+2. 创建后不可变（EKS/GKE 也不支持大部分属性变更，不是 parity gap）
+3. 仅 CCE 可用（开源 CCM 不支持 autocreate）
+4. 5/14 字段为独享 ELB 专有
+5. Tags 需独立注解，不在 JSON 内
