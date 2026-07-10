@@ -1027,6 +1027,34 @@ OpenEverest 是云无关的，它只用 K8s 通用标准字段。在 AWS/GCP 上
 
 **预期**（设计文档初稿）：有 `loadBalancerSourceRanges` 无 `elb.acl-*` → CCM 报 `no access-controll (source ranges enabled)`。
 
+**实测（elb.id 路径）**：
+
+| 场景 | Service 配置 | CCM 行为 | EXTERNAL-IP |
+|---|---|---|---|
+| Q7-a | 裸 LoadBalancer，无任何注解 | Warn: `elb.id not defined, skip` | 永 `<pending>` |
+| Q7-b | 有 `loadBalancerSourceRanges`，无 `elb.id` | 同 Q7-a（跳过） | 永 `<pending>` |
+| Q7-c | 有 `elb.id` + `loadBalancerSourceRanges`，无 `elb.acl-*` | **成功绑定**，sourceRanges 被静默忽略 | ✅ 正常获取 VIP |
+| Q7-c+ | 有 `elb.id` + sourceRanges + `elb.acl-status/type`（无 `elb.acl-id`） | **成功绑定**，acl 配置被静默忽略 | ✅ 正常获取 VIP |
+
+**实测（autocreate 路径）**：
+
+| 场景 | Service 配置 | CCM 行为 | EXTERNAL-IP |
+|---|---|---|---|
+| a1 | autocreate(inner) + sourceRanges | **成功创建**，sourceRanges 被静默忽略 | ✅ 正常获取 VIP |
+| a2 | autocreate(inner) + sourceRanges + `elb.acl-status=on/type=white` | **成功创建**，acl 配置被静默忽略 | ✅ 正常获取 VIP |
+| a3 | autocreate(performance) + sourceRanges + 完整 flavor/AZ | **成功创建**，sourceRanges 被静默忽略 | ✅ 正常获取 VIP |
+
+**关键结论**：
+1. CCE 1.35.3 CCM **不触发** `no access-controll` 错误——所有组合均成功创建/绑定 ELB
+2. `loadBalancerSourceRanges` 被 CCM 完全忽略——用户设的 CIDR 在 ELB 层面**不生效**
+3. `elb.acl-status/type` 若无对应的 `elb.acl-id`（IP 地址组），也被静默忽略
+4. `no access-controll (source ranges enabled)` 错误**已由其他用户在实际使用中确认**（可能来自旧版 CCE，或特定 CCM 配置），不能因 1.35.3 未复现而忽略
+5. 无论 CCM 报不报错，**sourceRanges 都不生效** → ACL 自动处理方案（D.8）仍然必要
+
+**安全影响**：用户设 Source Range 期望白名单生效，但 CCM 忽略后 ELB 全开放。必须由控制器补 `elb.acl-*`。
+
+**预期**（设计文档初稿）：有 `loadBalancerSourceRanges` 无 `elb.acl-*` → CCM 报 `no access-controll (source ranges enabled)`。
+
 **实测**：分为三种场景：
 
 | 场景 | Service 配置 | CCM 行为 | EXTERNAL-IP |
