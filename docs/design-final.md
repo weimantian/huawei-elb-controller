@@ -516,9 +516,29 @@ UI 配置 Source Range: 10.0.0.0/8
 
 ---
 
-## 7. 备选方案
+## 7. EKS / GKE / CCE 四平台对比
 
-### 7.1 方案 2：Service Reconciler（备用）
+| 维度 | AWS EKS | Google GKE | CCE（当前手动方案） | CCE（最终 auto 方案） |
+|---|---|---|---|---|
+| **LB 名称** | NLB（Network Load Balancer） | Cloud Load Balancer（外部直通网络负载均衡器） | ELB（Elastic Load Balancer） | 同左 |
+| **用户操作步骤** | 1 步：建 DBC | 1 步：建 DBC | 2 步：建 LBC → 等 ready → 建 DBC | 1 步：建 DBC |
+| **LB 创建者** | AWS CCM 自动建 | GKE CCM 自动建 | huawei-elb-controller（提前建） | huawei-elb-controller（用户建 DBC 时触发） |
+| **Service → LB 绑定方式** | CCM 调 AWS API 建 NLB，自动绑定 | CCM 调 GCP API 建 LB，自动绑定 | huawei-elb-controller 调 API 创建 ELB；Service 通过 `kubernetes.io/elb.id` 绑定已有 ELB，CCM 完成 listener/backend 绑定。**CCE 内置 CCM 只支持绑定已有 ELB，不支持自动创建（能力限制，非配置选择）** | 同左 |
+| **每 DBC 的 LB 数量** | 2 个 NLB（每个单独计费） | 2 个 LB（每个单独计费） | 1 个 ELB（primary 和 replicas 共享，但 replicas 端口冲突不创建） | **2 个 ELB**（每个单独计费，对齐 EKS/GKE） |
+| **replicas 外部接入** | ✅ NLB-2 独立外部 IP | ✅ LB-2 独立外部 IP | ❌ 端口冲突，不创建 | ✅ ELB-2 独立外部 IP |
+| **Source Range / ACL** | ✅ CCM 转 NLB listener 规则 | ✅ CCM 转 VPC 防火墙规则 | ❌ CCM 忽略，需手动配 `elb.acl-*` | ✅ LBC Reconciler 自动转 `elb.acl-*`（D.8） |
+| **LB 在 OpenEverest UI 中可见** | ❌ 不可见（NLB 非 K8s 资源，仅 Service external IP） | ❌ 不可见（同左） | ✅ 可见（LBC CR 出现在 Settings → Load Balancer Configuration） | ✅ 可见（同左，自动创建的 LBC 自动出现） |
+| **LB 创建后参数可调** | ✅ 改 Service annotation → CCM 更新 | ✅ 改 Service annotation → CCM 更新 | ✅ 改 LBC annotation → controller 调华为云 API | ✅ 同左 |
+| **LB 生命周期管理** | CCM 管理（删 Service → CCM 删 NLB） | CCM 管理 | 控制器 + finalizer（删 LBC → 调 API 删 ELB） | 同左 |
+| **LB 共享** | 不支持（每 Service 独立 NLB） | 不支持 | 支持（多 Service 绑同一 ELB，端口不冲突则可用） | 自动：不支持（独立 ELB）；手动：同左 |
+| **异常恢复** | CCM 处理，无孤儿风险 | 同左 | Compensation Goroutine 每 5min 扫描孤儿 LBC | 同左 |
+| **前提知识** | 零 | 零 | 需理解 LBC 概念 | 零 |
+
+---
+
+## 8. 备选方案
+
+### 8.1 方案 2：Service Reconciler（备用）
 
 **思路**：新增 Service Reconciler，watch LoadBalancer Service，自动探测 VPC/子网/AZ，构造 `elb.autocreate` JSON 注入到 Service，让 CCE CCM 原生建 ELB。
 
@@ -530,7 +550,7 @@ UI 配置 Source Range: 10.0.0.0/8
 ④ CCM 检测到 autocreate → 建 ELB → 绑定 → 写 status.ingress
 ```
 
-### 7.2 方案 2 与最终方案对比
+### 8.2 方案 2 与最终方案对比
 
 | 维度 | 最终方案（DBC Reconciler） | 方案 2（Service Reconciler） |
 |---|---|---|
