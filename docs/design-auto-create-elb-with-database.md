@@ -1,7 +1,7 @@
 # 设计：创建数据库时自动创建 ELB
 
 > **分支**: `design/auto-create-elb-with-database`
-> **状态**: 设计阶段，关键问题已通过 CCE 实测确认（Q1/Q2/Q4/Q7 ✅，Q5/F11 ⚠️ check.percona.com 阻断）
+        > **状态**: 设计阶段，关键问题已通过 CCE 实测确认（Q1/Q2/Q4/Q7/F11 ✅，D.8 ACL 自动处理列为方案 1 必须实现）
 > **作者**: weimantian
 > **日期**: 2026-07-08
 
@@ -58,7 +58,7 @@
 | Q4 | ELB 名称长度限制 | 实测 66 字符 ELB 名创建成功，华为云 API 无 64 字符硬限制。`elb-<lbc-name>` 命名不需要截断 | ✅ CCE 实测 |
 | Q7 | `loadBalancerSourceRanges` 行为 | CCE 1.35.3 CCM **完全忽略**该字段，不报错、不阻塞 ELB 绑定。CIDR 限制不生效，需控制器补 `elb.acl-*`（见附录 D.8） | ✅ CCE 实测 |
 | Q5 | Service 命名规则 | PSMDB: `<dbc-name>-rs0-0`（源码确认格式 `<engine-cr-name>-proxy` 近似） | ⚠️ 源码+实测 |
-| F11 | `in-use-protection` 解除时序 | DBC 删除时 OpenEverest 清理 engine CR → finalizer 随之移除 | ⚠️ 源码推断 |
+| F11 | `in-use-protection` 解除时序 | DBC 删除后，everest-operator LBC controller 在下一个 reconcile 周期（5s 内）通过 `List` 全集群 DBC，确认无引用后移除 `in-use-protection` finalizer。**已验证（2026-07-10 CCE 1.35.3 实测）**：删除最后一个引用 LBC 的 DBC 后，finalizer 5s 内移除 | ✅ CCE 实测 |
 | DB | DBC 端到端创建 | `check.percona.com` 被墙阻断 DBEngine 版本发现，UI 创建 DBC 走通了但 engine operator 拉镜像受阻 | ⚠️ 网络限制 |
 
 ## 3. 方案设计
@@ -277,6 +277,7 @@ internal/controller/loadbalancerconfig_controller.go # 不变
 | **删除安全** | 高（finalizer 保证 ELB 删除） | **高**（CCM 按 reclaim-policy 处理） |
 | **平台适用性** | 仅 CCE | 仅 CCE |
 | **多 DB 共享 ELB** | 不支持（每 DBC 独立 LBC） | 不支持（每 Service 独立 ELB） |
+| **Replicas 独立 ELB** | **支持**（DBC Reconciler 为 replicas 单独创建 LBC+ELB，patch PXC CR 分别指定不同 ELB ID，对齐 EKS/GKE） | 不支持 |
 | **ELB Tags** | 支持（LBC 注解 → API） | 支持（独立 `elb.tags` 注解） |
 | **ACL 访问控制** | **支持**（LBC Reconciler 检 Service sourceRanges → 调 API 创 IP Group → LBC 注解传播；随 LBC 统一生命周期，详见 D.8） | 支持（Service Reconciler 检 sourceRanges → 调 API 创 IP Group → patch Service 注解） |
 
@@ -651,6 +652,8 @@ LBC Reconciler 和 DBC Reconciler 都持有 `*NetworkDetector` 引用。
 | R9 | **跨 region DBC（huawei-elb.io/region 注解）** | ELB 建在错误 region | 低 | DBC Reconciler 读取 DBC 的 region 注解，传给 LBC 的 spec.annotations |
 | R10 | **UI 中 LBC 解绑但 ELB 未删（孤儿 ELB 持续计费）** | 用户切换 DBC 的 LBC 引用或删 DBC 后，旧 LBC 仍在集群中、ELB 持续扣费 | 高（对应用户操作习惯：UI 中改了引用就不再管旧资源） | ① **admission webhook**：删除被引用的 LBC 直接拒绝，UI 层面不可绕过（CCE 实测：API 返回 403 Forbidden）。② **DBC Reconciler 级联清理**：删 DBC 时同步删 LBC（等 in-use-protection 移除后）。③ **Compensation Goroutine**：独立 goroutine，每 5 分钟全集群扫描——找到所有带 `huawei-elb.io/auto-lbc-name` 注解的 LBC，若对应 DBC 不存在或不引用此 LBC，执行清理。详见下文 |
 
+| R11 | **⚠️ CCE ELB 共享导致 HAProxy replicas Service 端口冲突** | PXC operator 为 primary 和 replicas 各创建一个 LoadBalancer Service（同端口 3306），共享同一 ELB 时 CCE webhook 拒绝 replicas。EKS/GKE 无共享机制故不受影响（每 Service 独立 LB 且单独计费） | **已定方案** | DBC Reconciler 为 replicas 独立建 LBC + ELB，patch PXC CR 分别指定不同 ELB ID，对齐 EKS/GKE。**当前方案和方案 1 均必须实现。** 详见 §5.2 |
+| R12 | **⚠️ `loadBalancerSourceRanges` 在 CCE 1.35.3 静默忽略，ACL 不生效** | 用户在 UI 配置 Source Range（如 `10.0.0.0/8`）后传播到 Service，CCM 接受但 ELB 层面不生效，数据库公网全裸。EKS/GKE CCM 原生支持 | **必解** | D.8 ACL 自动处理（Phase 1 必须实现）。详见 §D.8 |
 ---
 
 ### 5.1 Compensation Goroutine（孤儿 LBC 清理）
@@ -692,6 +695,74 @@ func (r *OrphanScanner) scan(ctx context.Context) {
 
 扫描间隔 5 分钟，防止频繁全集群遍历；删除操作复用现有 `LoadBalancerConfigReconciler` 的 finalizer 逻辑，ELB 删除受华为云 API 速率限制保护。
 
+### 5.2 HAProxy Replicas Service 端口冲突（R11）
+
+#### 背景：云 LB 概念
+
+NLB（AWS）、Cloud LB（GKE）、ELB（CCE）本质是同一个东西——云上的负载均衡器实例——只是不同云厂商的不同叫法。功能完全相同：接收外部流量 → 转发到后端 Pod。**均按实例单独计费**。
+
+差异不在 LB 本身，而在 CCM 如何把 Service 和 LB 关联：
+
+| 平台 | CCM 行为 | 共享机制 |
+|---|---|---|
+| AWS EKS | 每个 LoadBalancer Service → CCM 自动创建 1 个独立 NLB | 不存在（天然隔离） |
+| Google GKE | 每个 LoadBalancer Service → CCM 自动创建 1 个独立 Cloud LB | 不存在（天然隔离） |
+| 华为云 CCE | Service 通过 `kubernetes.io/elb.id` 绑定到已有 ELB；多个 Service 可共享同一 ELB | **存在（共享模式）** |
+
+#### 问题
+
+PXC operator 为每个数据库集群创建两个 LoadBalancer Service：
+
+| Service | 用途 | 端口 |
+|---|---|---|
+| `<dbc>-haproxy` | Primary（读写入口） | 3306 |
+| `<dbc>-haproxy-replicas` | Replicas（只读副本） | 3306 |
+
+**EKS/GKE 现状**：每个 Service 获得独立云 LB（两个 LB，各自计费），端口天然隔离，不冲突。
+
+**CCE 现状**：两个 Service 共享同一个 ELB（同一 `loadBalancerConfigName`），CCE `validate.crd.service` webhook 拒绝第二个同端口 Service：
+```
+protocol_port 3306 of the load Balancer xxx already has been usesd by other service
+```
+
+**已实测（2026-07-10 CCE 1.35.3）**：primary Service 创建成功，replicas Service 被拒。单节点集群不受影响（haproxy internal 通过端口 3307 路由到副本），多节点集群需要 replicas Service 提供独立外部接入点。
+
+#### 本质原因
+
+EKS/GKE 不存在共享机制，所以不冲突。CCE 支持 ELB 共享（省钱），但 PXC operator 设计假设每个 Service 独立 LB（EKS/GKE 行为），同端口共享 ELB 必然冲突。
+
+#### 方案（已定：方案 C）
+
+**方案 C：DBC Reconciler 为 replicas 独立建 LBC + ELB，patch PXC CR 分别指定不同 ELB ID**，对齐 EKS/GKE 行为（每 Service 独立 LB，单独计费）。**当前方案和方案 1 均必须实现此功能。**
+
+实现流程：
+
+```
+① 用户建 DBC（loadBalancerConfigName 留空）
+② DBC Reconciler 检测到触发条件
+   ├─ 建 primary LBC（elb-<ns>-<dbc-name>）
+   └─ 建 replicas LBC（elb-<ns>-<dbc-name>-replicas）
+③ 两个 LBC Reconciler 各自创建 ELB，写回 elb.id
+④ DBC Reconciler 检测到两个 LBC ready
+   → patch PXC CR 分别指定不同 ELB ID：
+       spec.haproxy.exposePrimary.annotations:  {kubernetes.io/elb.id: <primary-elb-id>}
+       spec.haproxy.exposeReplicas.annotations: {kubernetes.io/elb.id: <replicas-elb-id>}
+⑤ PXC operator re-reconcile → 更新两个 Service 为不同 ELB ID
+   → CCM 各绑各的 ELB，端口不冲突 ✅
+```
+
+| 对比项 | EKS/GKE | CCE（实现本方案后） |
+|---|---|---|
+| Primary Service | NLB-1 / LB-1 | ELB-1（独立） |
+| Replicas Service | NLB-2 / LB-2 | ELB-2（独立） |
+| 端口冲突 | 不发生 | 不发生 ✅ |
+| 计费 | 两个 LB 账单 | 两个 ELB 账单（对齐） |
+
+方案 A/B 已排除——理由：无法对齐 EKS/GKE 的 replicas 独立接入能力。
+
+
+
+
 ---
 
 ## 6. 实现计划
@@ -700,20 +771,23 @@ func (r *OrphanScanner) scan(ctx context.Context) {
 
 - [x] **Q1**：CCE CCM 对无注解 LoadBalancer Service 的行为--**已确认**：CCE 内置 CCM 不 autocreate（Service 停 pending），开源 CCM 会 autocreate。本方案对 CCE 场景可行。
 - [x] **Q2**：确认 OpenEverest UI 能否留空 loadBalancerConfigName 提交 -- **已确认**：`loadBalancerConfigName` 可选字段，CEL 不校验必填，DBC 可空值创建。
+- [x] **F11**：确认 `in-use-protection` finalizer 解除时序 -- **已确认（2026-07-10 CCE 1.35.3 实测）**：DBC 删除后，everest-operator LBC controller 在下一个 reconcile 周期（5s 内）移除 `in-use-protection`。删除链路设计正确。
 
 ### Phase 1：实现
 
 - [ ] 重构 `autoDetectParams` 为共享 `NetworkDetector`
-- [ ] 实现 `DatabaseClusterReconciler`（触发、创建 LBC、patch DBC）
-- [ ] 实现 DBC 删除链路（等 in-use-protection 移除、删 LBC）
-- [ ] 新增 RBAC（DBC + LBC create/delete 权限）
-- [ ] 新增常量与注解
-- [ ] 更新 Helm chart（新 RBAC）
-- [ ] 更新 deploy/ manifests
-- [ ] 单元测试
-- [ ] 集成测试（kind + mock 华为云 API）
+- [ ] 实现 `DatabaseClusterReconciler`（触发条件检测、创建 primary LBC + replicas LBC、patch DBC、patch PXC CR 分别指定不同 ELB ID、删除链路、孤儿 LBC 补偿扫描）
+- [ ] 新增常量与注解（`auto-elb`、`auto-lbc-name`、`dbc-finalizer`、`auto-lbc-replicas-name`）
+- [ ] **Replicas 独立 ELB**（§5.2 方案 C）：DBC Reconciler 为 replicas 额外创建 LBC（命名 `elb-<ns>-<dbc>-replicas`），两个 LBC 各自 ready 后 patch PXC CR 的 `exposePrimary.annotations` 和 `exposeReplicas.annotations` 分别指定不同 ELB ID，对齐 EKS/GKE
+- [ ] 新增 RBAC（DBC get/list/watch/update/patch、LBC create/delete、PXC get/watch/patch）
+- [ ] 实现 D.8 **ACL 自动处理**（LBC Reconciler 检测 Service `loadBalancerSourceRanges` → 华为云 ELB API 创建 IP 地址组 → 注入 `elb.acl-id/status/type` 到 LBC.spec.annotations）
+- [ ] **防御性注入** `elb.acl-status=off`（创建 LBC 时默认注入——防止 CCE 1.33 `no access-control` 错误，即使未复现）
+- [ ] 更新 Helm chart + deploy/ manifests
+- [ ] 单元测试 + 集成测试（kind + mock 华为云 API）
 - [ ] 文档更新（README + 配置参考）
-- [ ] 实现孤儿 LBC 补偿清理（独立 goroutine，每 5 分钟全集群扫描）
+- [ ] 更新 Helm chart + deploy/ manifests
+- [ ] 单元测试 + 集成测试（kind + mock 华为云 API）
+- [ ] 文档更新（README + 配置参考）
 > 注：以上实现计划对应方案 1。方案 2（Service Reconciler）的实现计划待方案确认后补充。
 
 ---
@@ -958,10 +1032,10 @@ AWS CCM 读 service.beta.kubernetes.io/aws-load-balancer-* 注解
 
 ## 附录 D：`spec.loadBalancerSourceRanges` 与华为云访问控制机制冲突
 
-> ⚠️ **CCE 版本差异**：CCM 为闭源组件。CCE 1.33 **报错** `no access-controll (source ranges enabled)`（客户确认）；CCE 1.35.3 **静默忽略**（实测 7 种组合均不触发）。无论哪个版本 sourceRanges 都不生效，需控制器补 `elb.acl-*`。详见 D.5。
+        > ⚠️ **CCE 版本差异**：CCM 为闭源组件。CCE 1.33 **报错** `no access-controll (source ranges enabled)`（未复现，仅客户报告）；CCE 1.35.3 **静默忽略**（实测 10+ 种组合均不触发）。无论哪个版本 sourceRanges 都不生效，需控制器补 `elb.acl-*`。详见 D.5。
 
 > 背景：OpenEverest UI 支持用户设 Source Range（CIDR 白名单），写入 `Service.spec.loadBalancerSourceRanges`。但华为云 ELB 的访问控制用 `elb.acl-*` 注解 + 预建 IP 地址组，CCM 不认标准 K8s 字段。
-> ⚠️ **更新（2026-07-09 CCE 1.35.3 实测）**：CCE CCM **不报** `no access-controll (source ranges enabled)` 错误，`loadBalancerSourceRanges` 被静默忽略。详见 D.5。
+        > ⚠️ **更新（2026-07-10 CCE 1.35.3 补充实测）**：CCE CCM **不报** `no access-controll (source ranges enabled)` 错误，`loadBalancerSourceRanges` 被静默忽略。CCE 1.33 的报错**从未在我们的集群上复现**（仅客户反馈）。详见 D.5。
 
 
 ### D.1 `spec.loadBalancerSourceRanges` 是什么
@@ -1029,28 +1103,26 @@ OpenEverest 是云无关的，它只用 K8s 通用标准字段。在 AWS/GCP 上
 
 CCE CCM 是华为云闭源组件，行为无法从源码验证。
 
-**客户报错**（CCE 1.33 环境）：
-1. `no access-controll (source ranges enabled)` —— `loadBalancerSourceRanges` 已设但无 `elb.acl-*`
-2. `Source ranges not configured` —— `loadBalancerSourceRanges` 未设且无 `elb.acl-*`
-
-**CCE 1.35.3 实测**（@ 2026-07-09，elb.id + autocreate 两条路径，10+ 种组合）：
-
-| 测试变量 | 测试过的值 |
-|---|---|
-| 创建方式 | 一次性创建、先裸 LB 再加注解（两阶段） |
-| ELB 绑定方式 | `elb.id`（已有 ELB）、`elb.autocreate`（CCM 新建） |
-| ELB 类型 | `union`（共享）、`performance`（独享） |
-| 后端 | 无 endpoint、有真实 backend |
-| pass-through | 未设、`onlyLocal` |
-| sourceRanges | 未设、设单个 CIDR |
-| acl-status/type | 未设、`on/white`（无 acl-id） |
-| externalTrafficPolicy | `Cluster`、`Local` |
-
-**全部测试结果：两个错误均无法复现**。CCM 在所有组合中都正常创建/绑定 ELB，`loadBalancerSourceRanges` 被静默忽略。
-
-**结论**：
-1. 两个错误在 CCE 1.33 环境确认存在（客户反馈），在 CCE 1.35.3 无法复现
-2. 差异原因**未确认**——可能来自 CCM 版本差异，也可能需要特定 CCE 集群配置才能触发
+        **客户报错**（CCE 1.33 环境，**未在当前集群复现**）：
+        1. `no access-controll (source ranges enabled)` —— `loadBalancerSourceRanges` 已设但无 `elb.acl-*`
+        2. `Source ranges not configured` —— `loadBalancerSourceRanges` 未设且无 `elb.acl-*`
+        
+        **CCE 1.35.3 实测**（@ 2026-07-10，elb.id 路径，10+ 种组合，含同 ELB 不同端口 + sourceRanges）：
+        
+        | 测试变量 | 测试过的值 |
+        |---|---|
+        | 创建方式 | 一次性创建、先裸 LB 再加注解（两阶段） |
+        | ELB 绑定方式 | `elb.id`（已有 ELB）、Service 手动创建共享 ELB |
+        | ELB 类型 | `union`（共享） |
+        | 后端 | 无 endpoint、有真实 backend |
+        | pass-through | 未设、`onlyLocal` |
+        | sourceRanges | 未设、设单个 CIDR、设多个 CIDR、两个 Service 不同 CIDR |
+        | externalTrafficPolicy | `Cluster`、`Local` |
+        
+        **全部测试结果：两个错误均无法复现**。CCM 在所有组合中都正常创建/绑定 ELB，`loadBalancerSourceRanges` 被静默忽略。
+        
+        **结论**：
+        1. 两个错误**仅在 CCE 1.33 客户报告中出现，从未在我们的 CCE 1.35.3 集群上复现**
 3. **无论是否能复现**，`loadBalancerSourceRanges` 在华为云 ELB 层面都不生效——ACL 自动处理方案（D.8）仍然必要
 
 ### D.6 对本方案的影响（更新后）
@@ -1075,12 +1147,9 @@ CCE CCM 是华为云闭源组件，行为无法从源码验证。
 - 华为云 ELB 文档：[elb_03_0003](https://support.huaweicloud.com/usermanual-elb/elb_03_0003.html)（listener 级访问控制）
 - 开源 CCM：`kubernetes-sigs/cloud-provider-huaweicloud` SHA `e4d2b145` 无 `elb.acl` 逻辑（确认该错误来自闭源 CCE CCM）
 
-### D.8 方案对比：ACL 自动处理（`loadBalancerSourceRanges` → `elb.acl-*`）
+### D.8 ACL 自动处理（方案 1 必须实现）—— `loadBalancerSourceRanges` → `elb.acl-*`
 
-CCE CCM 忽略 `loadBalancerSourceRanges`（D.5 实测），导致用户在 OpenEverest UI 设的 CIDR 白名单不生效。控制器可自动调用华为云 ELB API 创建 IP 地址组并注入 `elb.acl-*` 注解，实现与 AWS/GCP 对等的「设 CIDR 即生效」体验。
-
-**核心逻辑（两种方案共用）**：
-
+CCE CCM 忽略 `loadBalancerSourceRanges`（D.5 实测），导致用户在 OpenEverest UI 设的 CIDR 白名单不生效。控制器**必须**自动调用华为云 ELB API 创建 IP 地址组并注入 `elb.acl-*` 注解，实现与 AWS/GCP 对等的「设 CIDR 即生效」体验。**现阶段为方案 1 的必须实现项，非长期规划。**
 ```
 用户设 CIDR (OpenEverest UI → Service.spec.loadBalancerSourceRanges)
     ↓
@@ -1125,7 +1194,7 @@ Service.spec.loadBalancerSourceRanges
 | 生命周期 | 随 LBC（创建/更新/删除统一管理），用户改 LBC 注解即改 ACL | 独立于 LBC，需额外处理更新/删除 |
 | 与现有代码一致性 | LBC Reconciler 已有 ELB API 调用能力 | 新 Reconciler，需独立维护 ELB client |
 
-**推荐**：方案 1 将 ACL 管理整合在 LBC Reconciler 中，与 ELB 创建/删除同生命周期，用户改 LBC 注解即可调整 ACL 规则，不需要感知底层 Service。这是与 LBC 「配置面板」定位一致的方案。
+**必须**：方案 1 将 ACL 管理整合在 LBC Reconciler 中，与 ELB 创建/删除同生命周期，用户改 LBC 注解即可调整 ACL 规则，不需要感知底层 Service。这是与 LBC 「配置面板」定位一致的方案。**ACL 自动处理列为方案 1 Phase 1 必须实现项。**
 
 ### D.9 补充错误：`Source ranges not configured`
 
@@ -1145,7 +1214,7 @@ Service.spec.loadBalancerSourceRanges
 | 有 elb.acl-* | ✅ 正常 | ✅ 正常 |
 | 无 elb.acl-* | ❌ `no access-controll (source ranges enabled)` | ❌ `Source ranges not configured` |
 
-**结论**：两个错误均已由用户在 CCE 环境中反馈确认。两者本质上都是 CCM 访问控制校验的两个方向——要求 Service 必须有可用的访问控制配置。在 CCE 1.35.3 上无法复现（见 D.5 实测矩阵），差异原因未确认。
+        **结论**：两个错误**仅在 CCE 1.33 客户报告中出现，从未在我们的 CCE 1.35.3 集群上复现**。两者本质上都是 CCM 访问控制校验的两个方向——要求 Service 必须有可用的访问控制配置。差异原因未确认。
 
 **方案影响**：无论是否能复现，控制器都需要处理 `elb.acl-*`。方案 1 可在创建 LBC 时默认注入 `elb.acl-status=off` 显式声明「无访问控制」，或默认创建全开放 ACL（白名单 `0.0.0.0/0`），对齐 AWS/GKE 默认行为。
 
