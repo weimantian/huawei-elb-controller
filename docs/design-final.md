@@ -160,6 +160,22 @@ DBC Reconciler 在以下条件全部满足时触发自动创建：
                           → 调华为云 API 绑定 ELB
                           → 写 Service.status.loadBalancer.ingress
                           两个 Service 各绑各的 ELB，端口 3306 不冲突 ✅
+                          │
+                          步骤 ⑧ LBC Reconciler — ACL 自动处理（watch Service 绑定完成）
+                          │ Service 已绑定 ELB → LBC Reconciler 检测到关联 Service
+                          │ 读 Service.spec.loadBalancerSourceRanges
+                          │
+                          ├─ 为空（用户未配 Source Range）
+                          │   └─ 保持 elb.acl-status=off（已完成）
+                          │
+                          └─ 有值（如 10.0.0.0/8）
+                              ├─ 调华为云 ELB API: CreateIpGroup(CIDR → IP 地址组)
+                              ├─ 更新 LBC.spec.annotations:
+                              │    kubernetes.io/elb.acl-status: "on"
+                              │    kubernetes.io/elb.acl-type: "white"
+                              │    kubernetes.io/elb.acl-id: <ipgroup-id>
+                              ├─ OpenEverest 传播链 → Service.annotations
+                              └─ CCM 绑定到 ELB listener → ACL 生效 ✅
 ```
 
 ### 3.4 时序详解
@@ -215,6 +231,16 @@ T~15s    CCM（两个 Service 各自触发）:
           ├─ Service-A（primary）: 读 elb.id-A → 调 API 绑定 ELB-A → 写 status.ingress
           ├─ Service-B（replicas）: 读 elb.id-B → 调 API 绑定 ELB-B → 写 status.ingress
           └─ 两个 Service 各绑各的 ELB，端口 3306 不冲突 ✅
+          │
+T~18s   LBC Reconciler — ACL 自动处理（Service UPDATE 触发 LBC re-reconcile）:
+          ├─ 读 Service.spec.loadBalancerSourceRanges
+          ├─ 为空 → 保持 elb.acl-status=off（步骤 ③ 已注入）✅
+          │
+          └─ 有值（如用户配了 10.0.0.0/8）:
+              ├─ 调 ELB API: CreateIpGroup(CIDR → IP 地址组)
+              ├─ 更新 LBC.spec.annotations: acl-status=on, acl-type=white, acl-id=<id>
+              ├─ OpenEverest 传播链 → Service.annotations
+              └─ CCM 绑定到 ELB listener → ELB 仅放行 10.0.0.0/8 ✅
 ```
 
 ### 3.5 DBC Reconciler 详细流程
