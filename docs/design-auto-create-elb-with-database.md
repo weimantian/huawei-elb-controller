@@ -1085,7 +1085,6 @@ CCE CCM 是华为云闭源组件，行为无法从源码验证，仅能通过实
 - **方案 1**：`loadBalancerSourceRanges` 不会阻塞 ELB 绑定（CCE 1.35.3 实测），不构成紧急问题。用户在 LBC 注解里配 `elb.acl-*` 可以传播到 Service（需在华为云控制台预建 IP 地址组）。长期可自动调用 ELB API 创建 IP 地址组并注入 `elb.acl-id`，实现与 AWS/GCP 对等体验
 - **方案 2**：同理，autocreate JSON 不支持 `elb.acl-*`，需独立注解注入
 - **长期方案**：控制器可自动调 ELB API 创建 IP 地址组，把用户在 LBC 里写的 CIDR 转成 IP 地址组 ID 并注入 `elb.acl-id`，实现与 AWS/GCP 对等的体验
-⑤ 报错：no access-controll (source ranges enabled)
 ```
 
 
@@ -1153,3 +1152,26 @@ Service.spec.loadBalancerSourceRanges
 | 与现有代码一致性 | LBC Reconciler 已有 ELB API 调用能力 | 新 Reconciler，需独立维护 ELB client |
 
 **推荐**：方案 1 将 ACL 管理整合在 LBC Reconciler 中，与 ELB 创建/删除同生命周期，用户改 LBC 注解即可调整 ACL 规则，不需要感知底层 Service。这是与 LBC 「配置面板」定位一致的方案。
+
+### D.9 补充错误：`Source ranges not configured`
+
+除 D.5 中分析的 `no access-controll (source ranges enabled)` 外，CCE 1.33 CCM 还存在一个方向相反的错误：
+
+**触发条件**：
+- `loadBalancerSourceRanges` 为**空**（未设置）
+- Service 使用 LoadBalancer 类型（通常配合 `externalTrafficPolicy: Local` 或 `elb.pass-through`）
+- 无 `elb.acl-*` 注解
+
+**报错**：`load balance without Access(Source ranges not configured)`
+
+**场景**：单节点 MongoDB 实例创建时，OpenEverest 生成的 Service 未设 `loadBalancerSourceRanges`，CCM 要求必须配置访问控制。
+
+| | sourceRanges 已设 | sourceRanges 未设 |
+|---|---|---|
+| 有 elb.acl-* | ✅ 正常 | ✅ 正常 |
+| 无 elb.acl-* | ❌ `no access-controll (source ranges enabled)` | ❌ `Source ranges not configured` |
+
+**结论**：CCE 1.33 CCM 强制要求 LoadBalancer Service 必须配置访问控制——要么设 `loadBalancerSourceRanges`，要么设 `elb.acl-*`，两者都不设就报错。CCE 1.35.3 已放宽此校验。
+
+**方案影响**：两种错误本质上都需要控制器处理 `elb.acl-*`。方案 1（LBC Reconciler）可在创建 LBC 时默认注入 `elb.acl-status=off` 来显式声明「无访问控制」，从而绕过两种错误。或者默认创建全开放 ACL（白名单 `0.0.0.0/0`），与 AWS/GKE 的默认行为对齐。
+
