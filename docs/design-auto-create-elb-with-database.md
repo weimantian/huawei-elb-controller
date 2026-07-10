@@ -961,7 +961,6 @@ AWS CCM 读 service.beta.kubernetes.io/aws-load-balancer-* 注解
 > ⚠️ **CCE 版本差异**：CCM 为闭源组件。CCE 1.33 **报错** `no access-controll (source ranges enabled)`（客户确认）；CCE 1.35.3 **静默忽略**（实测 7 种组合均不触发）。无论哪个版本 sourceRanges 都不生效，需控制器补 `elb.acl-*`。详见 D.5。
 
 > 背景：OpenEverest UI 支持用户设 Source Range（CIDR 白名单），写入 `Service.spec.loadBalancerSourceRanges`。但华为云 ELB 的访问控制用 `elb.acl-*` 注解 + 预建 IP 地址组，CCM 不认标准 K8s 字段。
-### D.1 `spec.loadBalancerSourceRanges` 是什么
 > ⚠️ **更新（2026-07-09 CCE 1.35.3 实测）**：CCE CCM **不报** `no access-controll (source ranges enabled)` 错误，`loadBalancerSourceRanges` 被静默忽略。详见 D.5。
 
 
@@ -1026,59 +1025,34 @@ OpenEverest 是云无关的，它只用 K8s 通用标准字段。在 AWS/GCP 上
 
 **关键差异**：`loadBalancerSourceRanges` 直接写 CIDR 即可；`elb.acl-*` 必须先在 ELB 控制台创建一个「IP 地址组」对象（把 CIDR 填进去），再引用它的 ID。不能在 Service 注解里直接写裸 CIDR。
 
-### D.5 实际行为（CCE 1.33 vs 1.35.3 对比）
+### D.5 实测结论
 
-CCE CCM 是华为云闭源组件，行为无法从源码验证，仅能通过实测和用户反馈确认。
+CCE CCM 是华为云闭源组件，行为无法从源码验证。
 
-| | CCE 1.33（客户反馈） | CCE 1.35.3（实测 @ 2026-07-09） |
-|---|---|---|
-| `loadBalancerSourceRanges` 设值 | CCM 检测到 → **报错阻塞** | CCM 检测到 → **静默忽略** |
-| 报错信息 | `no access-controll (source ranges enabled)` | 不报错 |
-| ELB 绑定 | ❌ 失败 | ✅ 成功（但 ACL 不生效） |
-| `elb.acl-status/type` 无 `elb.acl-id` | 同样报错 | 静默忽略 |
+**客户报错**（CCE 1.33 环境）：
+1. `no access-controll (source ranges enabled)` —— `loadBalancerSourceRanges` 已设但无 `elb.acl-*`
+2. `Source ranges not configured` —— `loadBalancerSourceRanges` 未设且无 `elb.acl-*`
 
-**1.35.3 实测矩阵**（elb.id + autocreate 两条路径，7 种组合全部不触发错误）：
+**CCE 1.35.3 实测**（@ 2026-07-09，elb.id + autocreate 两条路径，10+ 种组合）：
 
-| 路径 | 场景 | 配置 | 结果 |
-|---|---|---|---|
-| elb.id | Q7-c | elb.id + sourceRanges | 绑定成功，sourceRanges 被忽略 |
-| elb.id | Q7-c+ | elb.id + sourceRanges + acl-status/type（无 acl-id） | 绑定成功，acl 配置被忽略 |
-| autocreate | a1 | autocreate(inner) + sourceRanges | 创建成功，sourceRanges 被忽略 |
-| autocreate | a2 | a1 + acl-status/type | 创建成功，acl 配置被忽略 |
-| autocreate | a3 | autocreate(performance) + sourceRanges + 完整 flavor/AZ | 创建成功，sourceRanges 被忽略 |
+| 测试变量 | 测试过的值 |
+|---|---|
+| 创建方式 | 一次性创建、先裸 LB 再加注解（两阶段） |
+| ELB 绑定方式 | `elb.id`（已有 ELB）、`elb.autocreate`（CCM 新建） |
+| ELB 类型 | `union`（共享）、`performance`（独享） |
+| 后端 | 无 endpoint、有真实 backend |
+| pass-through | 未设、`onlyLocal` |
+| sourceRanges | 未设、设单个 CIDR |
+| acl-status/type | 未设、`on/white`（无 acl-id） |
+| externalTrafficPolicy | `Cluster`、`Local` |
 
-**关键结论**：
-1. CCE 1.33 CCM **严格校验**：有 sourceRanges 但无 elb.acl-* → 报错阻塞
-2. CCE 1.35.3 CCM **放宽校验**：sourceRanges 被静默忽略，ELB 照常绑定
-3. 无论哪个版本，`loadBalancerSourceRanges` 在华为云 ELB 层面都**不生效**
-4. 控制器必须补充 `elb.acl-*` 处理（D.8），才能在两个版本上都实现正确的 ACL
+**全部测试结果：两个错误均无法复现**。CCM 在所有组合中都正常创建/绑定 ELB，`loadBalancerSourceRanges` 被静默忽略。
 
-**安全影响**：用户设 Source Range 期望白名单生效，但 CCM 忽略后 ELB 全开放。必须由控制器补 `elb.acl-*`。
-**安全影响**：用户设 Source Range 期望白名单生效，但 CCM 忽略后 ELB 全开放。必须由控制器补 `elb.acl-*`。
+**结论**：
+1. 两个错误在 CCE 1.33 环境确认存在（客户反馈），在 CCE 1.35.3 无法复现
+2. 差异原因**未确认**——可能来自 CCM 版本差异，也可能需要特定 CCE 集群配置才能触发
+3. **无论是否能复现**，`loadBalancerSourceRanges` 在华为云 ELB 层面都不生效——ACL 自动处理方案（D.8）仍然必要
 
-**预期**（设计文档初稿）：有 `loadBalancerSourceRanges` 无 `elb.acl-*` → CCM 报 `no access-controll (source ranges enabled)`。
-
-**实测**：分为三种场景：
-
-| 场景 | Service 配置 | CCM 行为 | EXTERNAL-IP |
-|---|---|---|---|
-| Q7-a | 裸 LoadBalancer，无任何注解 | Warn: `elb.id not defined, skip` | 永 `<pending>` |
-| Q7-b | 有 `loadBalancerSourceRanges`，无 `elb.id` | 同 Q7-a（跳过） | 永 `<pending>` |
-| Q7-c | 有 `elb.id` + `loadBalancerSourceRanges`，无 `elb.acl-*` | **成功绑定 ELB**，sourceRanges 被静默忽略 | ✅ 正常获取 VIP |
-| Q7-c+ | 有 `elb.id` + `loadBalancerSourceRanges` + `elb.acl-status=on` + `elb.acl-type=white`（无 `elb.acl-id`） | **成功绑定**，acl 配置被静默忽略 | ✅ 正常获取 VIP |
-
-**关键结论**：
-1. CCE 1.35.3 的 CCM **不会**因 `loadBalancerSourceRanges` 报错或阻塞 ELB 绑定
-2. `loadBalancerSourceRanges` 被 CCM 完全忽略——用户设的 CIDR 在 ELB 层面不生效
-3. `elb.acl-status/type` 若无对应的 `elb.acl-id`（IP 地址组），也被静默忽略
-4. 设计文档中引用的 `no access-controll (source ranges enabled)` 错误在 CCE 1.35.3 上不存在（可能来自旧版 CCM 或已修复）
-
-**安全影响**：如果用户通过 OpenEverest UI 设了 Source Range，期望 IP 白名单生效，但 CCM 忽略后 ELB 实际上是全开放。这是一个 parity gap，但不是阻塞性 bug——控制器可以后续自动处理 ACL 创建。
-
-```
-① 用户在 OpenEverest UI 填 Source range（CIDR）
-② OpenEverest 把 CIDR 写进 Service.spec.loadBalancerSourceRanges
-③ CCE CCM 检测到 loadBalancerSourceRanges 非空 -> "(source ranges enabled)"
 ### D.6 对本方案的影响（更新后）
 
 - **当前控制器**：完全没处理 source ranges 和 access control，是一个已知的 parity gap
@@ -1171,7 +1145,9 @@ Service.spec.loadBalancerSourceRanges
 | 有 elb.acl-* | ✅ 正常 | ✅ 正常 |
 | 无 elb.acl-* | ❌ `no access-controll (source ranges enabled)` | ❌ `Source ranges not configured` |
 
-**结论**：CCE 1.33 CCM 强制要求 LoadBalancer Service 必须配置访问控制——要么设 `loadBalancerSourceRanges`，要么设 `elb.acl-*`，两者都不设就报错。CCE 1.35.3 已放宽此校验。
+**结论**：两个错误均已由用户在 CCE 环境中反馈确认。两者本质上都是 CCM 访问控制校验的两个方向——要求 Service 必须有可用的访问控制配置。在 CCE 1.35.3 上无法复现（见 D.5 实测矩阵），差异原因未确认。
+
+**方案影响**：无论是否能复现，控制器都需要处理 `elb.acl-*`。方案 1 可在创建 LBC 时默认注入 `elb.acl-status=off` 显式声明「无访问控制」，或默认创建全开放 ACL（白名单 `0.0.0.0/0`），对齐 AWS/GKE 默认行为。
 
 **方案影响**：两种错误本质上都需要控制器处理 `elb.acl-*`。方案 1（LBC Reconciler）可在创建 LBC 时默认注入 `elb.acl-status=off` 来显式声明「无访问控制」，从而绕过两种错误。或者默认创建全开放 ACL（白名单 `0.0.0.0/0`），与 AWS/GKE 的默认行为对齐。
 
