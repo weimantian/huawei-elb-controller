@@ -1,6 +1,6 @@
 # 方案 2 详细设计：Service Reconciler（LBC 参数模板 + autocreate）
 
-> **状态**: 备选
+> **状态**: 方案 2
 
 > **日期**: 2026-07-10
 
@@ -296,7 +296,7 @@ CCM 原生处理。控制器注入 `kubernetes.io/elb.instance-reclaim-policy: a
 | **实现复杂度高于预期** | Service Reconciler 需同时处理创建（autocreate）和更新（华为云 API），比最初 +200 行估算更高 | 🟡 中等 |
 | **ELB 状态不可见** | 无 LBC 的结构化状态（ready/error/public-ip），仅 Service events + status.ingress | 🟡 中等 |
 | **ACL 需独立处理** | `loadBalancerSourceRanges` → `elb.acl-*` 需单独实现 | 🟡 中等 |
-| **CCM 行为不可控** | autocracy 建 ELB 由 CCE 闭源 CCM 控制，排查路径长 | 🟡 中等 |
+| **CCM 行为不可控** | autocreate 建 ELB 由 CCE 闭源 CCM 控制，排查路径长 | 🟡 中等 |
 | **EIP 类型不可变更** | `eip_type` 创建后不可变（华为云 API 限制），与 EKS/GKE NLB/LB 类型不可切换一致 | 🟢 平台限制，非方案问题 |
 
 ---
@@ -309,7 +309,7 @@ CCM 原生处理。控制器注入 `kubernetes.io/elb.instance-reclaim-policy: a
 |---|---|---|---|---|---|---|
 | **AWS EKS** | 参数模板 | 2 个 NLB（独立计费） | ✅ | ✅ | 不发生 | LBC 只是模板，每 Service 独立 NLB |
 | **Google GKE** | 参数模板 | 2 个 LB（独立计费） | ✅ | ✅ | 不发生 | 同 EKS |
-| **CCE 最终方案** | 实例引用（`elb.id`） | 1 个 ELB（共享） | ✅ | ❌ | 发生 | 手动单 LBC 不创 replicas LBC |
+| **CCE 方案 1** | 实例引用（`elb.id`） | 1 个 ELB（共享） | ✅ | ❌ | 发生 | 手动单 LBC 不创 replicas LBC |
 | **CCE 方案 2** | **参数模板**（`bandwidth/eip/...`） | **2 个 ELB**（独立计费） | ✅ | ✅ | 不发生 | 对齐 EKS/GKE，创建用 CCM，更新用 controller |
 
 ### 11.2 自动模式：不使用 LBC 创建数据库集群
@@ -318,12 +318,12 @@ CCM 原生处理。控制器注入 `kubernetes.io/elb.instance-reclaim-policy: a
 |---|---|---|---|---|---|---|
 | **AWS EKS** | CCM 原生 | 2 个 NLB（独立计费） | ✅ | ✅ | 不发生 | 零控制器 |
 | **Google GKE** | CCM 原生 | 2 个 LB（独立计费） | ✅ | ✅ | 不发生 | 同 EKS |
-| **CCE 最终方案** | DBC Reconciler → 双 LBC → 双 ELB | 2 个 ELB（独立计费） | ✅ | ✅ | 不发生 | 通过双 LBC 独立 ELB |
+| **CCE 方案 1** | DBC Reconciler → 双 LBC → 双 ELB | 2 个 ELB（独立计费） | ✅ | ✅ | 不发生 | 通过双 LBC 独立 ELB |
 | **CCE 方案 2** | Service Reconciler 默认参数 autocreate | 2 个 ELB（独立计费） | ✅ | ✅ | 不发生 | CCM 原生建 ELB |
 
 ### 11.3 用户视角对比
 
-| 维度 | EKS | GKE | CCE（最终方案） | CCE（方案 2） |
+| 维度 | EKS | GKE | CCE（方案 1） | CCE（方案 2） |
 |---|---|---|---|---|
 | **操作步骤** | 1 步 | 1 步 | 1 步 | 1 步 |
 | **前提知识** | 零 | 零 | 零 | 零 |
@@ -349,7 +349,7 @@ CCM 原生处理。控制器注入 `kubernetes.io/elb.instance-reclaim-policy: a
 
 ### 11.5 总结
 
-| 维度 | EKS | GKE | CCE（最终方案） | CCE（方案 2） |
+| 维度 | EKS | GKE | CCE（方案 1） | CCE（方案 2） |
 |---|---|---|---|---|
 | **手动模式 replicas** | ✅ | ✅ | ❌ | ✅ |
 | **自动模式 replicas** | ✅ | ✅ | ✅ | ✅ |
