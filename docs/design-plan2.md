@@ -255,6 +255,42 @@ CCM 原生处理。Service 被删时，CCM 根据 `kubernetes.io/elb.instance-re
 | **Region 覆盖** | **✅ 支持** | ❌ 不支持 |
 | **平台适用** | CCE | CCE |
 
+## 11. 方案对比（EKS / GKE / CCE）
+
+### 11.1 手动模式：使用 LBC 创建数据库集群
+
+用户先创建 LBC（含 LB 配置/ELB ID），DBC 引用该 LBC。
+
+| 平台 | LBC 角色 | 每 DBC 的 LB 数量 | Primary 外部 IP | Replicas 外部 IP | 端口冲突 | 说明 |
+|---|---|---|---|---|---|---|
+| **AWS EKS** | 注解模板（含 `service.beta.kubernetes.io/aws-load-balancer-*`） | 2 个 NLB（各自独立计费） | ✅ NLB-1 | ✅ NLB-2 | 不发生 | LBC 只是配置模板，每个 Service 仍独立建 NLB |
+| **Google GKE** | 注解模板（含 GCP LB 配置） | 2 个 LB（各自独立计费） | ✅ LB-1 | ✅ LB-2 | 不发生 | 同 EKS |
+| **CCE 最终方案**（DBC Reconciler） | 指向具体 ELB（含 `kubernetes.io/elb.id`） | **1 个 ELB**（共享） | ✅ ELB | ❌ 端口冲突 | **发生**（primary 成功，replicas 被拒） | 手动单 LBC 模式不创建 replicas LBC |
+| **CCE 方案 2**（Service Reconciler） | 指向具体 ELB（含 `kubernetes.io/elb.id`） | **1 个 ELB**（共享） | ✅ ELB | ❌ 端口冲突 | **发生** | 手动模式与最终方案相同 |
+
+### 11.2 自动模式：不使用 LBC 创建数据库集群
+
+LBC 不创建，控制器自动处理。EKS/GKE 上 DBC 的 `loadBalancerConfigName` 留空。
+
+| 平台 | 工作机制 | 每 DBC 的 LB 数量 | Primary 外部 IP | Replicas 外部 IP | 端口冲突 | 说明 |
+|---|---|---|---|---|---|---|
+| **AWS EKS** | CCM 检测 type=LoadBalancer Service → 自动调 AWS API 建 NLB | 2 个 NLB（各自独立计费） | ✅ NLB-1 | ✅ NLB-2 | 不发生 | 原生行为，无需任何控制器 |
+| **Google GKE** | CCM 检测 type=LoadBalancer Service → 自动调 GCP API 建 LB | 2 个 LB（各自独立计费） | ✅ LB-1 | ✅ LB-2 | 不发生 | 同 EKS |
+| **CCE 最终方案**（DBC Reconciler） | DBC Reconciler 建两个 LBC → LBC Reconciler 建两个 ELB → patch DBC + PXC CR | **2 个 ELB**（各自独立计费） | ✅ ELB-1 | ✅ ELB-2 | 不发生 | 通过两个 LBC 实现独立 ELB |
+| **CCE 方案 2**（Service Reconciler） | Service Reconciler 注入 elb.autocreate → CCM 建两个独立 ELB | **2 个 ELB**（各自独立计费） | ✅ ELB-1 | ✅ ELB-2 | 不发生 | CCM 原生建 ELB，架构最接近 EKS/GKE |
+
+### 11.3 总结
+
+| 维度 | EKS | GKE | CCE（最终方案） | CCE（方案 2 备用） |
+|---|---|---|---|---|
+| **手动模式 LB 独立性** | 每 Service 独立 NLB | 同左 | 共享同一 ELB（冲突） | 共享同一 ELB（冲突） |
+| **手动模式 replicas** | ✅ | ✅ | ❌ 端口冲突 | ❌ 端口冲突 |
+| **自动模式 replicas** | ✅（原生） | ✅（原生） | ✅（双 LBC 双 ELB） | ✅（autocreate ×2） |
+| **自动模式机制** | CCM 原生 | CCM 原生 | Reconciler → CCM | Reconciler → CCM |
+| **自动模式与 EKS/GKE 对齐** | — | — | ✅ 行为对齐 | ✅ 行为对齐 |
+| **ELB 创建后可调参** | ✅ | ✅ | ✅（改 LBC 注解） | ❌（autocreate 不可变） |
+| **UI 配置面板** | ❌（无 LBC） | ❌（无 LBC） | ✅（LBC） | ❌（无 LBC） |
+
 ---
 
 ## 12. 结论
