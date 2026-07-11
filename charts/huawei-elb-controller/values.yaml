@@ -52,3 +52,12 @@ healthProbe:
   livenessProbe:
     initialDelaySeconds: 15
     periodSeconds: 20
+
+# Service Reconciler default parameters (Plan 2).
+# Used when a Service has no huawei-elb.io/* annotations (auto mode, no LBC).
+defaults:
+  public: true
+  bandwidthSize: 10
+  bandwidthChargeMode: "traffic"
+  eipType: "5_bgp"
+  bandwidthShareType: "PER"

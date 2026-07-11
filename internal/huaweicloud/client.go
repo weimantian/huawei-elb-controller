@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth/basic"
+	eipv2 "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2"
+	eipv2region "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2/region"
 	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
 	elbregion "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/region"
 )
@@ -64,4 +66,27 @@ func NewELBClient(creds *Credentials) (*elb.ElbClient, error) {
 	}
 
 	return elb.NewElbClient(hcClient), nil
+}
+// NewEIPClient creates a Huawei Cloud EIP v2 client from credentials.
+func NewEIPClient(creds *Credentials) (*eipv2.EipClient, error) {
+	auth := basic.NewCredentialsBuilder().
+		WithAk(creds.AK).
+		WithSk(creds.SK).
+		WithProjectId(creds.ProjectID).
+		Build()
+
+	reg, err := eipv2region.SafeValueOf(creds.Region)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Huawei Cloud region %q: %w", creds.Region, err)
+	}
+
+	hcClient, err := eipv2.EipClientBuilder().
+		WithCredential(auth).
+		WithRegion(reg).
+		SafeBuild()
+	if err != nil {
+		return nil, fmt.Errorf("building EIP HTTP client: %w", err)
+	}
+
+	return eipv2.NewEipClient(hcClient), nil
 }
