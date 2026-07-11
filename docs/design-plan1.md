@@ -1,8 +1,8 @@
-# 最终方案设计：创建数据库时自动创建 ELB
+# 方案 1 设计：DBC Reconciler（创建数据库时自动创建 ELB 并支持参数配置）
 
 > **基线文档**: `docs/design-auto-create-elb-with-database.md`（保留为设计过程备份）
 > **状态**: 终稿
-> **日期**: 2026-07-10
+
 
 ---
 
@@ -66,7 +66,7 @@
 
 ---
 
-## 3. 最终方案：DBC Reconciler（当前方案 + 方案 1）
+## 3. 方案 1：DBC Reconciler（当前方案 + 方案 1）
 
 ### 3.1 整体架构
 
@@ -545,9 +545,9 @@ UI 配置 Source Range: 10.0.0.0/8
 
 ---
 
-## 8. 备选方案
+## 8. 方案 2（Service Reconciler）
 
-### 8.1 方案 2：Service Reconciler（备用）
+### 8.1 方案 2：Service Reconciler
 
 **思路**：新增 Service Reconciler，watch LoadBalancer Service，自动探测 VPC/子网/AZ，构造 `elb.autocreate` JSON 注入到 Service，让 CCE CCM 原生建 ELB。
 
@@ -561,7 +561,7 @@ UI 配置 Source Range: 10.0.0.0/8
 
 ### 8.2 方案 2 与最终方案对比
 
-| 维度 | 最终方案（DBC Reconciler） | 方案 2（Service Reconciler） |
+| 维度 | 方案 1（DBC Reconciler） | 方案 2（Service Reconciler） |
 |---|---|---|
 | **架构接近 EKS/GKE** | 中（控制器建 ELB，CCM 只绑定） | **高**（CCM 原生建 ELB） |
 | **代码量** | +400~500 行 | +200 行 |
@@ -574,7 +574,7 @@ UI 配置 Source Range: 10.0.0.0/8
 | **用户操作** | 1 步（建 DBC） | 1 步（建 DBC） |
 | **总评** | ⭐ 功能完整对齐 EKS/GKE | 架构优雅但不满足功能需求 |
 
-**方案 2 不被选为最终方案的原因**：
+**方案 1 与方案 2 的差异**：
 1. 无法解决 replicas 端口冲突（autocreate 不支持指定独立 ELB）
 2. ELB 创建后参数不可变（华为云带宽计费场景下是硬伤）
 3. 状态可见性弱（无 LBC 结构化的 ready/error 注解）

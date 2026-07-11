@@ -1,7 +1,7 @@
-# 备选方案 2 详细设计：Service Reconciler（LBC 参数模板 + autocreate）
+# 方案 2 详细设计：Service Reconciler（LBC 参数模板 + autocreate）
 
-> **状态**: 备选，不被选为最终方案
-> **基线**: `docs/design-final.md`
+> **状态**: 备选
+
 > **日期**: 2026-07-10
 
 ---
@@ -374,6 +374,4 @@ CCM 原生处理。控制器注入 `kubernetes.io/elb.instance-reclaim-policy: a
 
 **与 EKS/GKE 的唯一差异在实现层面**：需要 Service Reconciler（填补 CCE CCM 的能力缺口），但这不影响用户使用体验。
 
-**保留为最终方案的备选**，适用于：
-- 长期目标：CCE autocreate 原生支持参数可变后，可去掉 controller 更新路径
-- Elb.id 实例模式退化到极致（多集群 LBC 膨胀）时的主要迁移方案
+## 12. 结论
