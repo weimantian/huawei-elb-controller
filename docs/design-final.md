@@ -491,10 +491,10 @@ UI 配置 Source Range: 10.0.0.0/8
 | R11 | HAProxy replicas 端口冲突 | ✅ 已确认 | 已定方案（§3.7） |
 | R12 | sourceRanges 在 ELB 不生效 | ✅ 已确认 | 已定方案（D.8） |
 | U1 | CCE 1.33 `no access-control` 错误 | ⚠️ 未复现 | 防御性注入 `elb.acl-status=off` |
-| D1 | **触发条件：是否需要 `auto-elb` 注解？** | 🔴 **需用户确认** | **建议**：不要求注解，`loadBalancerConfigName` 为空即触发。理由：UI 不支持自定义注解，要求注解 = UI 用户无法使用 |
-| D2 | **多 DB 共享 ELB 支持？** | 🔴 **需用户确认** | **建议**：自动建的 DBC 不共享 ELB（每 DBC 独立 LBC + replicas LBC，对齐 EKS/GKE）。手动流程可共享（用户自己绑同一 ELB） |
-| D3 | **UI 中 LBC 数量增加？** | 🔴 **需用户确认** | 每个 auto DBC 产生 2 个 LBC（primary + replicas），UI 中可见可编辑。**建议**：接受，LBC 是配置面板，每个 DB 一个配置面板合理（华为云 ELB 可配参数多） |
-| D4 | **replicas ELB 是否可关闭？** | 🔴 **需用户确认** | 用户可以手动设 `loadBalancerConfigName` 引用单一 LBC，绕过自动创建。**建议**：不提供显式关闭开关，需要时走手动流程 |
+| D1 | **触发条件：是否需要 `auto-elb` 注解？** | ✅ 已确认 | 不要求注解，`loadBalancerConfigName` 为空即触发。理由：UI 不支持自定义注解，要求注解 = UI 用户无法使用 |
+| D2 | **多 DB 共享 ELB 支持？** | ✅ 已确认 | 自动创建的 DBC 不共享 ELB（独立 LBC，对齐 EKS/GKE）。手动流程可共享：用户创建 DBC 时手动指定同一 `loadBalancerConfigName`。**限制**：华为云 ELB 不允许同一 listener 端口复用；PXC operator 的 primary 和 replicas Service 端口硬编码均为 3306，共享同一 ELB 必然触发端口冲突（同类型 DB 集群不能共享）。不同类型 DB 集群端口不一致（PXC=3306、PSMDB=27017、PG=5432），可共享同一 ELB。但共享模式下 replicas 端口冲突问题（§4.1）无法规避，详见 D4 |
+| D3 | **UI 中 LBC 数量增加？** | ✅ 已确认 | 每个 auto DBC 产生 2 个 LBC（primary + replicas），UI 中可见可编辑。LBC 是配置面板，每个 DB 一个配置面板合理 |
+| D4 | **手动流程下 replicas 端口冲突如何解决？** | 🔴 **需用户确认** | **问题**：D2 手动共享 LBC 路径与 replicas 端口冲突矛盾——单 LBC 模式下 replicas Service 必然创建失败。**唯一解法**：用户手动创建两个 LBC，分别给 primary 和 replicas；建完 DBC 后手动 patch PXC CR 为 `exposeReplicas.annotations` 指定第二个 LBC 的 ELB ID。**建议**：不提供自动关闭开关。不需要 replicas 外部接入的用户走手动单 LBC（接受冲突）；需要 replicas 外部接入的用户走自动流程（对齐 EKS/GKE） |
 
 ---
 
