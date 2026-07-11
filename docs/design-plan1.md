@@ -1,7 +1,7 @@
 # 方案 1 设计：DBC Reconciler（创建数据库时自动创建 ELB 并支持参数配置）
 
 > **基线文档**: `docs/design-auto-create-elb-with-database.md`（保留为设计过程备份）
-> **状态**: 终稿
+> **状态**: 备选
 
 
 ---
