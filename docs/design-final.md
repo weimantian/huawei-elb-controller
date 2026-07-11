@@ -498,21 +498,30 @@ UI 配置 Source Range: 10.0.0.0/8
 
 ---
 
-## 6. 方案优势
+## 6. 方案优势与约束
+
+### 6.1 优势
 
 | 维度 | 当前手动方案 | 最终方案 |
 |---|---|---|
-| 用户步骤 | 2 步（建 LBC → 等 ready → 建 DBC） | 1 步（建 DBC） |
+| 用户操作 | 2 步 | **1 步** |
 | 用户等待 | 必须等 LBC ready | 只需等 DBC ready |
-| 前提知识 | 需理解 LBC 概念 | 零额外知识 |
-| ELB 参数 | 需手动填（或自动探测） | 自动探测 |
+| 前提知识 | 需理解 LBC 概念 | **零额外知识** |
+| ELB 参数配置 | 手动填或默认值 | **自动探测** |
 | Primary 外部接入 | ✅ | ✅ |
-| **Replicas 外部接入** | ❌（端口冲突） | ✅（独立 ELB，对齐 EKS/GKE） |
-| **ACL 访问控制** | ❌（sourceRanges 不生效） | ✅（LBC Reconciler 自动转 elb.acl-*） |
-| ELB 生命周期 | 控制器 finalizer | 同左 |
-| 状态可见性 | LBC 注解（ready/error/public-ip） | 同左 |
-| ELB 参数事后可变 | ✅（改 LBC 注解 → 调 API） | 同左 |
-| 对齐 EKS/GKE | 不齐 | **对齐**（功能和费用） |
+| Replicas 外部接入 | ❌（端口冲突） | ✅（独立 ELB，对齐 EKS/GKE） |
+| ACL 访问控制 | ❌（CCM 忽略 sourceRanges） | ✅（LBC Reconciler 自动转 elb.acl-*） |
+| ELB 参数事后可变 | ✅（改 LBC 注解 → API） | ✅（同左） |
+| **CCE ELB 多样化参数支持** | ✅（LBC 注解可配带宽/计费/EIP 等） | ✅（同左，保留完整 ELB v3 API 参数能力） |
+| 对齐 EKS/GKE | 不齐 | **对齐**（功能 + 费用） |
+
+### 6.2 约束
+
+| 约束 | 说明 | 影响 |
+|---|---|---|
+| **UI 中 LBC 数量增加** | 每个自动创建的 DBC 产生 2 个 LBC（primary + replicas），UI Settings → Load Balancer Configuration 中可见 | 中等。LBC 作为 ELB 配置面板，每 DB 一个面板在华为云多参数场景下合理；EKS/GKE 无 LBC 故无此问题 |
+| **手动共享 LBC 时 replicas 端口冲突** | 用户手动设 `loadBalancerConfigName` 引用单一 LBC 时，primary 和 replicas Service 共享同一 ELB 端口 3306，CCE webhook 拒绝 replicas。EKS/GKE 无共享机制故不存在此问题 | 低。自动模式独立 ELB 不受影响；手动模式下需用户自行创建双 LBC 解决 |
+| **自动模式不保留 LBC 共享能力** | 自动创建的 DBC 不共享 ELB（每 DBC 独立 LBC），与 EKS/GKE 行为一致但失去了 CCE 多 Service 共享 ELB 的省钱选项 | 低。共享场景可走手动流程；独立 LB 是云原生标准行为 |
 
 ---
 

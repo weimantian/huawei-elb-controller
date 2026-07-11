@@ -206,58 +206,37 @@ CCM 原生处理。Service 被删时，CCM 根据 `kubernetes.io/elb.instance-re
 | `bandwidth_*` | 默认 `traffic` / `10` Mbit/s / `5_bgp` |
 | `name` | `<dbc-name>-<service-type>`（从 Service label 推导） |
 
----
+## 9. 方案优势与约束
 
-## 9. 优势
 
-| 维度 | 说明 |
+
+### 9.1 优势
+
+| 优势 | 说明 |
 |---|---|
-| **架构接近 EKS/GKE** | CCM 原生建 ELB，控制器只做探测+注入。与 AWS/GCP CCM 的职责边界一致 |
-| **代码量最少** | +200 行（单 Reconciler，无 ELB CRUD 逻辑，无 LBC 资源） |
-| **无端口冲突** | 每 Service 独立 ELB，天然无端口冲突。replicas 和 primary 各绑各的，不需要任何额外处理 |
-| **裸奔窗口极短** | <1s（探测 + 构造 + patch），远短于方案 1（建 LBC → 建 ELB → 等 ready → patch DBC → 更新 Service） |
-| **无 LBC 概念** | 用户完全不需要理解 LBC。建 DBC → 等 DBC ready → 获得 IP。与 EKS/GKE 用户体验完全一致 |
+| **无端口冲突** | 每 Service 独立 ELB，primary 和 replicas 各绑定独立 ELB，CCM 原生处理，不需要控制器额外解决端口冲突 |
+| **UI 无多 LBC 问题** | 不需要 LBC 资源，OpenEverest Settings → Load Balancer Configuration 不增加条目 |
+| **无手动模式下 replicas 冲突** | 手动设 `loadBalancerConfigName` 引用 LBC 时与当前行为完全一致（共享 ELB → replicas 端口冲突不新引入问题，自动模式零冲突） |
+| **架构最接近 EKS/GKE** | CCM 原生建 ELB + 绑定，控制器只做探测+注入。与 AWS/GCP CCM 职责边界一致 |
+| **裸奔窗口极短** | <1s（探测 + 构造 autocreate JSON + patch Service），远短于最终方案 |
+| **代码量最少** | +200 行，单 Reconciler 自闭环，无 LBC 资源，无 ELB CRUD |
 | **ELB 生命周期由 CCM 管理** | 删 Service → CCM 删 ELB，无 finalizer 复杂性，无孤儿风险 |
-| **无多 Reconciler 协调** | 不需要 DBC Reconciler + LBC Reconciler 的级联协调，单 Reconciler 自闭环 |
 | **不 patch 用户 DBC** | 只 patch Service（系统资源），不修改用户创建的业务资源 |
 
----
+### 9.2 约束（不被选为最终方案的原因）
 
-## 10. 局限性（不被选为最终方案的原因）
-
-| 局限性 | 说明 | 严重程度 |
+| 约束 | 说明 | 严重程度 |
 |---|---|---|
-| **autocreate 创建后参数不可变** | ELB 带宽、EIP 类型、公网/内网等参数创建后无法修改。华为云 ELB 带宽是核心计费变量（1-2000 Mbit/s），数据库流量变化后需要调参，现有 LBC 机制（改注解 → 调 API 更新）比 autocreate 灵活得多 | 🔴 硬伤 |
-| **ELB 状态不可见** | 无 LBC 的结构化状态注解（ready/error/elb-status/public-ip），只有 Service events + `status.loadBalancer.ingress`。运维排查、监控依赖分散的信息源 | 🟡 中等 |
-| **无 LBC UI 配置面板** | 用户在 OpenEverest UI 中看不到 LBC，无法通过 UI 编辑 ELB 参数。在华为云 ELB 高可配场景（14 个参数可调）下，失去唯一 UI 调参入口 | 🔴 硬伤 |
-| **默认值不可覆盖** | autocreate JSON 的 14 个字段是该 Service 的硬编码配置。用户想换带宽大小、换 EIP 类型 → 无法在创建后修改 → 只能删 Service 重建 | 🔴 硬伤 |
-| **ACL 需独立处理** | `loadBalancerSourceRanges` → `elb.acl-*` 的转换逻辑不在 LBC Reconciler 中，需单独实现 ACL handler。生命周期独立管理，不随 LBC 统一 | 🟡 中等 |
-| **CCM 行为不可控** | autocreate 建 ELB 的具体参数、错误处理、重试逻辑完全由 CCE 闭源 CCM 控制。出现问题排查路径长（Service Reconciler → CCM → 华为云 API） | 🟡 中等 |
+| **autocreate 创建后参数不可变** | ELB 带宽、EIP 类型、公网/内网等参数创建后无法修改。华为云 CCE ELB 多样化参数（带宽 1-2000 Mbit/s、计费模式 traffic/bandwidth、EIP 类型 5_bgp/5_sbgp 等）是高频变参场景，数据库流量波动时必须调整 | 🔴 硬伤 |
+| **ELB 状态不可见** | 无 LBC 的结构化状态注解（ready/error/elb-status/public-ip），只有 Service events + status.ingress | 🟡 中等 |
+| **无 LBC UI 配置面板** | OpenEverest UI 中看不到配置入口，无法通过 UI 编辑 ELB 参数 | 🔴 硬伤 |
+| **ACL 需独立处理** | `loadBalancerSourceRanges` → `elb.acl-*` 需单独实现，生命周期不随 LBC 统一 | 🟡 中等 |
+| **CCM 行为不可控** | autocreate 建 ELB 的具体参数、错误处理、重试由 CCE 闭源 CCM 控制，排查路径长 | 🟡 中等 |
 
----
+## 10. 方案对比（EKS / GKE / CCE）
 
-## 11. 与最终方案（DBC Reconciler）对比
 
-| 维度 | 最终方案（DBC Reconciler + LBC） | 方案 2（Service Reconciler + autocreate） |
-|---|---|---|
-| **架构接近 EKS/GKE** | 中（控制器建 ELB，CCM 只绑定） | **高**（CCM 原生建 ELB + 绑定） |
-| **代码量** | +400~500 行 | **+200 行** |
-| **裸奔窗口** | ~15s（建 LBC → 建 ELB → patch DBC → 更新 Service） | **<1s**（探测 → inject → patch Service） |
-| **端口冲突** | 需要额外处理（独立 replicas LBC） | **无冲突**（每 Service 独立 ELB，原生对齐 EKS/GKE） |
-| **replicas 外部接入** | ✅（独立 ELB） | ✅（独立 ELB） |
-| **ACL 访问控制** | **✅（LBC Reconciler，随 LBC 生命周期统一管理）** | ⚠️ 需独立 ACL handler |
-| **ELB 创建后参数可调** | **✅（改 LBC 注解 → controller 调 API）** | ❌ 不可变（autocreate 一次性创建） |
-| **ELB 状态可见性** | **✅（LBC 注解: ready/error/elb-status/public-ip）** | ⚠️ 仅 Service events + status.ingress |
-| **UI 配置面板** | **✅（LBC 出现在 Settings → Load Balancer Configuration，用户可编辑参数）** | ❌ 无 LBC，无 UI 配置入口 |
-| **ELB 生命周期** | 控制器 finalizer | **CCM 原生（reclaim-policy）** |
-| **用户操作** | 1 步（建 DBC） | 1 步（建 DBC） |
-| **ELB 配置精细度** | **✅ 完整（全 ELB v3 API 参数）** | 受限（autocreate 14 个字段） |
-| **Region 覆盖** | **✅ 支持** | ❌ 不支持 |
-| **平台适用** | CCE | CCE |
-
-## 11. 方案对比（EKS / GKE / CCE）
-
-### 11.1 手动模式：使用 LBC 创建数据库集群
+### 10.1 手动模式：使用 LBC 创建数据库集群
 
 用户先创建 LBC（含 LB 配置/ELB ID），DBC 引用该 LBC。
 
@@ -268,7 +247,7 @@ CCM 原生处理。Service 被删时，CCM 根据 `kubernetes.io/elb.instance-re
 | **CCE 最终方案**（DBC Reconciler） | 指向具体 ELB（含 `kubernetes.io/elb.id`） | **1 个 ELB**（共享） | ✅ ELB | ❌ 端口冲突 | **发生**（primary 成功，replicas 被拒） | 手动单 LBC 模式不创建 replicas LBC |
 | **CCE 方案 2**（Service Reconciler） | 指向具体 ELB（含 `kubernetes.io/elb.id`） | **1 个 ELB**（共享） | ✅ ELB | ❌ 端口冲突 | **发生** | 手动模式与最终方案相同 |
 
-### 11.2 自动模式：不使用 LBC 创建数据库集群
+### 10.2 自动模式：不使用 LBC 创建数据库集群
 
 LBC 不创建，控制器自动处理。EKS/GKE 上 DBC 的 `loadBalancerConfigName` 留空。
 
@@ -279,7 +258,7 @@ LBC 不创建，控制器自动处理。EKS/GKE 上 DBC 的 `loadBalancerConfigN
 | **CCE 最终方案**（DBC Reconciler） | DBC Reconciler 建两个 LBC → LBC Reconciler 建两个 ELB → patch DBC + PXC CR | **2 个 ELB**（各自独立计费） | ✅ ELB-1 | ✅ ELB-2 | 不发生 | 通过两个 LBC 实现独立 ELB |
 | **CCE 方案 2**（Service Reconciler） | Service Reconciler 注入 elb.autocreate → CCM 建两个独立 ELB | **2 个 ELB**（各自独立计费） | ✅ ELB-1 | ✅ ELB-2 | 不发生 | CCM 原生建 ELB，架构最接近 EKS/GKE |
 
-### 11.3 总结
+### 10.3 总结
 
 | 维度 | EKS | GKE | CCE（最终方案） | CCE（方案 2 备用） |
 |---|---|---|---|---|
@@ -293,7 +272,7 @@ LBC 不创建，控制器自动处理。EKS/GKE 上 DBC 的 `loadBalancerConfigN
 
 ---
 
-## 12. 结论
+## 11. 结论
 
 方案 2 架构最优雅——代码量最少、裸奔窗口最短、端口冲突天然不存在。**如果华为云 ELB 没有带宽计费这个高频变参场景，方案 2 是明显更优的选择。**
 
