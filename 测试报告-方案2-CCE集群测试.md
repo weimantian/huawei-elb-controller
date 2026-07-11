@@ -236,9 +236,8 @@ ok  internal/huaweicloud  2.002s  (13 tests)
 - 所有单元测试通过 ✅
 - go build / go vet 无警告 ✅
 
-### ⚠️ 受限项
-- 浏览器 UI 端到端测试（OpenEverest 管理密码不可用）
-- ELB 带宽更新（需华为云 EIP API 实际调用验证，代码已实现）
+| 浏览器 UI 端到端测试 | ✅ admin/Admin@123456 登录，创建 mysql-sz3，选择 No configuration，primary + replicas 均获外部 IP |
+| ELB 带宽更新 | ⏳ 代码已实现（EIP v2 API），CCE 集群冻结后补测 |
 
 ### 总结
 方案 2（Service Reconciler）在 CCE 1.35.3 集群上功能正确，实现了与 EKS/GKE 对等的"创建数据库即获得 ELB"体验。存量系统不受影响。
