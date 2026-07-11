@@ -287,17 +287,42 @@ CCM 原生处理。控制器注入 `kubernetes.io/elb.instance-reclaim-policy: a
 | **CCE 最终方案** | DBC Reconciler → 双 LBC → 双 ELB | 2 个 ELB（独立计费） | ✅ | ✅ | 不发生 | 通过双 LBC 独立 ELB |
 | **CCE 方案 2** | Service Reconciler 默认参数 autocreate | 2 个 ELB（独立计费） | ✅ | ✅ | 不发生 | CCM 原生建 ELB |
 
-### 11.3 总结
+### 11.3 用户视角对比
 
 | 维度 | EKS | GKE | CCE（最终方案） | CCE（方案 2） |
 |---|---|---|---|---|
-| **手动模式 LB 独立性** | 每 Service 独立 NLB | 同左 | 共享同一 ELB（冲突） | **每 Service 独立 ELB** ✅ |
+| **操作步骤** | 1 步 | 1 步 | 1 步 | 1 步 |
+| **前提知识** | 零 | 零 | 零 | 零 |
+| **LBC 是参数模板** | ✅ | ✅ | ❌（实例引用） | ✅ |
+| **每 Service 独立 LB** | ✅ | ✅ | 自动 ✅ / 手动 ❌ | ✅（手动+自动） |
+| **手动模式端口冲突** | 不发生 | 不发生 | 发生 | **不发生** |
+| **自动模式端口冲突** | 不发生 | 不发生 | 不发生 | 不发生 |
+| **UI LBC 条目** | 0 | 0 | 每 DBC 2 条（自动时） | 手动：用户自建；自动：0 |
+| **ELB 参数事后可调** | ✅ | ✅ | ✅（改 LBC 注解） | ❌ |
+| **体验对齐 EKS/GKE** | — | — | 自动模式对齐 | **手动+自动均对齐** ✅ |
+
+### 11.4 实现层面差异
+
+| 差异 | EKS/GKE | CCE（方案 2） | 原因 |
+|---|---|---|---|
+| **需要额外控制器** | ❌ CCM 全包 | ❌ CCM 全包 | **需要** Service Reconciler | CCE CCM 不会读 LBC 自定义参数（`huawei-elb.io/*`），需控制器将其转换为 CCM 能识别的 `elb.autocreate` JSON |
+| **需要探测 VPC/子网/AZ** | ❌ CCM 从节点 metadata 自动获取 | ❌ CCM 从节点 metadata 自动获取 | **需要** NetworkDetector | CCE CCM 的 `elb.autocreate` 不自动探测 VPC/子网/AZ，需控制器补上此能力 |
+| **ACL / Source Range** | ✅ CCM 原生（转 NLB listener 规则 / VPC 防火墙规则） | ✅ CCM 原生 | ⚠️ 需单独实现（CCE CCM 不认 `loadBalancerSourceRanges`，需转 `elb.acl-*`） | CCE CCM 不支持标准 K8s 字段 `loadBalancerSourceRanges`，需单独处理 |
+
+**实现层面差异的根源**：CCE CCM 的能力缺口——①不会自动探测 VPC/子网/AZ；②不认标准 K8s `loadBalancerSourceRanges` 字段；③不认自定义 LBC 参数。这些缺口由 Service Reconciler + NetworkDetector 填补。EKS/GKE CCM 原生具备这些能力，不需要额外控制器。
+
+### 11.5 总结
+
+| 维度 | EKS | GKE | CCE（最终方案） | CCE（方案 2） |
+|---|---|---|---|---|
 | **手动模式 replicas** | ✅ | ✅ | ❌ | ✅ |
 | **自动模式 replicas** | ✅ | ✅ | ✅ | ✅ |
 | **手动 LBC 本质** | 参数模板 | 参数模板 | 实例引用 | **参数模板** ✅ |
-| **与 EKS/GKE 行为对齐** | — | — | 自动模式对齐 | **手动+自动均对齐** ✅ |
+| **与 EKS/GKE 行为对齐** | — | — | 自动对齐 | **手动+自动均对齐** ✅ |
 | **ELB 创建后可调参** | ✅ | ✅ | ✅ | ❌（autocreate 不可变） |
-| **UI 配置面板** | ❌ | ❌ | ✅（LBC 实例） | ✅（LBC 参数模板） |
+| **需额外控制器** | ❌ | ❌ | ✅ | ✅ |
+| **需探测 VPC** | ❌ | ❌ | ✅ | ✅ |
+| **ACL 需额外处理** | ❌ | ❌ | ✅ | ✅ |
 
 ---
 
