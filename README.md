@@ -447,6 +447,20 @@ kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.ku
 
 > **Note**: ELB deletion is handled by CCM via `reclaim-policy: alwaysDelete`. Deleting the Service triggers CCM to delete the ELB automatically. The controller does not use finalizers.
 
+### Helm Release Conflict on Reinstall
+
+If `helm install` fails with `cannot reuse a name that is still in use` even after `helm uninstall`:
+
+```bash
+# Check for leftover Helm secret
+kubectl get secret -n everest-system | grep sh.helm.release
+
+# Delete the stale secret
+kubectl delete secret -n everest-system sh.helm.release.v1.huawei-elb-controller.v1
+```
+
+This can happen when `helm uninstall` reports success but the underlying Kubernetes secret is not fully cleaned up.
+
 ## Uninstall
 
 ### 1. Delete all LoadBalancerConfigs and Database Clusters

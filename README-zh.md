@@ -459,6 +459,20 @@ kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.ku
 
 > **注意**：ELB 删除由 CCM 通过 `reclaim-policy: alwaysDelete` 处理。删除 Service 后 CCM 自动删除 ELB。控制器不使用 finalizer。
 
+### Helm 重新安装时提示 release 名称冲突
+
+如果执行 `helm uninstall` 后再 `helm install` 仍报错 `cannot reuse a name that is still in use`：
+
+```bash
+# 检查是否有残留的 Helm secret
+kubectl get secret -n everest-system | grep sh.helm.release
+
+# 手动删除残留 secret
+kubectl delete secret -n everest-system sh.helm.release.v1.huawei-elb-controller.v1
+```
+
+这是因为 `helm uninstall` 返回成功但底层 Kubernetes secret 未完全清理。
+
 ## 卸载
 
 ### 1. 先删除数据库集群
