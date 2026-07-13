@@ -6,12 +6,9 @@
 
 ## Overview
 
-`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [OpenEverest](https://openeverest.io/documentation/current/) database clusters. It provides two reconcilers:
+`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [OpenEverest](https://openeverest.io/documentation/current/) database clusters. It watches `LoadBalancer` Services created by OpenEverest, injects CCE autocreate annotations for automatic ELB creation, and handles parameter updates.
 
-1. **Service Reconciler (Plan 2)** — primary: watches `LoadBalancer` Services created by OpenEverest, injects CCE autocreate annotations for automatic ELB creation, and handles parameter updates.
-2. **LoadBalancerConfig Reconciler (legacy)** — for existing LBC resources: creates/deletes ELBs via Huawei Cloud API.
-
-**Two usage modes (Plan 2)**:
+**Two usage modes**:
 
 - **Auto mode**: Create DBC without LBC → ELB auto-created (aligns with EKS/GKE experience)
 - **Manual mode**: Create LBC as parameter template → DBC references it → custom ELB parameters
@@ -54,7 +51,7 @@ Create LBC with huawei-elb.io/* annotations
   → CCM creates custom ELB
 ```
 
-LBCs in Plan 2 function as **parameter templates** (like EKS/GKE), not as instance references. Multiple Services referencing the same LBC each get their own independent ELB — zero port conflicts.
+LBCs function as **parameter templates** (like EKS/GKE), not as instance references. Multiple Services referencing the same LBC each get their own independent ELB — zero port conflicts.
 
 ### Parameter updates
 
@@ -65,13 +62,11 @@ User modifies LBC annotations (e.g., bandwidth 10M → 20M)
   → Calls Huawei Cloud ELB API to update parameters ✅
 ```
 
-### Two reconcilers
+### Service Reconciler
 
 | Reconciler | Watches | Purpose |
 |---|---|---|
 | Service Reconciler | `Service` (type=LoadBalancer) | Injects autocreate annotations, handles parameter updates |
-| LoadBalancerConfig Reconciler (legacy) | `LoadBalancerConfig` (existing) | Creates/deletes ELBs via Huawei Cloud API for existing LBC resources |
-
 ---
 
 ## Prerequisites
@@ -113,6 +108,8 @@ kubectl get dbengine -n everest
 - An active Huawei Cloud account with **ELB service enabled**
 - **AK** (Access Key) and **SK** (Secret Key) — create at: IAM → My Credentials → Access Keys
 - **Project ID** — found in the console top-right dropdown under your username
+
+> ⚠️ **Important**: Must use **main account** AK/SK (not IAM user or temporary credentials). Temporary AK/SK tokens will cause authentication failures when calling ELB/EIP/VPC APIs.
 
 ---
 
@@ -245,9 +242,7 @@ Expected:
 ```
 INFO    starting huawei-elb-controller    {"region": "cn-north-4"}
 INFO    Starting Controller               {"controller": "service"}
-INFO    Starting Controller               {"controller": "loadbalancerconfig"}
 INFO    Starting workers                  {"controller": "service", "worker count": 1}
-INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
 ### Step 3: Create a Database (Auto Mode)
@@ -432,7 +427,7 @@ kubectl wait svc <service-name> -n everest \
 ### LoadBalancerConfig Deletion Stuck
 
 ```bash
-# Check if finalizer exists (legacy LBC reconciler only)
+# Check if finalizer exists
 kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.finalizers}'
 # Should include "huawei-elb.io/finalizer"
 
@@ -443,13 +438,13 @@ kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
 # the controller will detect the 404 and remove the finalizer automatically.
 ```
 
-> **Note**: For Plan 2 Services, ELB deletion is handled by CCM via `reclaim-policy: alwaysDelete`. No finalizer is needed — deleting the Service triggers CCM to delete the ELB automatically.
+> **Note**: ELB deletion is handled by CCM via `reclaim-policy: alwaysDelete`. No finalizer is needed — deleting the Service triggers CCM to delete the ELB automatically.
 
 ## Uninstall
 
 ### 1. Delete all LoadBalancerConfigs and Database Clusters
 
-**Order matters.** Deleting a `LoadBalancerConfig` triggers the legacy reconciler to delete the corresponding Huawei Cloud ELB via its finalizer. For Plan 2 auto-mode ELBs, delete the Service or the database cluster — CCM will delete the ELB automatically.
+**Order matters.** Delete the Service or the database cluster — CCM will delete the ELB automatically.
 
 ```bash
 # List all LoadBalancerConfigs

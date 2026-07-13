@@ -10,10 +10,9 @@
 
 **解决的问题**：OpenEverest 的 `LoadBalancerConfig` CR 可以向 Kubernetes Service 注入 annotation，但不会创建华为云 ELB 本身。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
 
-**架构**：控制器包含两个 Reconciler，互补工作：
+**架构**：
 
-1. **Service Reconciler**（方案 2，主力）— watch `LoadBalancer` 类型的 Service，注入 `elb.autocreate`，处理参数更新
-2. **LoadBalancerConfig Reconciler**（legacy）— 存量 LBC 资源兼容，支持预绑定 ELB 场景
+**Service Reconciler** watch `LoadBalancer` 类型的 Service，注入 `elb.autocreate`，处理参数更新
 
 **两种使用模式**：
 
@@ -73,9 +72,6 @@ OpenEverest 同步到 Service
 Service Reconciler 调华为云 API 更新 ELB ✅
 ```
 
-### Legency 模式（存量 LBC 含 elb.id）
-
-存量 LBC 中已有 `kubernetes.io/elb.id` 时，LoadBalancerConfig Reconciler 保持现有行为：调用华为云 API 管理 ELB 生命周期，ELB ID 写入 LBC。**新 LBC 建议走参数模板模式**。
 
 ---
 
@@ -118,6 +114,8 @@ kubectl get dbengine -n everest
 - 已开通 ELB 服务的华为云账号
 - **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
 - **Project ID** —— 在控制台右上角用户名下拉菜单中找到
+
+> ⚠️ **重要**：必须使用**主账号**的 AK/SK（非 IAM 子用户或临时凭证）。临时 AK/SK Token 调用 ELB/EIP/VPC API 时会鉴权失败。
 
 ---
 
@@ -242,9 +240,7 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 INFO    starting huawei-elb-controller    {"region": "cn-north-4"}
 INFO    Starting Controller               {"controller": "service"}
-INFO    Starting Controller               {"controller": "loadbalancerconfig"}
 INFO    Starting workers                  {"controller": "service", "worker count": 1}
-INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
 ```
 
 ### 步骤 3：创建数据库集群（自动模式，推荐）
@@ -541,7 +537,7 @@ kubectl delete crd loadbalancerconfigs.everest.percona.com
 ```
 EKS/GKE:    Service → CCM 创建 LB（从节点元数据读 VPC）
 
-CCE + 本控制器（方案 2）：
+CCE + 本控制器：
             Service → Service Reconciler 探测 VPC/子网/AZ
                    → 注入 elb.autocreate
                    → CCM 创建 ELB ✅
