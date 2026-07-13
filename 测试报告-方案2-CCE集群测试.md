@@ -265,9 +265,14 @@ ok  internal/huaweicloud  2.002s  (13 tests)
 | 3 | PXC CR exposePrimary.annotations | bandwidth-size=15 ✅ / elb.id=新值（807814a5）❌ |
 | **结论** | **不可行** | LBC Reconciler 仍会对新 LBC 自动建 ELB，导致原 ELB 被替换。自动模式调参用 `kubectl annotate svc` |
 
-### 测试 9：LBC 参数模板 + 旧 elb.id 共存 ⏳
+### 测试 9：LBC 参数模板 + 旧 elb.id 共存 ✅
 
-暂未测试（需停用 LBC Reconciler 或使用预建 ELB 的 LBC）
+| 步骤 | 操作 | 结果 |
+|------|------|------|
+| 1 | 创建 Service 含 elb.id (cdda920c) + huawei-elb.io/* (带宽25M) | Service Reconciler 跳过 |
+| 2 | CCM 行为 | 原生绑定到存量 ELB (192.168.0.211) |
+| 3 | autocreate 是否注入 | ❌ 未注入（正确跳过） |
+| **结论** | **兼容** | 共存时 Service Reconciler 不干预，CCM 原生处理 |
 
 ---
 
