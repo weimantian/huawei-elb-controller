@@ -342,6 +342,7 @@ spec:
 
 > **Note**: `eip-type` is immutable after ELB creation (Huawei Cloud API restriction). To change it, delete and recreate the ELB.
 
+> **Important — CCE immutable annotations**: After ELB binding, CCE treats these annotations as immutable. Modifying them via the PXC operator will fail: `kubernetes.io/elb.class`, `kubernetes.io/elb.id` (both set by CCM). To change ELB bandwidth or charge mode after creation, run `kubectl annotate svc` directly on the Service instead of modifying the LBC.
 ### ACL Annotations
 
 Control ELB access with `loadBalancerSourceRanges` on the Service, or directly via ELB ACL annotations:
