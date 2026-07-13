@@ -479,6 +479,14 @@ kubectl delete loadbalancerconfig <name>
 
 ### 2. 卸载控制器
 
+**先确认安装方式：**
+
+```bash
+# 如果有输出，用 Helm（方式 A）
+helm list -A | grep huawei-elb
+# 否则用原生清单（方式 B）
+```
+
 #### 方式 A：Helm
 
 ```bash

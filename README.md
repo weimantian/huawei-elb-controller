@@ -465,6 +465,14 @@ kubectl delete loadbalancerconfig <name>
 
 ### 2. Uninstall the controller
 
+**First, check how you installed:**
+
+```bash
+# If this shows a release, use Helm (Option A)
+helm list -A | grep huawei-elb
+# Otherwise, use Raw Manifests (Option B)
+```
+
 #### Option A: Helm
 
 ```bash
