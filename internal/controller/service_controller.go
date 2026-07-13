@@ -4,6 +4,7 @@ import (
 "context"
 "encoding/json"
 "net/netip"
+"sort"
 "strconv"
 "time"
 
@@ -107,8 +108,9 @@ filteredCIDRs := filterValidCIDRs(logger, sourceRanges)
 if len(filteredCIDRs) > 0 {
 ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 ipGroupID, err := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
-if err != nil {
-logger.Error(err, "creating IP group for ACL")
+			if err != nil {
+				logger.Error(err, "creating IP group for ACL")
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 } else {
 svc.Annotations[aclIDAnnotation] = ipGroupID
 svc.Annotations[aclStatusAnnotation] = "on"
@@ -161,17 +163,17 @@ currentSourceRanges := svc.Spec.LoadBalancerSourceRanges
 validCurrentSourceRanges := filterValidCIDRs(logger, currentSourceRanges)
 aclChanged := !sourceRangesEqual(lastSourceRanges, validCurrentSourceRanges)
 if aclChanged {
-if len(validCurrentSourceRanges) == 0 {
-// Source ranges cleared: delete old IP group and disable ACL
-if oldID := svc.Annotations[aclIDAnnotation]; oldID != "" {
-if err := huaweicloud.DeleteIPGroup(r.ELBClient, oldID); err != nil {
-logger.Error(err, "deleting old IP group for ACL")
-} else {
-delete(svc.Annotations, aclIDAnnotation)
-delete(svc.Annotations, aclTypeAnnotation)
-}
-}
-svc.Annotations[aclStatusAnnotation] = "off"
+			if len(validCurrentSourceRanges) == 0 {
+				// Source ranges cleared: delete old IP group and disable ACL
+				if oldID := svc.Annotations[aclIDAnnotation]; oldID != "" {
+					if err := huaweicloud.DeleteIPGroup(r.ELBClient, oldID); err != nil {
+						logger.Error(err, "deleting old IP group for ACL")
+					}
+				}
+				// Always clean up stale ACL annotations
+				delete(svc.Annotations, aclIDAnnotation)
+				delete(svc.Annotations, aclTypeAnnotation)
+				svc.Annotations[aclStatusAnnotation] = "off"
 } else {
 ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 			ipGroupID := svc.Annotations[aclIDAnnotation]
@@ -323,6 +325,11 @@ func buildUpdateOption(current, lastKnown map[string]string) huaweicloud.UpdateE
 		opt.BandwidthChargeMode = current[huaweicloud.LBCBandwidthChargeModeAnnotation]
 	}
 
+	if current["huawei-elb.io/name"] != lastKnown["huawei-elb.io/name"] {
+		// Name changes are not supported by the current UpdateELB API
+		// This would require adding Name to UpdateELBOption
+	}
+
 	return opt
 }
 
@@ -347,8 +354,14 @@ func sourceRangesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i, v := range a {
-		if v != b[i] {
+	sortedA := make([]string, len(a))
+	sortedB := make([]string, len(b))
+	copy(sortedA, a)
+	copy(sortedB, b)
+	sort.Strings(sortedA)
+	sort.Strings(sortedB)
+	for i := range sortedA {
+		if sortedA[i] != sortedB[i] {
 			return false
 		}
 	}

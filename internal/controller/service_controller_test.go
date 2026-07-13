@@ -550,7 +550,7 @@ func TestSourceRangesEqual(t *testing.T) {
 			name:     "different order",
 			a:        []string{"192.168.0.0/16", "10.0.0.0/8"},
 			b:        []string{"10.0.0.0/8", "192.168.0.0/16"},
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "different lengths",

@@ -20,27 +20,28 @@
 package controller
 
 import (
-	"context"
-	"fmt"
-	"strconv"
-	"strings"
-	"time"
+"context"
+"fmt"
+"regexp"
+"strconv"
+"strings"
+"time"
 
-	"github.com/go-logr/logr"
-	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
+"github.com/go-logr/logr"
+elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
+apierrors "k8s.io/apimachinery/pkg/api/errors"
+"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+"k8s.io/apimachinery/pkg/runtime/schema"
+"k8s.io/apimachinery/pkg/types"
+"k8s.io/client-go/util/retry"
+ctrl "sigs.k8s.io/controller-runtime"
+"sigs.k8s.io/controller-runtime/pkg/client"
+"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+"sigs.k8s.io/controller-runtime/pkg/event"
+"sigs.k8s.io/controller-runtime/pkg/log"
+"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
+"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
 
 const (
@@ -400,7 +401,7 @@ func (r *LoadBalancerConfigReconciler) handlePermanentError(
 	ctx context.Context, lbc *unstructured.Unstructured, logger logr.Logger, err error,
 ) (ctrl.Result, error) {
 	logger.Error(err, "permanent error, will retry in 5 minutes")
-	_ = r.setAnnotation(ctx, lbc, errorAnnotation, err.Error())
+	_ = r.setAnnotation(ctx, lbc, errorAnnotation, sanitizeError(err))
 	_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
 	return ctrl.Result{RequeueAfter: errorRequeue}, nil
 }
@@ -412,11 +413,19 @@ func (r *LoadBalancerConfigReconciler) handleTransientError(
 	ctx context.Context, lbc *unstructured.Unstructured, logger logr.Logger, err error,
 ) (ctrl.Result, error) {
 	logger.Error(err, "transient error, will retry shortly")
-	_ = r.setAnnotation(ctx, lbc, errorAnnotation, err.Error())
+	_ = r.setAnnotation(ctx, lbc, errorAnnotation, sanitizeError(err))
 	_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
 	return ctrl.Result{RequeueAfter: retryRequeue}, nil
 }
 
+func sanitizeError(err error) string {
+	msg := err.Error()
+	re := regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	msg = re.ReplaceAllString(msg, "<redacted>")
+	re = regexp.MustCompile(`https?://[^\s"]+`)
+	msg = re.ReplaceAllString(msg, "<url>")
+	return msg
+}
 // --- Helpers ---
 
 // getLoadBalancerConfig fetches the LoadBalancerConfig CR as an unstructured object.

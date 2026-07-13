@@ -97,6 +97,9 @@ func resolveBandwidthSize(params map[string]string) int32 {
 	if err != nil || n <= 0 {
 		return DefaultBandwidthSize
 	}
+	if n > 2000 {
+		return 2000
+	}
 	return int32(n)
 }
 
