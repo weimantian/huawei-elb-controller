@@ -238,13 +238,41 @@ ok  internal/huaweicloud  2.002s  (13 tests)
 
 | 浏览器 UI 端到端测试 | ✅ admin/Admin@123456 登录，创建 mysql-sz3，选择 No configuration，primary + replicas 均获外部 IP |
 
-### ⏳ 待补测（CCE 集群解冻后）
+### 测试 6：kubectl 修改带宽（ELB 参数更新） ✅
 
-| # | 测试项 | 操作 | 预期 |
-|---|--------|------|------|
-| 1 | **ELB 参数更新（kubectl）** | `kubectl annotate svc mysql-xx-haproxy huawei-elb.io/bandwidth-size=20 --overwrite` | Service Reconciler 检测变化 → reconcileUpdate → 调 EIP API 更新带宽 |
-| 2 | **组合场景：UI 创建 + sourceRanges** | UI 创建 DBC，External Access 选 LoadBalancer，Source Range 填入 CIDR，LBC 选 No configuration | OpenEverest 传播 sourceRanges 到 Service → 创建 IP 组 → acl-* 注入 → CCM 绑定 |
-| 3 | **事后关联 LBC** | kubectl 创建 LBC 参数模板 + patch DBC `loadBalancerConfigName` | OpenEverest 同步注解 → Service Reconciler update 路径触发，不破坏已有 elb.id |
-| 4 | **LBC 参数模板含 elb.id 存量兼容** | LBC 设 `huawei-elb.io/*` + 旧 `kubernetes.io/elb.id` 同时存在 | Service Reconciler 跳过（hasELBID），走 CCM 原生绑定 |
-### 总结
+| 步骤 | 操作 | 结果 |
+|------|------|------|
+| 1 | 创建 Service (bandwidth-size=10) | ELB 创建，elb.id=2485ac3d |
+| 2 | `kubectl annotate svc huawei-elb.io/bandwidth-size=20` | Service Reconciler reconcileUpdate 触发 |
+| 3 | 日志 | `"ELB updated" elbID=2485ac3d...` |
+| 4 | 备注 | 同时发现并修复 `hasELBID && !hasAutocreate` 误跳过 bug |
+
+### 测试 7：UI 创建 + sourceRanges 组合 ✅
+
+| 步骤 | 操作 | 结果 |
+|------|------|------|
+| 1 | kubectl 创建 DBC，ipSourceRanges: ["10.0.0.0/8","172.16.0.0/12"] | OpenEverest 传播到 Service.spec.loadBalancerSourceRanges |
+| 2 | Service Reconciler 检测 | CreateIPGroup → acl-id=6c2d76cd |
+| 3 | 注解 | acl-status=on, acl-type=white, elb.id=3dc07484 |
+| 4 | EXTERNAL-IP | primary: 120.46.221.33 / replicas: 121.36.97.223 |
+
+### 测试 8：事后关联 LBC ⏳
+
+| 步骤 | 操作 | 结果 |
+|------|------|------|
+| 1 | patch DBC loadBalancerConfigName | DBC 状态 initializing，OpenEverest 未同步注解 |
+| 2 | elb.id 是否保留 | ✅ 未覆盖，仍为 3dc07484 |
+| 3 | LBC 注解是否同步 | ⏳ 需 DBC ready 后再验证 |
+
+### 测试 9：LBC 参数模板 + 旧 elb.id 共存 ⏳
+
+| 步骤 | 操作 | 结果 |
+|------|------|------|
+| 1 | 创建 LBC（含 huawei-elb.io/* + kubernetes.io/elb.id） | 待创建对应 DBC 后验证 |
+
+### 修复的 Bug
+
+| Bug | 修复 |
+|-----|------|
+| `hasELBID(svc) && !hasAutocreate(svc)` 跳过逻辑 | CCM 写 elb.id 后 Service Reconciler 永久跳过，导致 update 路径失效 |
 方案 2（Service Reconciler）在 CCE 1.35.3 集群上功能正确，实现了与 EKS/GKE 对等的"创建数据库即获得 ELB"体验。存量系统不受影响。

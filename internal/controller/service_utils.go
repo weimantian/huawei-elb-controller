@@ -91,9 +91,10 @@ func shouldReconcileService(svc *corev1.Service) bool {
 	if !isLoadBalancerService(svc) {
 		return false
 	}
-	if hasELBID(svc) {
-		return false
-	}
+	if hasELBID(svc) && !hasAutocreate(svc) {
+// Skip legacy ELB ID bindings, but allow Plan 2 autocreate Services
+return false
+}
 	if hasForeignCloudServiceAnnotations(svc) {
 		return false
 	}

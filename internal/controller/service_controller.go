@@ -51,9 +51,10 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	if hasELBID(svc) {
-		return ctrl.Result{}, nil
-	}
+	if hasELBID(svc) && !hasAutocreate(svc) {
+// Skip Services with elb.id that were NOT created by autocreate (legacy CCM binding)
+return ctrl.Result{}, nil
+}
 
 	if hasForeignCloudServiceAnnotations(svc) {
 		return ctrl.Result{}, nil
