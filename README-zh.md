@@ -8,49 +8,66 @@
 
 `huawei-elb-controller` 是一个 Kubernetes 控制器，为 [OpenEverest](https://openeverest.io/documentation/current/)（原 Percona Everest）数据库集群自动创建和管理**华为云 ELB**（弹性负载均衡）实例。
 
-**解决的问题**：OpenEverest 的 `LoadBalancerConfig` CR 可以向 Kubernetes Service 注入 annotation，但不会创建华为云 ELB 本身。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
+**解决的问题**：控制器 watch LoadBalancer 类型的 Service，自动探测 VPC/子网/可用区，注入 autocreate 注解让 CCE 的 CCM 自动创建华为云 ELB。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
 
-**工作原理**：监听 `LoadBalancerConfig` CR，调用华为云 ELB v3 API 自动创建/删除 ELB，并将 ELB ID 写回 CR。OpenEverest 的 operator 随后读取 ELB ID，将其添加到 Service，华为云 CCM 绑定 ELB —— 为你的数据库集群提供外部负载均衡访问入口。
+**架构**：
+
+**Service Reconciler** watch `LoadBalancer` 类型的 Service，注入 `elb.autocreate`，处理参数更新
+
+**两种使用模式**：
+
+- **自动模式**（推荐）：不创建 LBC，在 OpenEverest UI 中选择 "No configuration" → ELB 全自动创建，对齐 EKS/GKE 体验
+- **手动模式**：创建 LBC 作为参数模板 → 自定义 ELB 带宽、EIP 类型等参数。LBC 存的是**参数**而非 ELB ID，多个 Service 引用同一 LBC 各自独立 ELB，零端口冲突
 
 ---
 
 ## 功能特性
 
-- **零配置自动探测** —— 从集群节点自动探测 VPC、子网和可用区（与 EKS/GKE 体验一致）
-- **默认公网 ELB** —— 默认创建带 EIP 的公网 ELB；设 `huawei-elb.io/public: "false"` 创建内网 ELB
-- **完整生命周期管理** —— 通过华为云 ELB v3 API 创建、监控、删除 ELB，带 finalizer 安全保障
-- **状态可见** —— 在 CR 上暴露 `ready`、`elb-status`、`error`、`public-ip` 注解
-- **UI 友好** —— 与 OpenEverest Web UI 无缝协作；端到端配置无需 `kubectl`
-- **多区域支持** —— 通过 `huawei-elb.io/region` 注解按 CR 覆盖区域
+- **零配置自动模式** —— 不创建 LBC，直接用默认参数创建 ELB，与 EKS/GKE 体验完全一致
+- **LBC 参数模板** —— 手动模式下 LBC 存储带宽/EIP/公网等配置参数，多 Service 独立 ELB
+- **VPC 自动探测** —— 从集群节点自动探测 VPC、子网和可用区
+- **ACL 自动处理** —— 自动将 Service 的 `loadBalancerSourceRanges` 转换为 ELB ACL 规则
+- **kubectl 修改带宽** —— 自动模式下直接修改 Service annotation，手动模式下修改 LBC annotation，控制器自动调用华为云 API 更新 ELB 带宽
+- **完整生命周期管理** —— ELB 创建通过 CCM autocreate 机制，删除随 Service 自动清理
+- **多区域支持** —— 通过 `huawei-elb.io/region` 注解按集群覆盖区域
 
 ---
 
 ## 工作流程
 
+### 自动模式（不创建 LBC）
+
 ```
-你创建 LoadBalancerConfig（包含 ELB 参数）
+创建 DBC（LBC 选 "No configuration"）
     ↓
-huawei-elb-controller 通过华为云 API 创建 ELB
+OpenEverest 创建 LoadBalancer Service
     ↓
-控制器将 ELB ID 写回 LoadBalancerConfig
+Service Reconciler 探测 VPC/子网/AZ
     ↓
-你创建 DatabaseCluster，引用该 LoadBalancerConfig
+注入 elb.autocreate + elb.class + reclaim-policy
     ↓
-OpenEverest operator 创建 LoadBalancer 类型 Service
-    ↓
-华为云 CCM 绑定 ELB → Service 获得外部 IP
-    ↓
-你通过 ELB 的 IP 连接数据库
+CCM 创建 ELB → Service 获得 EXTERNAL-IP ✅
 ```
 
-控制器在 `everest-system` 命名空间创建一个类型为 `LoadBalancer` 的 Kubernetes `Service`。这个 Service 携带华为云 ELB 注解，告诉 CCE 云控制器管理器（CCM）如何将 Service 绑定到华为云 ELB 实例：
+### 手动模式（LBC 参数模板）
 
-- `kubernetes.io/elb.id: <elbID>` — 将 Service 绑定到预创建的 ELB 实例（即本控制器创建的 ELB）
-- `kubernetes.io/elb.class: union` — 使用华为云 ELB 负载均衡模式
+```
+创建 LBC（参数模板：带宽/EIP/公网等）
+    ↓
+创建 DBC，引用该 LBC
+    ↓
+OpenEverest 同步 LBC 参数到 Service
+    ↓
+Service Reconciler 读取参数 + 探测 VPC/子网/AZ
+    ↓
+注入 elb.autocreate + elb.class + reclaim-policy
+    ↓
+CCM 创建独立 ELB → Service 获得 EXTERNAL-IP ✅
 
-当 CCE CCM 检测到带有这些注解的 `LoadBalancer` Service 时，会根据 Service 的端口和 Pod 端点配置 ELB 监听器和后端服务器组。控制器先通过华为云 ELB v3 API 创建 ELB，然后创建带有 `kubernetes.io/elb.id` 注解的 Service 指向新创建的 ELB，CCE CCM 随后完成绑定。
+参数变更（如修改带宽）：
 
-这是 CCE 集成外部负载均衡器的标准机制 — 详见 [CCE 文档](https://support.huaweicloud.com/usermanual-cce/cce_10_0385.html)。
+**手动模式**：改 LBC annotation → OpenEverest 同步到 Service → 控制器调 API
+**自动模式**：直接改 Service annotation → 控制器调 API ✅
 
 ---
 
@@ -93,6 +110,8 @@ kubectl get dbengine -n everest
 - 已开通 ELB 服务的华为云账号
 - **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
 - **Project ID** —— 在控制台右上角用户名下拉菜单中找到
+
+> ⚠️ **重要**：必须使用**永久** AK/SK（主账号或已授权的 IAM 子用户均可）。**临时 AK/SK**（STS Token）不被支持，因为需要额外的 security token。所需权限：ELB Administrator、EIP Administrator、VPC ReadOnly、ECS ReadOnly。
 
 ---
 
@@ -216,141 +235,53 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 预期输出：
 ```
 INFO    starting huawei-elb-controller    {"region": "cn-north-4"}
-INFO    Starting Controller               {"controller": "loadbalancerconfig"}
-INFO    Starting workers                  {"controller": "loadbalancerconfig", "worker count": 1}
+INFO    Starting Controller               {"controller": "service"}
+INFO    Starting workers                  {"controller": "service", "worker count": 1}
 ```
 
-### 步骤 3：创建 LoadBalancerConfig
+### 步骤 3：创建数据库集群（自动模式，推荐）
 
-在 CCE 上，控制器自动从集群节点探测 VPC、子网和可用区 —— 无需手动配置。默认 ELB 类型为**公网**（带 EIP）。设 `huawei-elb.io/public: "false"` 创建内网 ELB。
+自动模式无需创建 LoadBalancerConfig。直接在 OpenEverest 中创建数据库集群：
 
-#### 方式 A（推荐）：零配置 via OpenEverest UI
+1. 打开 OpenEverest UI（例如通过端口转发 `http://localhost:8080`）
+2. 创建数据库集群时，**Load Balancer Config 下拉选择 "No configuration"**
+3. 完成集群创建
 
-通过 OpenEverest Web UI 创建 LoadBalancerConfig —— 无需 `kubectl`：
+OpenEverest 创建 LoadBalancer Service 后，Service Reconciler 自动：
+1. 探测 VPC/子网/可用区
+2. 使用默认参数构造 `elb.autocreate` 注解
+3. 注入 `elb.class` 和 `reclaim-policy`
+4. CCM 读取 autocreate 后自动创建 ELB 并绑定
 
-1. 在浏览器中打开 OpenEverest UI（例如通过端口转发访问 `http://localhost:8080`）。
-2. 进入 **Settings → Policies & Configurations → Load Balancer Configuration**。
-3. 点击 **Create configuration**。
-4. 填写配置**名称**（例如 `huawei-elb`）。
-5. 如果是**内网 ELB**，添加一个注解：
-   - Key: `huawei-elb.io/public`，Value: `false`
-   - 如果是**公网 ELB**（默认），跳过此步 —— 注解留空即可。
-6. 点击 **Save** 保存。
+> **默认参数**：公网 ELB、10Mbit/s 带宽、按流量计费、5_bgp EIP 类型。
 
-控制器会自动检测到新的 CR，从节点自动探测 VPC/子网/可用区，并在几秒内创建 ELB。可通过 `kubectl get loadbalancerconfig` 验证。
-
-#### 方式 B：零配置 via kubectl
-
-**公网 ELB**（默认，带弹性公网 IP，可从互联网访问）：
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-elb
-spec:
-  annotations: {}
-EOF
-```
-
-**内网 ELB**（仅 VPC 内访问 —— 只需填一个注解）：
-
-```bash
-cat <<'EOF' | kubectl apply -f -
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: huawei-internal-elb
-spec:
-  annotations:
-    huawei-elb.io/public: "false"
-EOF
-```
-
-控制器会：
-
-1. 列出所有节点，收集内网 IP 和可用区标签（`topology.kubernetes.io/zone`）
-2. 调用华为云 VPC API，根据节点 IP 匹配所在的 VPC 和子网
-3. 将探测到的值写入 `metadata.annotations`（标记 `huawei-elb.io/auto-detected: "true"`）
-4. 使用探测到的参数创建 ELB
-
-这提供了与 EKS/GKE 类似的零配置体验 —— 只需创建配置，控制器自动完成其余工作。
-
-> **注意**：自动探测适用于所有节点在同一 VPC 的 CCE 集群。如果节点跨多个 VPC，控制器会在 `huawei-elb.io/error` 注解中报错。
-
-##### 公网 vs 内网 ELB
-
-自动探测覆盖 VPC、子网和可用区 —— 但**公网还是内网是用户的选择**，无法自动探测：
-
-| 注解 | 不填时（自动探测） | 用户手动设置 |
-|---|---|---|
-| `huawei-elb.io/vpc-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
-| `huawei-elb.io/subnet-id` | ✅ 从节点 IP 自动探测 | 需要时覆盖 |
-| `huawei-elb.io/availability-zones` | ✅ 从节点标签自动探测 | 需要时覆盖 |
-| `huawei-elb.io/public` | 默认 `true`（公网） | 设为 `"false"` 创建内网 ELB |
 ### 步骤 4：等待 ELB 就绪
 
 ```bash
-# 等待 ELB 创建完成并激活（最多 120 秒）
-kubectl wait loadbalancerconfig huawei-elb \
-  --for=jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'=true \
-  --timeout=120s
+# 等待 Service 获得外部 IP（CCM 创建 ELB 约 15-30 秒）
+kubectl get svc -n everest -w
 
-# 验证 ELB 状态
-kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-status}'
-# 预期：ACTIVE
-
-# 验证 ELB ID 已写入
-kubectl get loadbalancerconfig huawei-elb -o jsonpath='{.spec.annotations}'
-# 预期：{"kubernetes.io/elb.id":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
+# 查看 ELB 详情
+kubectl describe svc <service-name> -n everest
 ```
 
-> **重要**：在创建 DatabaseCluster 之前，务必等待 `ready=true`。这确保 ELB ID 已写入 LoadBalancerConfig，OpenEverest operator 读取时能获取到。
+ELB 就绪后 Service 的 `EXTERNAL-IP` 字段会显示 IP 地址。
 
-### 步骤 5：创建数据库集群
-
-创建数据库集群时引用步骤 4 创建的 LoadBalancerConfig。完整的 UI/kubectl 流程请参考 [OpenEverest 文档](https://openeverest.io/documentation/current/)，关键字段是 `spec.proxy.expose.loadBalancerConfigName`：
-
-```yaml
-spec:
-  proxy:
-    expose:
-      type: LoadBalancer
-      loadBalancerConfigName: huawei-elb  # 步骤 4 创建的 LBC
-```
-
-> **注意**：如果 UI 中 LoadBalancer config 下拉菜单显示 "- No configuration -"，说明 ELB 还未就绪。请回到步骤 5 等待 `ready=true`。
-
-### 步骤 6：验证连接
+### 步骤 5：验证连接
 
 数据库运行后，验证 ELB 已正确绑定并获取连接 IP。
 
-#### 1. 验证 ELB 已绑定到数据库 Service
+#### 1. 获取连接 IP
 
 ```bash
-# 从 Service 获取 ELB ID（应与 LBC 的 elb.id 一致）
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-
-# 验证与 LBC 一致
-kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.spec.annotations.kubernetes\.io/elb\.id}'
-```
-
-#### 2. 获取连接 IP
-
-**公网 ELB (EIP)** — 从集群外部连接：
-```bash
-kubectl get loadbalancerconfig <lbc-name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/public-ip}'
-# 输出：<EIP-address>
-```
-
-**内网 ELB (VIP)** — 从 VPC 内部连接：
-```bash
+# 公网 ELB（默认）— 获取 EIP
 kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-# 输出：<ELB-VIP>
+
+# 内网 ELB — 获取 VIP
+kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
 ```
 
-#### 3. 连接数据库
+#### 2. 连接数据库
 
 完整连接指南（密码获取、客户端安装、各引擎连接命令）请参考 [OpenEverest 文档](https://openeverest.io/documentation/current/)。速查表：
 
@@ -372,79 +303,82 @@ kubectl get secret everest-secrets-<db-name> -n everest -o jsonpath='{.data.<pas
 >   kubectl exec -it <pod-name> -n everest -- mysql -h <ELB-VIP> -u root -p
 >   ```
 
----
+### （可选）手动模式：使用 LBC 参数模板
 
-## 配置参考
+如需自定义 ELB 参数（带宽、计费模式等），创建 LBC 作为参数模板：
 
-### 自动检测注解
-
-以下注解在 CCE 上会从集群节点自动检测。均为可选 — 如未设置，控制器会自动填充。如需覆盖，在 `metadata.annotations` 中手动设置。
-
-| Annotation | 自动检测来源 |
-|---|---|
-| `huawei-elb.io/vpc-id` | 通过节点 `machineID` 查询 ECS 服务器元数据 |
-| `huawei-elb.io/subnet-id` | Neutron 子网 ID（通过 VPC API 从 Virsubnet ID 转换） |
-| `huawei-elb.io/availability-zones` | 节点 label `topology.kubernetes.io/zone` |
-
-### 可选 Annotation
-
-| Annotation | 默认值 | 说明 |
-|---|---|---|
-| `huawei-elb.io/public` | `true` | `false` = 内网 ELB；默认 `true` = 公网 ELB（带 EIP） |
-| `huawei-elb.io/bandwidth-size` | `10` | EIP 带宽（Mbit/s）—— 仅公网 ELB |
-| `huawei-elb.io/bandwidth-charge-mode` | `traffic` | `traffic`（按流量计费）或 `bandwidth`（按带宽计费） |
-| `huawei-elb.io/public-ip-network-type` | `5_bgp` | EIP 网络类型；`5_bgp` 为 BGP |
-| `huawei-elb.io/region` | 全局 REGION | 为特定 CR 覆盖华为云区域 |
-
-### 控制器写入的 Annotation
-
-| 位置 | Annotation | 说明 |
-|---|---|---|
-| `spec.annotations` | `kubernetes.io/elb.id` | ELB ID —— OpenEverest 复制到 Service；CCM 用它绑定 ELB |
-| `metadata.annotations` | `huawei-elb.io/ready` | `true` 表示 ELB 就绪；`false` 表示创建中或出错 |
-| `metadata.annotations` | `huawei-elb.io/elb-status` | ELB 状态：`ACTIVE`、`PENDING_CREATE` 等 |
-| `metadata.annotations` | `huawei-elb.io/public-ip` | EIP 地址（仅公网 ELB） |
-| `metadata.annotations` | `huawei-elb.io/error` | 最近一次错误信息（正常时为空） |
-
-
-### 使用预创建的 ELB
-
-你可以绑定一个在华为云控制台预创建的 ELB，而不是让控制器创建。创建 LoadBalancerConfig 时在 `spec.annotations` 中设置 `kubernetes.io/elb.id`：
-
-```yaml
-apiVersion: everest.percona.com/v1alpha1
-kind: LoadBalancerConfig
-metadata:
-  name: my-elb
-spec:
-  annotations:
-    kubernetes.io/elb.id: "<预创建的-ELB-ID>"
-```
-
-控制器检测到已有 ELB ID 后，会跳过 ELB 创建，只监控 ELB 状态。
-
-> ⚠️ **注意事项 1：删除 LBC 会删除 ELB。** 控制器不区分“自己创建的 ELB”和“用户预绑定的 ELB”。删除 LoadBalancerConfig 时，控制器会调用华为云 API 删除 `kubernetes.io/elb.id` 对应的 ELB。如果你只想解绑（保留 ELB），请在删除 LBC 之前先移除 `kubernetes.io/elb.id` 注解。
-
-> ⚠️ **注意事项 2：无效的 ELB ID 不会被自动清除。** 如果预填的 ELB ID 在华为云中不存在（填错或已被手动删除），`ShowELB` 返回 404，控制器会报 transient error 并无限重试，不会自动移除无效的 ID。恢复方法：手动从 `spec.annotations` 中删除 `kubernetes.io/elb.id` 注解，控制器会重新创建新 ELB。
-
-### 手动覆盖
-
-如果自动检测失败或需要覆盖，给 `LoadBalancerConfig` CR 加注解：
-
-```yaml
+```bash
+cat <<'EOF' | kubectl apply -f -
 apiVersion: everest.percona.com/v1alpha1
 kind: LoadBalancerConfig
 metadata:
   name: my-elb-config
-  annotations:
-    huawei-elb.io/vpc-id: "<your-vpc-id>"
-    huawei-elb.io/subnet-id: "<your-subnet-id>"
-    huawei-elb.io/availability-zones: "cn-north-4a"
 spec:
-  # ... 其余 spec
+  annotations:
+    huawei-elb.io/public: "true"
+    huawei-elb.io/bandwidth-size: "20"
+    huawei-elb.io/bandwidth-charge-mode: "traffic"
+    huawei-elb.io/eip-type: "5_bgp"
+EOF
 ```
 
-只要设置了这些注解，控制器就会使用提供的值，跳过对应字段的自动检测。
+然后在创建 DBC 时引用该 LBC（`loadBalancerConfigName: my-elb-config`）。Service Reconciler 读取 LBC 参数后注入 autocreate，CCM 创建独立 ELB。
+
+> **重要**：LBC 是参数模板，不是实例引用。多个 DBC 引用同一个 LBC，各自获得独立 ELB —— 零端口冲突，完全对齐 EKS/GKE 行为。
+
+---
+
+## 配置参考
+
+### 自动模式默认参数
+
+当不创建 LBC（自动模式）时，Service Reconciler 使用以下默认值：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| ELB 类型 | 公网（带 EIP） | 与 GKE 一致，对外暴露 |
+| 带宽 | `10` Mbit/s | 华为云最小值 |
+| 计费模式 | `traffic`（按流量） | 按实际流量付费 |
+| EIP 类型 | `5_bgp` | BGP 多线 |
+| ELB 名称 | `cce-lb-<ns>-<svc>` | 自动生成，64 字符内截断 |
+| VPC ID | 自动探测 | 从节点 ECS 元数据获取 |
+| 子网 ID | 自动探测 | 从节点标签获取 |
+| 可用区 | 自动探测 | 从节点 zone 标签获取 |
+
+### 手动模式注解（LBC 参数模板）
+
+LBC 的 `spec.annotations` 中可配置以下参数。OpenEverest 会自动同步到 Service，Service Reconciler 读取后构造 autocreate JSON 或调 API 更新：
+
+| 注解 | 类型 | 可选值 | 默认值 | 说明 |
+|---|---|---|---|---|
+| `huawei-elb.io/public` | string | `"true"` / `"false"` | `"true"` | 公网/内网 ELB |
+| `huawei-elb.io/bandwidth-size` | int | `1` – `2000` | `10` | EIP 带宽（Mbit/s） |
+| `huawei-elb.io/bandwidth-charge-mode` | string | `"traffic"` / `"bandwidth"` | `"traffic"` | 按流量/按带宽计费 |
+| `huawei-elb.io/eip-type` | string | `"5_bgp"` / `"5_sbgp"` / `"5_telcom"` / `"5_union"` | `"5_bgp"` | EIP 线路类型（创建后不可变） |
+| `huawei-elb.io/name` | string | 自定义（≤64 字符） | `cce-lb-<ns>-<svc>` | ELB 实例名称 |
+| `huawei-elb.io/region` | string | 如 `cn-north-4` | 全局配置 | 覆盖集群级区域设置 |
+
+> **注意**：`eip-type` 创建后不可变更（华为云 API 限制），修改此参数需删除重建 ELB。这与 EKS/GKE 的 NLB/LB 类型不可切换一致。
+
+### ACL 注解
+
+控制器自动将 Service 的 `loadBalancerSourceRanges`（OpenEverest 的 `ipSourceRanges`）转换为华为云 ELB ACL：
+
+| 注解 | 说明 |
+|---|---|
+| `kubernetes.io/elb.acl-status` | `"on"` — 开启 ACL 白名单 |
+| `kubernetes.io/elb.acl-type` | `"white"` — 白名单模式 |
+| `kubernetes.io/elb.acl-id` | ACL ID（控制器自动创建/复用） |
+
+### 自动探测注解
+
+以下注解在 CCE 上会从集群节点自动检测。均为可选 — 如未设置，控制器会自动填充。如需覆盖，在 LBC 的 `metadata.annotations` 中手动设置。
+
+| 注解 | 自动检测来源 |
+|---|---|
+| `huawei-elb.io/vpc-id` | 通过节点 `machineID` 查询 ECS 服务器元数据 |
+| `huawei-elb.io/subnet-id` | Neutron 子网 ID（通过 VPC API 从 Virsubnet ID 转换） |
+| `huawei-elb.io/availability-zones` | 节点 label `topology.kubernetes.io/zone` |
 
 ### Helm Values
 
@@ -456,7 +390,7 @@ spec:
 | `credentials.ak` | `""` | 华为云 AK |
 | `credentials.sk` | `""` | 华为云 SK |
 | `credentials.projectId` | `""` | 华为云 Project ID |
-| `credentials.region` | `cn-north-4` | 华为云区域 |
+| `credentials.region` | `""` | 华为云区域（必填，如 `cn-north-4`） |
 | `existingSecret` | `""` | 使用已有 Secret（覆盖 credentials） |
 | `namespace` | `everest-system` | 部署命名空间 |
 | `resources.requests.cpu` | `100m` | CPU 请求 |
@@ -484,67 +418,63 @@ kubectl describe pod -n everest-system -l app.kubernetes.io/name=huawei-elb-cont
 ### ELB 创建失败
 
 ```bash
-# 查看错误 annotation
-kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/error}'
-
-# 查看控制器日志获取 API 错误详情
+# 查看控制器日志
 kubectl logs -n everest-system deployment/huawei-elb-controller
+
+# 检查 Service 事件
+kubectl describe svc <service-name> -n everest
 ```
 
 常见错误：
 - `auto-detection failed: ...` → 检查所有节点是否在同一 VPC 内；查看控制器日志了解详情
+- `CCM not processing autocreate` → 检查 CCM 是否运行：`kubectl get pods -A | grep cloud-controller`
 - `creating ELB: ...` → 查看控制器日志了解华为云 API 错误详情
 
 ### Service 没有外部 IP
 
 ```bash
-# 1. 检查 LoadBalancerConfig 是否就绪
-kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.annotations.huawei-elb\.io/ready}'
-# 应为 "true"
+# 1. 检查 Service 是否有 autocreate 注解
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.autocreate}'
 
-# 2. 检查 Service 是否有 elb.id annotation
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.id}'
-# 应显示 ELB ID
-
-# 3. 检查 CCM 是否运行
+# 2. 检查 CCM 是否运行
 kubectl get pods -A | grep cloud-controller
+
+# 3. 查看 Service 事件
+kubectl describe svc <service-name> -n everest
 ```
 
-### LoadBalancerConfig 删除卡住
+### ELB 未随 Service 删除而删除
 
 ```bash
-# 检查 finalizer 是否存在
-kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.finalizers}'
-# 应包含 "huawei-elb.io/finalizer"
+# 检查 Service 是否有正确的 reclaim-policy 注解
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.instance-reclaim-policy}'
+# 应返回 "alwaysDelete"
 
-# 查看控制器日志
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
-
-# 如果 ELB 已在华为云控制台手动删除，
-# 控制器会检测到 404 并自动移除 finalizer。
+# 如果 reclaim-policy 缺失或错误，CCM 不会删除 ELB。
+# 控制器默认将 reclaim-policy 设为 "alwaysDelete"；
+# 如果缺失，说明 Service 可能在控制器启动前创建。
+# 解决方法：删除并重建 Service（或删除数据库集群后重建）。
 ```
+
+> **注意**：ELB 删除由 CCM 通过 `reclaim-policy: alwaysDelete` 处理。删除 Service 后 CCM 自动删除 ELB。控制器不使用 finalizer。
 
 ## 卸载
 
-### 1. 先删除所有 LoadBalancerConfig（重要）
+### 1. 先删除数据库集群
 
-**顺序很重要。** 删除 `LoadBalancerConfig` 会通过 finalizer 触发控制器删除对应的华为云 ELB。如果先卸载控制器，ELB 会成为孤儿资源并**持续计费**（公网 ELB 的 EIP 按小时收费）。
+**顺序很重要。** 删除数据库集群（DBC）后，对应的 Service 会被删除，CCM 通过 `reclaim-policy: alwaysDelete` 自动删除华为云 ELB。如果先卸载控制器，Service 删除后 ELB 会成为孤儿资源并**持续计费**（公网 ELB 的 EIP 按小时收费）。
 
 ```bash
-# 列出所有 LoadBalancerConfig
-kubectl get loadbalancerconfig -A
+# 列出所有数据库集群
+kubectl get dbc -A
 
-# 逐个删除（控制器会删除对应的华为云 ELB）
+# 逐个删除（删除 Service 后 CCM 自动清理 ELB）
+kubectl delete dbc <name> -n <namespace>
+
+# 再删除剩余的 LoadBalancerConfig
+kubectl get loadbalancerconfig -A
 kubectl delete loadbalancerconfig <name>
 ```
-
-在继续之前，查看控制器日志确认 ELB 已删除：
-
-```bash
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=5
-# 等待看到每个 LBC 对应的 "deleted ELB" 日志
-```
-
 > 如果 `LoadBalancerConfig` 带有 `everest.percona.com/in-use-protection` finalizer，说明它仍被某个数据库集群引用。请先删除该数据库（或切换到其他 LBC）。
 
 ### 2. 卸载控制器
@@ -558,7 +488,7 @@ helm uninstall huawei-elb-controller
 kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev/null
 ```
 
-#### 方式 B：原始 Manifests
+#### 方式 B：原生清单
 
 ```bash
 kubectl delete -f deploy/deployment.yaml
@@ -589,11 +519,11 @@ kubectl delete crd loadbalancerconfigs.everest.percona.com
 | 额外部署控制器 | 不需要 | 需要 |
 | 用户填 VPC/子网/可用区 | 不用 | **不用（自动探测）** |
 | 配置复杂度 | 零 | **零** |
-| ELB 生命周期管理 | CCM | 控制器 + finalizer |
-| 状态可见性 | Service 事件 | LBC 注解（`ready`、`elb-status`、`error`） |
-| 删除安全性 | CCM 处理 | finalizer 确保 ELB 先于 CR 删除 |
-| ELB 精细控制 | 有限 | 完整（标签、命名、参数） |
-| 错误反馈 | Service 事件 | LBC 上的 `huawei-elb.io/error` 注解 |
+| LBC 角色 | 参数模板 | **参数模板** ✅ |
+| 多 Service 引用同一 LBC | 各自独立 LB | **各自独立 ELB** ✅ |
+| ELB 参数事后可调 | ✅（CCM 调 API） | ✅（Service Reconciler 调 API） |
+| ELB 生命周期管理 | CCM | CCM（autocreate + reclaim-policy） |
+| 错误反馈 | Service 事件 | 控制器日志 + Service 事件 |
 
 **架构差异**：
 
@@ -601,15 +531,14 @@ kubectl delete crd loadbalancerconfigs.everest.percona.com
 EKS/GKE:    Service → CCM 创建 LB（从节点元数据读 VPC）
 
 CCE + 本控制器：
-            LBC → 控制器从节点探测 VPC/子网/可用区
-                → 控制器调 API 创建 ELB
-                → 将 elb.id 写回 LBC
-                → Everest 复制 elb.id 到 Service
-                → CCM 绑定 ELB 到 Service
+            Service → Service Reconciler 探测 VPC/子网/AZ
+                   → 注入 elb.autocreate
+                   → CCM 创建 ELB ✅
 ```
 
-用户体验是一样的：创建配置 → 获得负载均衡器 → 连接。内部流程多了一跳（控制器单独创建 ELB，再由 CCM 绑定），但换来了更好的可控性、状态报告和删除安全性。
+用户体验是一样的：创建集群 → 获得负载均衡器 → 连接。内部流程多了一步（控制器探测 VPC 并注入 autocreate），这是为了填补 CCE CCM 的能力缺口（不会自动探测 VPC、不认自定义 LBC 参数），但换来的是与 EKS/GKE 完全一致的使用体验。
 
+---
 
 ## 开源许可证
 

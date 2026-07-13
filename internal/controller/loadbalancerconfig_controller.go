@@ -22,15 +22,12 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -116,18 +113,9 @@ type LoadBalancerConfigReconciler struct {
 	// the "huawei-elb.io/region" annotation.
 	Creds *huaweicloud.Credentials
 
-	// Auto-detection cache. On CCE, all nodes share the same VPC/subnet,
-	// so we only need to detect once and cache the result.
-	detectMu sync.Mutex
-	detected *autoDetectedParams
+	NetworkDetector *huaweicloud.NetworkDetector
 }
 
-// autoDetectedParams holds the cluster's VPC/subnet/AZ detected from nodes.
-type autoDetectedParams struct {
-	VPCID    string
-	SubnetID string
-	AZs      []string
-}
 
 // getELBClient returns the ELB client for the given LoadBalancerConfig.
 // If the CR specifies a different region via the "huawei-elb.io/region"
@@ -204,20 +192,18 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 		// Auto-detect VPC/subnet/AZ from cluster nodes.
 		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger, lbc)
-		if err != nil {
-			logger.Error(err, "auto-detection failed")
-			if isInUse(lbc) {
-				errMsg := fmt.Sprintf("auto-detection failed: %v", err)
-				anns := lbc.GetAnnotations()
-				if anns[errorAnnotation] != errMsg {
-					_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
-				}
-				if anns[readyAnnotation] != "false" {
-					_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
-				}
-			}
-			return ctrl.Result{RequeueAfter: errorRequeue}, nil
-		}
+if err != nil {
+logger.Error(err, "auto-detection failed")
+errMsg := fmt.Sprintf("auto-detection failed: %v", err)
+anns := lbc.GetAnnotations()
+if anns[errorAnnotation] != errMsg {
+_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
+}
+if anns[readyAnnotation] != "false" {
+_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
+}
+return ctrl.Result{RequeueAfter: errorRequeue}, nil
+}
 
 		// Write detected values into metadata.annotations (NOT spec.annotations)
 		// to avoid resourceVersion conflicts with the OpenEverest UI which edits
@@ -502,13 +488,8 @@ func isInUse(lbc *unstructured.Unstructured) bool {
 func (r *LoadBalancerConfigReconciler) autoDetectParams(
 	ctx context.Context, logger logr.Logger, lbc *unstructured.Unstructured,
 ) (vpcID, subnetID string, azs []string, err error) {
-	r.detectMu.Lock()
-	defer r.detectMu.Unlock()
-
-	// 0. If the user manually specified vpc-id, use those values directly and
-	// skip both auto-detection and the cache. This makes manual overrides
-	// hot-reloadable: editing spec.annotations on a live LBC picks up the new
-	// values on the next reconcile without waiting for stale cached data.
+	// 1. If the user manually specified vpc-id, use those values directly and
+	// skip auto-detection. This makes manual overrides hot-reloadable.
 	if manualVPC := getSpecAnnotation(lbc, vpcIDAnnotation); manualVPC != "" {
 		manualSubnet := getSpecAnnotation(lbc, subnetIDAnnotation)
 		manualAZs := strings.Split(getSpecAnnotation(lbc, availabilityZonesAnnotation), ",")
@@ -517,79 +498,8 @@ func (r *LoadBalancerConfigReconciler) autoDetectParams(
 		return manualVPC, manualSubnet, manualAZs, nil
 	}
 
-	// 1. Return cached result if available.
-	if r.detected != nil {
-		return r.detected.VPCID, r.detected.SubnetID, r.detected.AZs, nil
-	}
-
-	// 2. List all nodes.
-	nodeList := &corev1.NodeList{}
-	if err := r.List(ctx, nodeList); err != nil {
-		return "", "", nil, fmt.Errorf("listing nodes: %w", err)
-	}
-	if len(nodeList.Items) == 0 {
-		return "", "", nil, fmt.Errorf("no nodes found in cluster")
-	}
-
-	// 3. Take the first node — all CCE nodes share the same VPC.
-	node := nodeList.Items[0]
-
-	// 4. Get the Virsubnet ID from the node label written by CCE CCM.
-	//    This is the VPC service's subnet ID; ELB needs the Neutron subnet ID,
-	//    so we convert it below via the VPC API.
-	virsubnetID := node.Labels["node.kubernetes.io/subnetid"]
-	if virsubnetID == "" {
-		return "", "", nil, fmt.Errorf(
-			"node %s has no node.kubernetes.io/subnetid label", node.Name)
-	}
-
-	// 4b. Convert the Virsubnet ID to a Neutron subnet ID for the ELB API.
-	subnetID, err = huaweicloud.GetNeutronSubnetID(r.Creds, virsubnetID)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("converting virsubnet to neutron subnet: %w", err)
-	}
-
-	// 5. Collect availability zones from every node's zone label.
-	azSet := make(map[string]bool)
-	for _, n := range nodeList.Items {
-		if az, ok := n.Labels["topology.kubernetes.io/zone"]; ok {
-			azSet[az] = true
-		}
-	}
-	for az := range azSet {
-		azs = append(azs, az)
-	}
-	sort.Strings(azs)
-	if len(azs) == 0 {
-		return "", "", nil, fmt.Errorf(
-			"no availability zones found in node labels (topology.kubernetes.io/zone)",
-		)
-	}
-
-	// 6. Get VPC ID from the ECS API via the node's machineID (ECS server-id).
-	// This is the most reliable signal: every CCE node carries the cluster's
-	// VPC ID in its server metadata, with no CIDR overlap ambiguity.
-	serverID := node.Status.NodeInfo.MachineID
-	if serverID == "" {
-		return "", "", nil, fmt.Errorf("node %s has no machineID", node.Name)
-	}
-	vpcID, err = huaweicloud.DetectVPCFromECS(r.Creds, serverID)
-	if err != nil {
-		return "", "", nil, err
-	}
-
-	// 7. Cache the result.
-	r.detected = &autoDetectedParams{
-		VPCID:    vpcID,
-		SubnetID: subnetID,
-		AZs:      azs,
-	}
-
-	logger.Info("Auto-detected cluster network params from nodes",
-		"vpc-id", vpcID, "subnet-id", subnetID,
-		"azs", azs, "node-count", len(nodeList.Items))
-
-	return vpcID, subnetID, azs, nil
+	// 2. Delegate auto-detection to NetworkDetector (cached internally).
+	return r.NetworkDetector.Detect(ctx, r.Client)
 }
 
 // shouldReconcile returns true if the LBC should be processed by this controller.
