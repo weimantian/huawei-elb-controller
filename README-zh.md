@@ -240,6 +240,26 @@ INFO    Starting Controller               {"controller": "service"}
 INFO    Starting workers                  {"controller": "service", "worker count": 1}
 ```
 
+### 代码更新后重新部署
+
+**Helm**：
+```bash
+git pull
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+helm upgrade huawei-elb-controller ./charts/huawei-elb-controller -f my-values.yaml -n everest-system
+```
+
+**原生清单**：
+```bash
+git pull
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+kubectl rollout restart deploy huawei-elb-controller -n everest-system
+```
+
 ### 步骤 3：创建数据库集群（自动模式，推荐）
 
 自动模式无需创建 LoadBalancerConfig。直接在 OpenEverest 中创建数据库集群：
