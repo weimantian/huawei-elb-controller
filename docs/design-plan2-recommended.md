@@ -238,21 +238,61 @@ T=任意   用户改 LBC 带宽 10M → 20M
 
 ---
 
-## 7. LBC 参数映射（LBC 参数 → autocreate JSON / API 更新）
+## 7. LBC 参数映射与默认值
 
-| LBC annotation | autocreate JSON（创建） | ELB API（更新） | 默认值 |
+### 7.1 自动模式（无 LBC）—— 默认参数
+
+用户不创建 LBC，UI 选择 "No configuration"。Service Reconciler 使用以下默认值构造 autocreate JSON：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| ELB 类型 | `public`（公网） | 与 GKE 一致，对外暴露。EKS 默认 `internal` |
+| 带宽 | `10` Mbit/s | 华为云最小值 |
+| 计费模式 | `traffic`（按流量） | 按实际流量付费 |
+| EIP 类型 | `5_bgp` | BGP 多线，联通性最好 |
+| 带宽共享类型 | `PER`（独享） | 独享带宽，不共享 |
+| ELB 名称 | `cce-lb-<ns>-<svc>` | 自动生成，64 字符内截断 |
+| VPC ID | NetworkDetector 探测 | 从节点 ECS 元数据获取 |
+| 子网 ID | NetworkDetector 探测 | 从节点标签获取 |
+| 可用区 | NetworkDetector 探测 | 从节点 zone 标签获取 |
+
+### 7.2 手动模式（LBC 参数模板）—— 支持的注解
+
+用户在 LBC 的 `spec.annotations` 中配置以下参数作为模板。OpenEverest 将其同步到 Service，Service Reconciler 读取后构造 autocreate JSON 或调 ELB API 更新：
+
+| LBC annotation | 类型 | 参考值 | 默认值 | autocreate 字段 | API 更新 |
+|----------------|------|--------|--------|-----------------|---------|
+| `huawei-elb.io/public` | string | `"true"` / `"false"` | `"true"` → public | `type` | ModifyLoadBalancer ✅ |
+| `huawei-elb.io/bandwidth-size` | int | `1` – `2000`（Mbit/s） | `10` | `bandwidth_size` | ModifyEIPBandwidth ⏳ |
+| `huawei-elb.io/bandwidth-charge-mode` | string | `"traffic"` / `"bandwidth"` | `"traffic"` | `bandwidth_chargemode` | ModifyEIPBandwidth ⏳ |
+| `huawei-elb.io/eip-type` | string | `"5_bgp"` / `"5_sbgp"` / `"5_telcom"` / `"5_union"` | `"5_bgp"` | `eip_type` | ❌ 不可变（需重建） |
+| `huawei-elb.io/bandwidth-share-type` | string | `"PER"` / `"WHOLE"` | `"PER"` | `bandwidth_sharetype` | — |
+| `huawei-elb.io/name` | string | 自定义 ELB 名称（≤64 字符） | `cce-lb-<ns>-<svc>` | `name` | — |
+
+**LBC 参数模板示例**：
+```yaml
+apiVersion: everest.percona.com/v1alpha1
+kind: LoadBalancerConfig
+metadata:
+  name: my-lbc-template
+spec:
+  annotations:
+    huawei-elb.io/public: "true"
+    huawei-elb.io/bandwidth-size: "20"
+    huawei-elb.io/bandwidth-charge-mode: "traffic"
+    huawei-elb.io/eip-type: "5_bgp"
+```
+
+> **注意**：`eip_type` 创建后不可变更（华为云 API 限制），一旦 ELB 创建，修改该参数需删除重建。此限制与 EKS/GKE 的 NLB/LB 类型不可切换一致。
+
+### 7.3 三种平台对比
+
+| | EKS | GKE | CCE 方案 2 |
 |---|---|---|---|
-| `huawei-elb.io/public` | `type` | ModifyLoadBalancer | `true` → `public` |
-| `huawei-elb.io/bandwidth-size` | `bandwidth_size` | ModifyEIPBandwidth | `10` |
-| `huawei-elb.io/bandwidth-charge-mode` | `bandwidth_chargemode` | ModifyEIPBandwidth | `traffic` |
-| `huawei-elb.io/eip-type` | `eip_type` | 不可变（需重建） | `5_bgp` |
-| `huawei-elb.io/bandwidth-share-type` | `bandwidth_sharetype` | — | `PER` |
-| `huawei-elb.io/name` | `name` | — | 自动生成 |
-| （自动探测） | `vip_subnet_cidr_id` | — | NetworkDetector |
-| （自动探测） | `available_zone` | — | 节点 zone label |
-
-> `eip_type`（EIP 类型）创建后不可通过 API 变更，需重建 ELB。此限制与 EKS/GKE 一致（NLB/LB 类型也不可事后切换）。
-
+| 默认公/内网 | internal（内网） | external（公网） | public（公网） |
+| 默认带宽 | 无（自动扩展） | 无（自动扩展） | 10 Mbit/s |
+| 参数配置入口 | Service annotations | Service annotations | LBC annotations → Service |
+| 创建后可调参 | ✅ CCM 调 API | ✅ CCM 调 API | ✅ Service Reconciler 调 API |
 ---
 
 ## 8. LBC 现用注解（`kubernetes.io/elb.id`）的处理
