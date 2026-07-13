@@ -187,14 +187,17 @@ return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, nil
 		}
-		// Grace period: if the LBC was created very recently, wait before
-		// modifying it. The OpenEverest UI performs post-create operations
-		// (reload, update) that conflict with controller writes.
-		if age := time.Since(lbc.GetCreationTimestamp().Time); age < uiGracePeriod {
-			logger.Info("LBC recently created, waiting to avoid UI conflict",
-				"age", age, "wait", uiGracePeriod-age)
-			return ctrl.Result{RequeueAfter: uiGracePeriod - age}, nil
-		}
+		// Wait if LBC is unconfigured (empty spec.annotations — still being edited in UI)
+// or very recently created (within grace period).
+if isUnconfiguredLBC(lbc) {
+logger.Info("LBC is unconfigured, waiting for UI edit to complete")
+return ctrl.Result{RequeueAfter: uiGracePeriod}, nil
+}
+if age := time.Since(lbc.GetCreationTimestamp().Time); age < uiGracePeriod {
+logger.Info("LBC recently created, waiting to avoid UI conflict",
+"age", age, "wait", uiGracePeriod-age)
+return ctrl.Result{RequeueAfter: uiGracePeriod - age}, nil
+}
 
 		// Auto-detect VPC/subnet/AZ from cluster nodes.
 		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger, lbc)
@@ -479,6 +482,13 @@ return true
 }
 }
 return false
+}
+
+// isUnconfiguredLBC returns true if the LBC has no spec.annotations,
+// indicating it is still being edited in the UI.
+func isUnconfiguredLBC(lbc *unstructured.Unstructured) bool {
+specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
+return !found || len(specAnns) == 0
 }
 
 // isInUse returns true if the CR has status.inUse == true,
