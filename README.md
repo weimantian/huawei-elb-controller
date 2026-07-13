@@ -180,7 +180,8 @@ EOF
 # 4. Install via Helm
 helm install huawei-elb-controller \
   ./charts/huawei-elb-controller \
-  -f my-values.yaml
+  -f my-values.yaml \
+  -n everest-system
 ```
 
 #### Option B: Using Raw Manifests
@@ -469,14 +470,14 @@ kubectl delete loadbalancerconfig <name>
 
 ```bash
 # If this shows a release, use Helm (Option A)
-helm list -A | grep huawei-elb
+helm list -n everest-system | grep huawei-elb
 # Otherwise, use Raw Manifests (Option B)
 ```
 
 #### Option A: Helm
 
 ```bash
-helm uninstall huawei-elb-controller
+helm uninstall huawei-elb-controller -n everest-system
 
 # Remove the credentials Secret (Helm may leave it behind)
 kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev/null
