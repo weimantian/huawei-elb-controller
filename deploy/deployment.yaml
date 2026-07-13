@@ -1,27 +1,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-name: huawei-elb-controller
-namespace: everest-system
-labels:
-app.kubernetes.io/name: huawei-elb-controller
-app.kubernetes.io/instance: huawei-elb-controller
+  name: huawei-elb-controller
+  namespace: everest-system
+  labels:
+    app.kubernetes.io/name: huawei-elb-controller
+    app.kubernetes.io/instance: huawei-elb-controller
 spec:
   replicas: 1
   selector:
-matchLabels:
-app.kubernetes.io/name: huawei-elb-controller
-app.kubernetes.io/instance: huawei-elb-controller
+    matchLabels:
+      app.kubernetes.io/name: huawei-elb-controller
+      app.kubernetes.io/instance: huawei-elb-controller
   template:
     metadata:
-labels:
-app.kubernetes.io/name: huawei-elb-controller
-app.kubernetes.io/instance: huawei-elb-controller
+      labels:
+        app.kubernetes.io/name: huawei-elb-controller
+        app.kubernetes.io/instance: huawei-elb-controller
     spec:
       serviceAccountName: huawei-elb-controller
       containers:
         - name: controller
-          image: huawei-elb-controller:latest
+          image: swr.cn-north-4.myhuaweicloud.com/weimantian/huawei-elb-controller:latest
           imagePullPolicy: IfNotPresent
           args:
             - --metrics-bind-address=:8081
@@ -72,3 +72,4 @@ app.kubernetes.io/instance: huawei-elb-controller
               port: health
             initialDelaySeconds: 15
             periodSeconds: 20
+
