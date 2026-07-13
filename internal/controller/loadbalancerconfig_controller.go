@@ -504,18 +504,24 @@ func (r *LoadBalancerConfigReconciler) autoDetectParams(
 
 // shouldReconcile returns true if the LBC should be processed by this controller.
 // It skips LBCs that use CCM's autocreate annotation (kubernetes.io/elb.autocreate),
-// as those are managed by CCE's CCM directly.
+// as well as LBCs with huawei-elb.io/* annotations (Plan 2 parameter templates).
 func shouldReconcile(obj client.Object) bool {
-	u, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		return false
-	}
-	// Skip LBCs using CCM autocreate.
-	if getSpecAnnotation(u, ccmAutocreateAnnotation) != "" {
-		return false
-	}
-	// Process everything else, including empty LBCs (for auto-detection).
-	return true
+u, ok := obj.(*unstructured.Unstructured)
+if !ok {
+return false
+}
+// Skip LBCs using CCM autocreate.
+if getSpecAnnotation(u, ccmAutocreateAnnotation) != "" {
+return false
+}
+// Skip Plan 2 parameter template LBCs (have huawei-elb.io/* annotations).
+specAnns := getSpecAnnotations(u)
+for key := range specAnns {
+if strings.HasPrefix(key, "huawei-elb.io/") {
+return false
+}
+}
+return true
 }
 
 // getSpecAnnotations returns all annotations from spec.annotations as a map.
