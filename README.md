@@ -109,7 +109,7 @@ kubectl get dbengine -n everest
 - **AK** (Access Key) and **SK** (Secret Key) — create at: IAM → My Credentials → Access Keys
 - **Project ID** — found in the console top-right dropdown under your username
 
-> ⚠️ **Important**: Must use **main account** AK/SK (not IAM user or temporary credentials). Temporary AK/SK tokens will cause authentication failures when calling ELB/EIP/VPC APIs.
+> ⚠️ **Important**: Must use **permanent** AK/SK (main account or IAM user with sufficient permissions). **Temporary AK/SK** (STS tokens) are not supported because they require a security token the controller does not handle. Required permissions: ELB FullAccess, EIP FullAccess, VPC ReadOnly, ECS ReadOnly.
 
 ---
 

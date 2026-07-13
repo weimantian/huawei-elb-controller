@@ -115,7 +115,7 @@ kubectl get dbengine -n everest
 - **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
 - **Project ID** —— 在控制台右上角用户名下拉菜单中找到
 
-> ⚠️ **重要**：必须使用**主账号**的 AK/SK（非 IAM 子用户或临时凭证）。临时 AK/SK Token 调用 ELB/EIP/VPC API 时会鉴权失败。
+> ⚠️ **重要**：必须使用**永久** AK/SK（主账号或已授权的 IAM 子用户均可）。**临时 AK/SK**（STS Token）不被支持，因为需要额外的 security token。所需权限：ELB FullAccess、EIP FullAccess、VPC ReadOnly、ECS ReadOnly。
 
 ---
 
