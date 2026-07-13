@@ -13,6 +13,7 @@ elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
 corev1 "k8s.io/api/core/v1"
 ctrl "sigs.k8s.io/controller-runtime"
 "sigs.k8s.io/controller-runtime/pkg/client"
+"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 "sigs.k8s.io/controller-runtime/pkg/event"
 "sigs.k8s.io/controller-runtime/pkg/log"
 "sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -32,9 +33,10 @@ const (
 	elbClassAnnotation        = "kubernetes.io/elb.class"
 	reclaimPolicyAnnotation   = "kubernetes.io/elb.instance-reclaim-policy"
 	serviceRequeue            = 5 * time.Minute
-	serviceRetryRequeue       = 10 * time.Second
+serviceRetryRequeue       = 10 * time.Second
+aclCleanupFinalizer        = "huawei-elb.io/acl-cleanup"
 
-	aclIDAnnotation     = "kubernetes.io/elb.acl-id"
+aclIDAnnotation     = "kubernetes.io/elb.acl-id"
 	aclStatusAnnotation = "kubernetes.io/elb.acl-status"
 	aclTypeAnnotation   = "kubernetes.io/elb.acl-type"
 	sourceRangesKey     = "source-ranges"
@@ -66,6 +68,7 @@ return ctrl.Result{}, nil
 	}
 
 if !svc.DeletionTimestamp.IsZero() {
+if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
 logger.Info("Service being deleted, cleaning up ACL IP group", "service", svc.Name)
 if ipGroupID := svc.Annotations[aclIDAnnotation]; ipGroupID != "" {
 if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
@@ -74,7 +77,11 @@ return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 }
 logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
 }
-// ELB cleanup handled by CCM via reclaim-policy
+controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
+if err := r.Update(ctx, svc); err != nil {
+return ctrl.Result{}, err
+}
+}
 return ctrl.Result{}, nil
 }
 
@@ -123,6 +130,7 @@ ipGroupID, err := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "
 svc.Annotations[aclIDAnnotation] = ipGroupID
 svc.Annotations[aclStatusAnnotation] = "on"
 svc.Annotations[aclTypeAnnotation] = "white"
+controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 }
 } else {
 svc.Annotations[aclStatusAnnotation] = "off"
@@ -290,9 +298,9 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}
 			return shouldReconcileService(svcOld) || shouldReconcileService(svcNew)
 		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			return false
-		},
+DeleteFunc: func(e event.DeleteEvent) bool {
+			return true
+},
 		GenericFunc: func(e event.GenericEvent) bool {
 			svc, ok := e.Object.(*corev1.Service)
 			if !ok {
