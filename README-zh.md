@@ -205,7 +205,7 @@ docker push <swr-registry>/huawei-elb-controller:latest
 # nerdctl push <swr-registry>/huawei-elb-controller:latest
 ```
 
-然后修改 `deploy/deployment.yaml`，将容器镜像改为 `<swr-registry>/huawei-elb-controller:latest`。
+然后修改 `deploy/deployment.yaml` 第 21 行镜像：`image: <swr-registry>/huawei-elb-controller:latest`
 
 3. 应用清单：
 

@@ -1,19 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: huawei-elb-controller
-  namespace: everest-system
-  labels:
-    app: huawei-elb-controller
+name: huawei-elb-controller
+namespace: everest-system
+labels:
+app.kubernetes.io/name: huawei-elb-controller
+app.kubernetes.io/instance: huawei-elb-controller
 spec:
   replicas: 1
   selector:
-    matchLabels:
-      app: huawei-elb-controller
+matchLabels:
+app.kubernetes.io/name: huawei-elb-controller
+app.kubernetes.io/instance: huawei-elb-controller
   template:
     metadata:
-      labels:
-        app: huawei-elb-controller
+labels:
+app.kubernetes.io/name: huawei-elb-controller
+app.kubernetes.io/instance: huawei-elb-controller
     spec:
       serviceAccountName: huawei-elb-controller
       containers:

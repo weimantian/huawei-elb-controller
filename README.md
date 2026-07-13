@@ -217,7 +217,7 @@ docker push <swr-registry>/huawei-elb-controller:latest
 # nerdctl push <swr-registry>/huawei-elb-controller:latest
 ```
 
-Then update `deploy/deployment.yaml` to use `<swr-registry>/huawei-elb-controller:latest` as the container image.
+Then update the image in `deploy/deployment.yaml` (line 21): `image: <swr-registry>/huawei-elb-controller:latest`
 
 3. Apply the manifests:
 
@@ -241,7 +241,6 @@ huawei-elb-controller-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
 ```
 
 Check logs:
-```bash
 kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
