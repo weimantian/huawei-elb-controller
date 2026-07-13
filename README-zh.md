@@ -168,7 +168,8 @@ EOF
 # 4. 通过 Helm 安装
 helm install huawei-elb-controller \
   ./charts/huawei-elb-controller \
-  -f my-values.yaml
+  -f my-values.yaml \
+  -n everest-system
 ```
 
 #### 方式 B：使用原生清单
@@ -479,10 +480,18 @@ kubectl delete loadbalancerconfig <name>
 
 ### 2. 卸载控制器
 
+**先确认安装方式：**
+
+```bash
+# 如果有输出，用 Helm（方式 A）
+helm list -n everest-system | grep huawei-elb
+# 否则用原生清单（方式 B）
+```
+
 #### 方式 A：Helm
 
 ```bash
-helm uninstall huawei-elb-controller
+helm uninstall huawei-elb-controller -n everest-system
 
 # 删除凭据 Secret（Helm 可能会保留它）
 kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev/null
