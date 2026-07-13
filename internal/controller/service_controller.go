@@ -72,10 +72,15 @@ if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
 logger.Info("Service being deleted, cleaning up ACL IP group", "service", svc.Name)
 if ipGroupID := svc.Annotations[aclIDAnnotation]; ipGroupID != "" {
 if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
+if huaweicloud.IsNotFoundError(err) {
+logger.Info("ACL IP group already deleted", "ipGroupID", ipGroupID)
+} else {
 logger.Error(err, "deleting ACL IP group on Service deletion, will retry")
 return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 }
+} else {
 logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
+}
 }
 controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
 if err := r.Update(ctx, svc); err != nil {
