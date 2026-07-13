@@ -338,6 +338,8 @@ spec:
 | `huawei-elb.io/name` | string | `cce-lb-<ns>-<svc>` | Custom ELB name (≤ 64 chars) |
 | `huawei-elb.io/region` | string | Controller region | Override Huawei Cloud region |
 
+> **Important**: Do NOT fill in `kubernetes.io/elb.id`. Binding to an existing ELB causes a port conflict (both primary and replicas Services bind to the same ELB on port 3306). The controller will skip any LBC with `kubernetes.io/elb.id`. Use `huawei-elb.io/*` annotations instead.
+
 > **Note**: `eip-type` is immutable after ELB creation (Huawei Cloud API restriction). To change it, delete and recreate the ELB.
 
 ### ACL Annotations
