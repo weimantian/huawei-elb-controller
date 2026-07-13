@@ -161,6 +161,12 @@ if hasPlan2Annotations(lbc) {
 return ctrl.Result{}, nil
 }
 
+// Skip LBCs with manual elb.id binding (port conflict risk with PXC).
+if getSpecAnnotation(lbc, huaweicloud.AnnotationELBID) != "" {
+logger.Info("LBC has manual elb.id binding, skipping to avoid port conflict", "name", lbc.GetName())
+return ctrl.Result{}, nil
+}
+
 	// If the LBC is not controlled (no huawei-elb.io/vpc-id in spec.annotations),
 	// try to auto-detect VPC/subnet/AZ from cluster nodes. This gives a zero-config
 	// experience on CCE — users just create a LoadBalancerConfig with a name and
