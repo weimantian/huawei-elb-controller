@@ -8,7 +8,7 @@
 
 `huawei-elb-controller` 是一个 Kubernetes 控制器，为 [OpenEverest](https://openeverest.io/documentation/current/)（原 Percona Everest）数据库集群自动创建和管理**华为云 ELB**（弹性负载均衡）实例。
 
-**解决的问题**：OpenEverest 的 `LoadBalancerConfig` CR 可以向 Kubernetes Service 注入 annotation，但不会创建华为云 ELB 本身。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
+**解决的问题**：控制器 watch LoadBalancer 类型的 Service，自动探测 VPC/子网/可用区，注入 autocreate 注解让 CCE 的 CCM 自动创建华为云 ELB。没有这个控制器，你每次都需要在华为云控制台手动创建 ELB、复制其 ID、再粘贴到 CR 中。
 
 **架构**：
 
@@ -27,7 +27,7 @@
 - **LBC 参数模板** —— 手动模式下 LBC 存储带宽/EIP/公网等配置参数，多 Service 独立 ELB
 - **VPC 自动探测** —— 从集群节点自动探测 VPC、子网和可用区
 - **ACL 自动处理** —— 自动将 Service 的 `loadBalancerSourceRanges` 转换为 ELB ACL 规则
-- **kubectl 修改带宽** —— 修改 LBC annotation 后控制器自动调用华为云 API 更新 ELB 带宽
+- **kubectl 修改带宽** —— 自动模式下直接修改 Service annotation，手动模式下修改 LBC annotation，控制器自动调用华为云 API 更新 ELB 带宽
 - **完整生命周期管理** —— ELB 创建通过 CCM autocreate 机制，删除随 Service 自动清理
 - **多区域支持** —— 通过 `huawei-elb.io/region` 注解按集群覆盖区域
 
@@ -65,13 +65,9 @@ Service Reconciler 读取参数 + 探测 VPC/子网/AZ
 CCM 创建独立 ELB → Service 获得 EXTERNAL-IP ✅
 
 参数变更（如修改带宽）：
-改 LBC annotation
-    ↓
-OpenEverest 同步到 Service
-    ↓
-Service Reconciler 调华为云 API 更新 ELB ✅
-```
 
+**手动模式**：改 LBC annotation → OpenEverest 同步到 Service → 控制器调 API
+**自动模式**：直接改 Service annotation → 控制器调 API ✅
 
 ---
 
@@ -115,7 +111,7 @@ kubectl get dbengine -n everest
 - **AK**（Access Key）和 **SK**（Secret Key）—— 在 IAM → 我的凭证 → 访问密钥 中创建
 - **Project ID** —— 在控制台右上角用户名下拉菜单中找到
 
-> ⚠️ **重要**：必须使用**永久** AK/SK（主账号或已授权的 IAM 子用户均可）。**临时 AK/SK**（STS Token）不被支持，因为需要额外的 security token。所需权限：ELB FullAccess、EIP FullAccess、VPC ReadOnly、ECS ReadOnly。
+> ⚠️ **重要**：必须使用**永久** AK/SK（主账号或已授权的 IAM 子用户均可）。**临时 AK/SK**（STS Token）不被支持，因为需要额外的 security token。所需权限：ELB Administrator、EIP Administrator、VPC ReadOnly、ECS ReadOnly。
 
 ---
 
@@ -447,41 +443,38 @@ kubectl get pods -A | grep cloud-controller
 kubectl describe svc <service-name> -n everest
 ```
 
-### LoadBalancerConfig 删除卡住
+### ELB 未随 Service 删除而删除
 
 ```bash
-# 检查 finalizer 是否存在
-kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.finalizers}'
-# 应包含 "huawei-elb.io/finalizer"
+# 检查 Service 是否有正确的 reclaim-policy 注解
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.instance-reclaim-policy}'
+# 应返回 "alwaysDelete"
 
-# 查看控制器日志
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
-
-# 如果 ELB 已在华为云控制台手动删除，
-# 控制器会检测到 404 并自动移除 finalizer。
+# 如果 reclaim-policy 缺失或错误，CCM 不会删除 ELB。
+# 控制器默认将 reclaim-policy 设为 "alwaysDelete"；
+# 如果缺失，说明 Service 可能在控制器启动前创建。
+# 解决方法：删除并重建 Service（或删除数据库集群后重建）。
 ```
+
+> **注意**：ELB 删除由 CCM 通过 `reclaim-policy: alwaysDelete` 处理。删除 Service 后 CCM 自动删除 ELB。控制器不使用 finalizer。
 
 ## 卸载
 
-### 1. 先删除所有 LoadBalancerConfig（重要）
+### 1. 先删除数据库集群
 
-**顺序很重要。** 删除 `LoadBalancerConfig` 会通过 finalizer 触发控制器删除对应的华为云 ELB。如果先卸载控制器，ELB 会成为孤儿资源并**持续计费**（公网 ELB 的 EIP 按小时收费）。
+**顺序很重要。** 删除数据库集群（DBC）后，对应的 Service 会被删除，CCM 通过 `reclaim-policy: alwaysDelete` 自动删除华为云 ELB。如果先卸载控制器，Service 删除后 ELB 会成为孤儿资源并**持续计费**（公网 ELB 的 EIP 按小时收费）。
 
 ```bash
-# 列出所有 LoadBalancerConfig
-kubectl get loadbalancerconfig -A
+# 列出所有数据库集群
+kubectl get dbc -A
 
-# 逐个删除（控制器会删除对应的华为云 ELB）
+# 逐个删除（删除 Service 后 CCM 自动清理 ELB）
+kubectl delete dbc <name> -n <namespace>
+
+# 再删除剩余的 LoadBalancerConfig
+kubectl get loadbalancerconfig -A
 kubectl delete loadbalancerconfig <name>
 ```
-
-在继续之前，查看控制器日志确认 ELB 已删除：
-
-```bash
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=5
-# 等待看到每个 LBC 对应的 "deleted ELB" 日志
-```
-
 > 如果 `LoadBalancerConfig` 带有 `everest.percona.com/in-use-protection` finalizer，说明它仍被某个数据库集群引用。请先删除该数据库（或切换到其他 LBC）。
 
 ### 2. 卸载控制器

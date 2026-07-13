@@ -21,7 +21,7 @@
 - **Manual mode with LBC parameter template** — LBC stores ELB parameters (bandwidth, EIP type, etc.) instead of an ELB ID; each Service gets its own independent ELB with zero port conflicts
 - **Auto-detection of VPC/subnet/AZ** — automatically detects network topology from cluster nodes
 - **ACL auto-handling** — `loadBalancerSourceRanges` → IP groups on the ELB
-- **ELB parameter updates** — `kubectl annotate` on the LBC triggers live ELB parameter updates via Huawei Cloud API
+- **ELB parameter updates** — `kubectl annotate` on the Service triggers live ELB parameter updates via Huawei Cloud API (manual mode updates go through the LBC)
 - **Default ELB**: public, 10 Mbit/s, traffic billing, 5_bgp
 - **Full lifecycle management** — ELB creation/deletion via CCM, parameter updates via controller API calls
 - **UI-friendly** — works seamlessly with the OpenEverest web UI; no `kubectl` required for end-to-end setup
@@ -56,8 +56,14 @@ LBCs function as **parameter templates** (like EKS/GKE), not as instance referen
 ### Parameter updates
 
 ```
+For **manual mode**:
 User modifies LBC annotations (e.g., bandwidth 10M → 20M)
   → OpenEverest syncs to Service
+  → Service Reconciler detects change
+  → Calls Huawei Cloud ELB API to update parameters ✅
+
+For **auto mode**:
+  Annotate the Service directly
   → Service Reconciler detects change
   → Calls Huawei Cloud ELB API to update parameters ✅
 ```
@@ -109,7 +115,7 @@ kubectl get dbengine -n everest
 - **AK** (Access Key) and **SK** (Secret Key) — create at: IAM → My Credentials → Access Keys
 - **Project ID** — found in the console top-right dropdown under your username
 
-> ⚠️ **Important**: Must use **permanent** AK/SK (main account or IAM user with sufficient permissions). **Temporary AK/SK** (STS tokens) are not supported because they require a security token the controller does not handle. Required permissions: ELB FullAccess, EIP FullAccess, VPC ReadOnly, ECS ReadOnly.
+> ⚠️ **Important**: Must use **permanent** AK/SK (main account or IAM user with sufficient permissions). **Temporary AK/SK** (STS tokens) are not supported because they require a security token the controller does not handle. Required permissions: ELB Administrator, EIP Administrator, VPC ReadOnly, ECS ReadOnly.
 
 ---
 
@@ -162,11 +168,11 @@ credentials:
 
 # Default ELB parameters used in auto mode (no LBC)
 defaults:
-  elb:
-    type: public
-    bandwidth: 10
-    bandwidthChargeMode: traffic
-    eipType: 5_bgp
+  public: true
+  bandwidthSize: 10
+  bandwidthChargeMode: "traffic"
+  eipType: "5_bgp"
+  bandwidthShareType: "PER"
 
 namespace: everest-system
 EOF
@@ -300,7 +306,7 @@ When no LBC is used (UI: "No configuration"), the Service Reconciler applies the
 | Billing mode | `traffic` | Pay-per-traffic |
 | EIP type | `5_bgp` | BGP multi-line |
 
-To customize defaults, set `defaults.elb.*` in `my-values.yaml` or set `elb.default-*` environment variables on the controller deployment.
+To customize defaults, set `defaults.*` in `my-values.yaml`.
 
 > **Note**: The Service Reconciler auto-detects VPC, subnet, and availability zones from cluster node metadata. No manual configuration is needed.
 
@@ -365,10 +371,11 @@ Control ELB access with `loadBalancerSourceRanges` on the Service, or directly v
 | `credentials.region` | `cn-north-4` | Huawei Cloud region |
 | `existingSecret` | `""` | Use an existing Secret (overrides credentials) |
 | `namespace` | `everest-system` | Deployment namespace |
-| `defaults.elb.type` | `public` | Default ELB type for auto mode |
-| `defaults.elb.bandwidth` | `10` | Default EIP bandwidth (Mbit/s) |
-| `defaults.elb.bandwidthChargeMode` | `traffic` | Default billing mode |
-| `defaults.elb.eipType` | `5_bgp` | Default EIP type |
+| `defaults.public` | `true` | Default ELB type for auto mode (public/internal) |
+| `defaults.bandwidthSize` | `10` | Default EIP bandwidth (Mbit/s) |
+| `defaults.bandwidthChargeMode` | `traffic` | Default billing mode |
+| `defaults.eipType` | `5_bgp` | Default EIP type |
+| `defaults.bandwidthShareType` | `PER` | Default bandwidth share type |
 | `resources.requests.cpu` | `100m` | CPU request |
 | `resources.requests.memory` | `128Mi` | Memory request |
 | `resources.limits.cpu` | `500m` | CPU limit |
@@ -424,21 +431,20 @@ kubectl wait svc <service-name> -n everest \
   --timeout=120s
 ```
 
-### LoadBalancerConfig Deletion Stuck
+### ELB Not Deleted When Service Is Deleted
 
 ```bash
-# Check if finalizer exists
-kubectl get loadbalancerconfig <name> -o jsonpath='{.metadata.finalizers}'
-# Should include "huawei-elb.io/finalizer"
+# Check that the Service has the correct reclaim-policy annotation
+kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.kubernetes\.io/elb\.instance-reclaim-policy}'
+# Should return "alwaysDelete"
 
-# Check controller logs
-kubectl logs -n everest-system deployment/huawei-elb-controller --tail=20
-
-# If the ELB was manually deleted in Huawei Cloud console,
-# the controller will detect the 404 and remove the finalizer automatically.
+# If reclaim-policy is missing or wrong, CCM will not delete the ELB.
+# The controller sets reclaim-policy to "alwaysDelete" by default;
+# if it's missing, the Service may have been created before the controller was running.
+# Fix: delete and recreate the Service (or delete the database cluster and recreate it).
 ```
 
-> **Note**: ELB deletion is handled by CCM via `reclaim-policy: alwaysDelete`. No finalizer is needed — deleting the Service triggers CCM to delete the ELB automatically.
+> **Note**: ELB deletion is handled by CCM via `reclaim-policy: alwaysDelete`. Deleting the Service triggers CCM to delete the ELB automatically. The controller does not use finalizers.
 
 ## Uninstall
 
