@@ -256,23 +256,29 @@ ok  internal/huaweicloud  2.002s  (13 tests)
 | 3 | 注解 | acl-status=on, acl-type=white, elb.id=3dc07484 |
 | 4 | EXTERNAL-IP | primary: 120.46.221.33 / replicas: 121.36.97.223 |
 
-### 测试 8：事后关联 LBC ⏳
+### 测试 8：事后关联 LBC ⚠️ 不可行
 
 | 步骤 | 操作 | 结果 |
 |------|------|------|
-| 1 | patch DBC loadBalancerConfigName | DBC 状态 initializing，OpenEverest 未同步注解 |
-| 2 | elb.id 是否保留 | ✅ 未覆盖，仍为 3dc07484 |
-| 3 | LBC 注解是否同步 | ⏳ 需 DBC ready 后再验证 |
+| 1 | 创建 LBC 参数模板 (bandwidth-size=15) | LBC Reconciler 自动创建新 ELB → 写 elb.id |
+| 2 | patch DBC loadBalancerConfigName → test-post-link | OpenEverest 同步 annotations 到 PXC CR ✅ |
+| 3 | PXC CR exposePrimary.annotations | bandwidth-size=15 ✅ / elb.id=新值（807814a5）❌ |
+| **结论** | **不可行** | LBC Reconciler 仍会对新 LBC 自动建 ELB，导致原 ELB 被替换。自动模式调参用 `kubectl annotate svc` |
 
 ### 测试 9：LBC 参数模板 + 旧 elb.id 共存 ⏳
 
-| 步骤 | 操作 | 结果 |
-|------|------|------|
-| 1 | 创建 LBC（含 huawei-elb.io/* + kubernetes.io/elb.id） | 待创建对应 DBC 后验证 |
+暂未测试（需停用 LBC Reconciler 或使用预建 ELB 的 LBC）
 
-### 修复的 Bug
+---
+
+## 修复的 Bug
 
 | Bug | 修复 |
 |-----|------|
 | `hasELBID(svc) && !hasAutocreate(svc)` 跳过逻辑 | CCM 写 elb.id 后 Service Reconciler 永久跳过，导致 update 路径失效 |
+
+---
+
+## 总结
+
 方案 2（Service Reconciler）在 CCE 1.35.3 集群上功能正确，实现了与 EKS/GKE 对等的"创建数据库即获得 ELB"体验。存量系统不受影响。
