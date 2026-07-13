@@ -34,6 +34,7 @@ const (
 	reclaimPolicyAnnotation   = "kubernetes.io/elb.instance-reclaim-policy"
 	serviceRequeue            = 5 * time.Minute
 serviceRetryRequeue       = 10 * time.Second
+serviceDeleteRetryRequeue = 60 * time.Second
 aclCleanupFinalizer        = "huawei-elb.io/acl-cleanup"
 
 aclIDAnnotation     = "kubernetes.io/elb.acl-id"
@@ -76,7 +77,7 @@ if huaweicloud.IsNotFoundError(err) {
 logger.Info("ACL IP group already deleted", "ipGroupID", ipGroupID)
 } else {
 logger.Error(err, "deleting ACL IP group on Service deletion, will retry")
-return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+return ctrl.Result{RequeueAfter: serviceDeleteRetryRequeue}, nil
 }
 } else {
 logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
