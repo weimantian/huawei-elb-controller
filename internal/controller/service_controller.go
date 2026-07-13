@@ -69,10 +69,10 @@ if !svc.DeletionTimestamp.IsZero() {
 logger.Info("Service being deleted, cleaning up ACL IP group", "service", svc.Name)
 if ipGroupID := svc.Annotations[aclIDAnnotation]; ipGroupID != "" {
 if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
-logger.Error(err, "deleting ACL IP group on Service deletion")
-} else {
-logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
+logger.Error(err, "deleting ACL IP group on Service deletion, will retry")
+return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 }
+logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
 }
 // ELB cleanup handled by CCM via reclaim-policy
 return ctrl.Result{}, nil
