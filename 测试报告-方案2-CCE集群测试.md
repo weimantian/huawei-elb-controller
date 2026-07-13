@@ -237,7 +237,14 @@ ok  internal/huaweicloud  2.002s  (13 tests)
 - go build / go vet 无警告 ✅
 
 | 浏览器 UI 端到端测试 | ✅ admin/Admin@123456 登录，创建 mysql-sz3，选择 No configuration，primary + replicas 均获外部 IP |
-| ELB 带宽更新 | ⏳ 代码已实现（EIP v2 API），CCE 集群冻结后补测 |
 
+### ⏳ 待补测（CCE 集群解冻后）
+
+| # | 测试项 | 操作 | 预期 |
+|---|--------|------|------|
+| 1 | **ELB 参数更新（kubectl）** | `kubectl annotate svc mysql-xx-haproxy huawei-elb.io/bandwidth-size=20 --overwrite` | Service Reconciler 检测变化 → reconcileUpdate → 调 EIP API 更新带宽 |
+| 2 | **组合场景：UI 创建 + sourceRanges** | UI 创建 DBC，External Access 选 LoadBalancer，Source Range 填入 CIDR，LBC 选 No configuration | OpenEverest 传播 sourceRanges 到 Service → 创建 IP 组 → acl-* 注入 → CCM 绑定 |
+| 3 | **事后关联 LBC** | kubectl 创建 LBC 参数模板 + patch DBC `loadBalancerConfigName` | OpenEverest 同步注解 → Service Reconciler update 路径触发，不破坏已有 elb.id |
+| 4 | **LBC 参数模板含 elb.id 存量兼容** | LBC 设 `huawei-elb.io/*` + 旧 `kubernetes.io/elb.id` 同时存在 | Service Reconciler 跳过（hasELBID），走 CCM 原生绑定 |
 ### 总结
 方案 2（Service Reconciler）在 CCE 1.35.3 集群上功能正确，实现了与 EKS/GKE 对等的"创建数据库即获得 ELB"体验。存量系统不受影响。
