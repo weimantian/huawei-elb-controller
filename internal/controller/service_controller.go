@@ -1,24 +1,24 @@
 package controller
 
 import (
-"context"
-"encoding/json"
-"net/netip"
-"sort"
-"strconv"
-"time"
+	"context"
+	"encoding/json"
+	"net/netip"
+	"sort"
+	"strconv"
+	"time"
 
-"github.com/go-logr/logr"
-elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
-corev1 "k8s.io/api/core/v1"
-ctrl "sigs.k8s.io/controller-runtime"
-"sigs.k8s.io/controller-runtime/pkg/client"
-"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-"sigs.k8s.io/controller-runtime/pkg/event"
-"sigs.k8s.io/controller-runtime/pkg/log"
-"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"github.com/go-logr/logr"
+	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
+	corev1 "k8s.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
+	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
 
 type ServiceReconciler struct {
@@ -33,10 +33,10 @@ const (
 	elbClassAnnotation        = "kubernetes.io/elb.class"
 	reclaimPolicyAnnotation   = "kubernetes.io/elb.instance-reclaim-policy"
 	serviceRequeue            = 5 * time.Minute
-serviceRetryRequeue       = 10 * time.Second
-aclCleanupFinalizer        = "huawei-elb.io/acl-cleanup"
+	serviceRetryRequeue       = 10 * time.Second
+	aclCleanupFinalizer       = "huawei-elb.io/acl-cleanup"
 
-aclIDAnnotation     = "kubernetes.io/elb.acl-id"
+	aclIDAnnotation     = "kubernetes.io/elb.acl-id"
 	aclStatusAnnotation = "kubernetes.io/elb.acl-status"
 	aclTypeAnnotation   = "kubernetes.io/elb.acl-type"
 	sourceRangesKey     = "source-ranges"
@@ -54,10 +54,35 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
+	// Deletion cleanup takes priority and only depends on finalizer presence,
+	// not on selection labels (which may be removed during teardown).
+	if !svc.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
+			logger.Info("Service being deleted, cleaning up ACL IP group", "service", svc.Name)
+			if ipGroupID := svc.Annotations[aclIDAnnotation]; ipGroupID != "" {
+				if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
+					if huaweicloud.IsNotFoundError(err) {
+						logger.Info("ACL IP group already deleted", "ipGroupID", ipGroupID)
+					} else {
+						logger.Error(err, "deleting ACL IP group on Service deletion, will retry")
+						return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+					}
+				} else {
+					logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
+				}
+			}
+			controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
+			if err := r.Update(ctx, svc); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
 	if hasELBID(svc) && !hasAutocreate(svc) {
-// Skip Services with elb.id that were NOT created by autocreate (legacy CCM binding)
-return ctrl.Result{}, nil
-}
+		// Skip Services with elb.id that were NOT created by autocreate (legacy CCM binding)
+		return ctrl.Result{}, nil
+	}
 
 	if hasForeignCloudServiceAnnotations(svc) {
 		return ctrl.Result{}, nil
@@ -66,29 +91,6 @@ return ctrl.Result{}, nil
 	if !isOpenEverestService(svc) {
 		return ctrl.Result{}, nil
 	}
-
-if !svc.DeletionTimestamp.IsZero() {
-if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
-logger.Info("Service being deleted, cleaning up ACL IP group", "service", svc.Name)
-if ipGroupID := svc.Annotations[aclIDAnnotation]; ipGroupID != "" {
-if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
-if huaweicloud.IsNotFoundError(err) {
-logger.Info("ACL IP group already deleted", "ipGroupID", ipGroupID)
-} else {
-logger.Error(err, "deleting ACL IP group on Service deletion, will retry")
-return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-}
-} else {
-logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
-}
-}
-controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
-if err := r.Update(ctx, svc); err != nil {
-return ctrl.Result{}, err
-}
-}
-return ctrl.Result{}, nil
-}
 
 	logger.Info("Reconciling Service", "name", svc.Name, "namespace", svc.Namespace)
 
@@ -122,10 +124,10 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	svc.Annotations[elbClassAnnotation] = "union"
 	svc.Annotations[reclaimPolicyAnnotation] = "alwaysDelete"
 
-// ACL handling
-sourceRanges := svc.Spec.LoadBalancerSourceRanges
-filteredCIDRs := filterValidCIDRs(logger, sourceRanges)
-if len(filteredCIDRs) > 0 {
+	// ACL handling
+	sourceRanges := svc.Spec.LoadBalancerSourceRanges
+	filteredCIDRs := filterValidCIDRs(logger, sourceRanges)
+	if len(filteredCIDRs) > 0 {
 		ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 		ipGroupID, err := findOrCreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
 		if err != nil {
@@ -136,11 +138,11 @@ if len(filteredCIDRs) > 0 {
 		svc.Annotations[aclStatusAnnotation] = "on"
 		svc.Annotations[aclTypeAnnotation] = "white"
 		controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
-} else {
-svc.Annotations[aclStatusAnnotation] = "off"
-}
+	} else {
+		svc.Annotations[aclStatusAnnotation] = "off"
+	}
 
-compositeParams := make(map[string]string)
+	compositeParams := make(map[string]string)
 	for k, v := range lbcParams {
 		compositeParams[k] = v
 	}
@@ -185,23 +187,31 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 			lastSourceRanges = nil
 		}
 	}
-currentSourceRanges := svc.Spec.LoadBalancerSourceRanges
-validCurrentSourceRanges := filterValidCIDRs(logger, currentSourceRanges)
-aclChanged := !sourceRangesEqual(lastSourceRanges, validCurrentSourceRanges)
-if aclChanged {
-			if len(validCurrentSourceRanges) == 0 {
-				// Source ranges cleared: delete old IP group and disable ACL
-				if oldID := svc.Annotations[aclIDAnnotation]; oldID != "" {
-					if err := huaweicloud.DeleteIPGroup(r.ELBClient, oldID); err != nil {
-						logger.Error(err, "deleting old IP group for ACL")
+	currentSourceRanges := svc.Spec.LoadBalancerSourceRanges
+	validCurrentSourceRanges := filterValidCIDRs(logger, currentSourceRanges)
+	aclChanged := !sourceRangesEqual(lastSourceRanges, validCurrentSourceRanges)
+	if aclChanged {
+		if len(validCurrentSourceRanges) == 0 {
+			// Source ranges cleared: delete old IP group and disable ACL
+			if oldID := svc.Annotations[aclIDAnnotation]; oldID != "" {
+				if err := huaweicloud.DeleteIPGroup(r.ELBClient, oldID); err != nil {
+					if huaweicloud.IsNotFoundError(err) {
+						logger.Info("ACL IP group already deleted", "ipGroupID", oldID)
+					} else {
+						logger.Error(err, "deleting old IP group for ACL, will retry")
+						return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 					}
+				} else {
+					logger.Info("ACL IP group deleted", "ipGroupID", oldID)
 				}
-				// Always clean up stale ACL annotations
-				delete(svc.Annotations, aclIDAnnotation)
-				delete(svc.Annotations, aclTypeAnnotation)
-				svc.Annotations[aclStatusAnnotation] = "off"
-} else {
-ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
+			}
+			// Clean up stale ACL annotations and finalizer
+			delete(svc.Annotations, aclIDAnnotation)
+			delete(svc.Annotations, aclTypeAnnotation)
+			svc.Annotations[aclStatusAnnotation] = "off"
+			controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
+		} else {
+			ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 			ipGroupID := svc.Annotations[aclIDAnnotation]
 			if ipGroupID == "" {
 				var findErr error
@@ -226,6 +236,7 @@ ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 					svc.Annotations[aclIDAnnotation] = newID
 					svc.Annotations[aclStatusAnnotation] = "on"
 					svc.Annotations[aclTypeAnnotation] = "white"
+					controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 				}
 			}
 		}
@@ -244,9 +255,9 @@ ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 		if elbID == "" {
 			elbName := "cce-lb-" + svc.Namespace + "-" + svc.Name
 			info, err := huaweicloud.FindELBByName(r.ELBClient, elbName)
-if err != nil {
-logger.Error(err, "finding ELB by name")
-}
+			if err != nil {
+				logger.Error(err, "finding ELB by name")
+			}
 			if info != nil {
 				elbID = info.ID
 			}
@@ -259,11 +270,11 @@ logger.Error(err, "finding ELB by name")
 				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 			}
 			logger.Info("ELB updated", "elbID", elbID)
-		}
 		} else {
 			logger.Info("ELB ID not found, will retry", "service", svc.Name)
 			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 		}
+	}
 
 	original := svc.DeepCopy()
 	compositeParams := make(map[string]string)
@@ -313,9 +324,9 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}
 			return shouldReconcileService(svcOld) || shouldReconcileService(svcNew)
 		},
-DeleteFunc: func(e event.DeleteEvent) bool {
+		DeleteFunc: func(e event.DeleteEvent) bool {
 			return true
-},
+		},
 		GenericFunc: func(e event.GenericEvent) bool {
 			svc, ok := e.Object.(*corev1.Service)
 			if !ok {
@@ -364,21 +375,20 @@ func buildUpdateOption(current, lastKnown map[string]string) huaweicloud.UpdateE
 	return opt
 }
 
-
 // filterValidCIDRs filters out invalid CIDR prefixes and logs skipped entries.
 func filterValidCIDRs(logger logr.Logger, cidrs []string) []string {
-if len(cidrs) == 0 {
-return nil
-}
-var valid []string
-for _, cidr := range cidrs {
-if _, err := netip.ParsePrefix(cidr); err != nil {
-logger.Info("skipping invalid source range CIDR", "cidr", cidr, "error", err)
-} else {
-valid = append(valid, cidr)
-}
-}
-return valid
+	if len(cidrs) == 0 {
+		return nil
+	}
+	var valid []string
+	for _, cidr := range cidrs {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			logger.Info("skipping invalid source range CIDR", "cidr", cidr, "error", err)
+		} else {
+			valid = append(valid, cidr)
+		}
+	}
+	return valid
 }
 
 func sourceRangesEqual(a, b []string) bool {

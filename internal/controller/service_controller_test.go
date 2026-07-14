@@ -398,8 +398,8 @@ func TestServiceReconciler_UpdatePath_ParamsChangedWithMock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcileUpdate returned error: %v", err)
 	}
-	if result.RequeueAfter != serviceRequeue {
-		t.Errorf("expected requeue after %v, got %v", serviceRequeue, result.RequeueAfter)
+	if result.RequeueAfter != serviceRetryRequeue {
+		t.Errorf("expected requeue after %v (ELB not found, fast retry), got %v", serviceRetryRequeue, result.RequeueAfter)
 	}
 }
 
