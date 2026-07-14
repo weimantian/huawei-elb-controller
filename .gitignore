@@ -21,3 +21,9 @@ test-evidence
 
 # Local-only docs (restored from git history, not published)
 docs/
+
+# Local test config (contains AK/SK, do not commit)
+my-values.yaml
+
+# Playwright MCP artifacts
+.playwright-mcp/
