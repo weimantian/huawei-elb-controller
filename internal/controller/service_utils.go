@@ -6,9 +6,15 @@ import (
 )
 
 const (
-	serviceLabelManagedBy      = "app.kubernetes.io/managed-by"
-	serviceLabelManagedByValue = "percona-xtradb-cluster-operator"
+serviceLabelManagedBy = "app.kubernetes.io/managed-by"
 )
+
+// openeverestOperators lists the managed-by values for all OpenEverest engine operators.
+var openeverestOperators = map[string]bool{
+"percona-xtradb-cluster-operator":       true, // MySQL / PXC
+"percona-server-mongodb-operator":       true, // MongoDB / PSMDB
+"percona-postgresql-operator":           true, // PostgreSQL
+}
 
 func isLoadBalancerService(svc *corev1.Service) bool {
 	return svc.Spec.Type == corev1.ServiceTypeLoadBalancer
@@ -59,11 +65,11 @@ return params
 }
 
 func isOpenEverestService(svc *corev1.Service) bool {
-	labels := svc.GetLabels()
-	if labels == nil {
-		return false
-	}
-	return labels[serviceLabelManagedBy] == serviceLabelManagedByValue
+labels := svc.GetLabels()
+if labels == nil {
+return false
+}
+	return openeverestOperators[labels[serviceLabelManagedBy]]
 }
 
 func hasForeignCloudServiceAnnotations(svc *corev1.Service) bool {
