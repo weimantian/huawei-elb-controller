@@ -9,15 +9,15 @@ import (
 
 func TestBuildAutocreateConfig_PublicELB(t *testing.T) {
 	params := map[string]string{
-		"huawei-elb.io/public":               "true",
-		"huawei-elb.io/bandwidth-size":       "20",
+		"huawei-elb.io/public":                "true",
+		"huawei-elb.io/bandwidth-size":        "20",
 		"huawei-elb.io/bandwidth-charge-mode": "bandwidth",
-		"huawei-elb.io/eip-type":             "5_sbgp",
-		"huawei-elb.io/bandwidth-share-type": "WHOLE",
-		"huawei-elb.io/name":                 "my-elb",
+		"huawei-elb.io/eip-type":              "5_sbgp",
+		"huawei-elb.io/bandwidth-share-type":  "WHOLE",
+		"huawei-elb.io/name":                  "my-elb",
 	}
 
-	cfg := huaweicloud.BuildAutocreateConfig(params, "vpc-123", "subnet-456", []string{"az1", "az2"}, "test-service")
+	cfg := huaweicloud.BuildAutocreateConfig(params, "subnet-456", []string{"az1", "az2"}, "test-service")
 
 	if cfg.Type != "public" {
 		t.Errorf("expected Type=public, got %s", cfg.Type)
@@ -50,7 +50,7 @@ func TestBuildAutocreateConfig_InnerELB(t *testing.T) {
 		"huawei-elb.io/public": "false",
 	}
 
-	cfg := huaweicloud.BuildAutocreateConfig(params, "vpc-123", "subnet-456", []string{"az1"}, "test-service")
+	cfg := huaweicloud.BuildAutocreateConfig(params, "subnet-456", []string{"az1"}, "test-service")
 
 	if cfg.Type != "" {
 		t.Errorf("expected Type empty for inner ELB, got %s", cfg.Type)
@@ -64,7 +64,7 @@ func TestBuildAutocreateConfig_InnerELB(t *testing.T) {
 }
 
 func TestBuildAutocreateConfig_Defaults(t *testing.T) {
-	cfg := huaweicloud.BuildAutocreateConfig(nil, "vpc-123", "subnet-456", nil, "default-svc")
+	cfg := huaweicloud.BuildAutocreateConfig(nil, "subnet-456", nil, "default-svc")
 
 	if cfg.Type != "public" {
 		t.Errorf("expected Type=public for empty params, got %s", cfg.Type)
@@ -88,7 +88,7 @@ func TestBuildAutocreateJSON(t *testing.T) {
 		"huawei-elb.io/public": "true",
 	}
 
-	jsonStr, err := huaweicloud.BuildAutocreateJSON(params, "vpc-1", "subnet-1", []string{"az-a"}, "json-test")
+	jsonStr, err := huaweicloud.BuildAutocreateJSON(params, "subnet-1", []string{"az-a"}, "json-test")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -107,7 +107,7 @@ func TestBuildAutocreateJSON(t *testing.T) {
 }
 
 func TestDefaultAutocreateConfig(t *testing.T) {
-	cfg := huaweicloud.DefaultAutocreateConfig("vpc-x", "subnet-y", []string{"az-z"}, "default-svc")
+	cfg := huaweicloud.DefaultAutocreateConfig("subnet-y", []string{"az-z"}, "default-svc")
 
 	if cfg.Type != "public" {
 		t.Errorf("expected Type=public, got %s", cfg.Type)

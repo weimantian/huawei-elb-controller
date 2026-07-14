@@ -283,7 +283,7 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 		if existing != nil {
 			logger.Info("Found existing ELB by name, recording ID", "elbID", existing.ID)
 			if err := r.setSpecAnnotation(ctx, lbc, huaweicloud.AnnotationELBID, existing.ID); err != nil {
-				return ctrl.Result{}, err
+				return r.handleTransientError(ctx, lbc, logger, fmt.Errorf("writing ELB ID after idempotent find: %w", err))
 			}
 			return ctrl.Result{RequeueAfter: provisioningRequeue}, nil
 		}
@@ -320,7 +320,7 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 			latest.SetAnnotations(anns)
 			return nil
 		}); err != nil {
-			return ctrl.Result{}, fmt.Errorf("writing ELB ID: %w", err)
+			return r.handleTransientError(ctx, lbc, logger, fmt.Errorf("writing ELB ID: %w", err))
 		}
 		return ctrl.Result{RequeueAfter: provisioningRequeue}, nil
 	}
@@ -359,7 +359,7 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 		latest.SetAnnotations(anns)
 		return nil
 	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating ELB status annotations: %w", err)
+		return r.handleTransientError(ctx, lbc, logger, fmt.Errorf("updating ELB status annotations: %w", err))
 	}
 
 	if info.ProvisioningStatus == "ACTIVE" {
@@ -530,8 +530,10 @@ func isUnconfiguredLBC(lbc *unstructured.Unstructured) bool {
 func (r *LoadBalancerConfigReconciler) autoDetectParams(
 	ctx context.Context, logger logr.Logger, lbc *unstructured.Unstructured,
 ) (vpcID, subnetID string, azs []string, err error) {
-	// 1. If the user manually specified vpc-id, use those values directly and
-	// skip auto-detection. This makes manual overrides hot-reloadable.
+	// Defensive: if the user manually specified vpc-id in spec.annotations,
+	// use those values directly. This is typically unreachable because
+	// isControlled() returns true when vpc-id is in spec.annotations, but
+	// kept as a safety net for future callers.
 	if manualVPC := getSpecAnnotation(lbc, vpcIDAnnotation); manualVPC != "" {
 		manualSubnet := getSpecAnnotation(lbc, subnetIDAnnotation)
 		manualAZs := strings.Split(getSpecAnnotation(lbc, availabilityZonesAnnotation), ",")

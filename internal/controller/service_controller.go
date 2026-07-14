@@ -91,7 +91,6 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
 				}
 			}
-			controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
 			if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 				latest := &corev1.Service{}
 				if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
@@ -131,13 +130,13 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Logger, svc *corev1.Service) (ctrl.Result, error) {
 	lbcParams := getLBCParams(svc)
 
-	vpcID, subnetID, azs, err := r.NetworkDetector.Detect(ctx, r.Client)
+	_, subnetID, azs, err := r.NetworkDetector.Detect(ctx, r.Client)
 	if err != nil {
 		logger.Error(err, "network detection failed")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
-	autocreateJSON, err := huaweicloud.BuildAutocreateJSON(lbcParams, vpcID, subnetID, azs, svc.Namespace+"-"+svc.Name)
+	autocreateJSON, err := huaweicloud.BuildAutocreateJSON(lbcParams, subnetID, azs, svc.Namespace+"-"+svc.Name)
 	if err != nil {
 		logger.Error(err, "building autocreate JSON failed")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
@@ -295,6 +294,11 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 
 		if elbID != "" {
 			opt := buildUpdateOption(currentParams, lastKnownParams)
+			// Warn about unsupported parameter changes (M-NEW-1 fix)
+			if currentParams[huaweicloud.LBCPublicAnnotation] != lastKnownParams[huaweicloud.LBCPublicAnnotation] {
+				logger.Info("public/internal type change is not supported by UpdateELB; requires ELB recreation",
+					"service", svc.Name)
+			}
 			if err := huaweicloud.UpdateELB(r.ELBClient, elbID, opt, r.Creds); err != nil {
 				logger.Error(err, "updating ELB", "elbID", elbID)
 				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
@@ -329,7 +333,22 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		if latest.Annotations == nil {
 			latest.Annotations = make(map[string]string)
 		}
+		// Persist lastKnownParams
 		latest.Annotations[lastKnownParamsAnnotation] = svc.Annotations[lastKnownParamsAnnotation]
+		// Persist ACL annotation changes (C-NEW-1 fix: previously lost by patchWithRetry)
+		for _, key := range []string{aclIDAnnotation, aclStatusAnnotation, aclTypeAnnotation} {
+			if v, ok := svc.Annotations[key]; ok {
+				latest.Annotations[key] = v
+			} else {
+				delete(latest.Annotations, key)
+			}
+		}
+		// Persist finalizer changes
+		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
+			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
+		} else {
+			controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
+		}
 		return nil
 	}); err != nil {
 		logger.Error(err, "patching last-known params")
@@ -360,7 +379,11 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return shouldReconcileService(svcOld) || shouldReconcileService(svcNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
-			return true
+			svc, ok := e.Object.(*corev1.Service)
+			if !ok {
+				return false
+			}
+			return controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer)
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
 			svc, ok := e.Object.(*corev1.Service)

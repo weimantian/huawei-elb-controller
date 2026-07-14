@@ -226,12 +226,12 @@ func buildTags(tags map[string]string) []model.Tag {
 func buildPublicIP(opt CreateELBOption) *model.CreateLoadBalancerPublicIpOption {
 	networkType := opt.PublicIPNetworkType
 	if networkType == "" {
-		networkType = "5_bgp"
+		networkType = DefaultEIPType
 	}
 
 	bwSize := opt.BandwidthSize
 	if bwSize == 0 {
-		bwSize = 10
+		bwSize = DefaultBandwidthSize
 	}
 
 	bandwidthName := opt.Name + "-bw"
@@ -292,6 +292,9 @@ func updateELBBandwidth(elbID string, size int32, chargeMode string, creds *Cred
 }
 
 // getBandwidthID retrieves the bandwidth ID for an ELB's EIP.
+// NOTE: This makes a ShowELB API call to get the EipID. If the caller already
+// has ELB info, the call could be avoided, but UpdateELB's signature only takes
+// elbID. Acceptable since bandwidth updates are infrequent.
 func getBandwidthID(eipClient *eipv2.EipClient, elbClient *elb.ElbClient, elbID string) (string, error) {
 	info, err := ShowELB(elbClient, elbID)
 	if err != nil {
@@ -319,11 +322,12 @@ func getBandwidthID(eipClient *eipv2.EipClient, elbClient *elb.ElbClient, elbID 
 }
 
 // eipResolveChargeMode converts a string to the EIP v2 charge mode enum.
+// Defaults to TRAFFIC (same as resolveChargeMode) for consistency.
 func eipResolveChargeMode(mode string) eipv2model.UpdateBandwidthOptionChargeMode {
-	if strings.EqualFold(mode, "traffic") {
-		return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().TRAFFIC
+	if strings.EqualFold(mode, "bandwidth") {
+		return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().BANDWIDTH
 	}
-	return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().BANDWIDTH
+	return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().TRAFFIC
 }
 
 // AnnotationELBID is the Kubernetes annotation for CCE ELB integration.
@@ -395,11 +399,10 @@ func DeleteIPGroup(client *elb.ElbClient, ipGroupID string) error {
 }
 
 // FindIPGroupByName lists IP groups by name and returns the first match.
-// Uses a limit of 200 to handle up to that many IP groups.
 // Returns ("", nil) if no IP group with the given name exists.
 func FindIPGroupByName(client *elb.ElbClient, name string) (string, error) {
 	names := []string{name}
-	limit := int32(200)
+	limit := int32(ipGroupListLimit)
 	req := model.ListIpGroupsRequest{
 		Name:  &names,
 		Limit: &limit,
