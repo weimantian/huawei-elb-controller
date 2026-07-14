@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
-	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/model"
 	eipv2 "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2"
 	eipv2model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2/model"
+	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
+	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/model"
 )
 
 // ELBInfo holds essential information about a Huawei Cloud ELB.
@@ -258,6 +258,7 @@ func resolveChargeMode(mode string) model.CreateLoadBalancerBandwidthOptionCharg
 	}
 	return model.GetCreateLoadBalancerBandwidthOptionChargeModeEnum().TRAFFIC
 }
+
 // updateELBBandwidth updates the bandwidth of an ELB's EIP using the EIP v2 API.
 func updateELBBandwidth(elbID string, size int32, chargeMode string, creds *Credentials, elbClient *elb.ElbClient) error {
 	eipClient, err := NewEIPClient(creds)
@@ -270,14 +271,17 @@ func updateELBBandwidth(elbID string, size int32, chargeMode string, creds *Cred
 		return fmt.Errorf("getting bandwidth ID: %w", err)
 	}
 
-	chargeModeEnum := eipResolveChargeMode(chargeMode)
+	bandwidthOpt := &eipv2model.UpdateBandwidthOption{
+		Size: &size,
+	}
+	if chargeMode != "" {
+		chargeModeEnum := eipResolveChargeMode(chargeMode)
+		bandwidthOpt.ChargeMode = &chargeModeEnum
+	}
 	req := eipv2model.UpdateBandwidthRequest{
 		BandwidthId: bandwidthID,
 		Body: &eipv2model.UpdateBandwidthRequestBody{
-			Bandwidth: &eipv2model.UpdateBandwidthOption{
-				Size:       &size,
-				ChargeMode: &chargeModeEnum,
-			},
+			Bandwidth: bandwidthOpt,
 		},
 	}
 
@@ -394,12 +398,12 @@ func DeleteIPGroup(client *elb.ElbClient, ipGroupID string) error {
 // Uses a limit of 200 to handle up to that many IP groups.
 // Returns ("", nil) if no IP group with the given name exists.
 func FindIPGroupByName(client *elb.ElbClient, name string) (string, error) {
-names := []string{name}
-limit := int32(200)
-req := model.ListIpGroupsRequest{
-Name:  &names,
-Limit: &limit,
-}
+	names := []string{name}
+	limit := int32(200)
+	req := model.ListIpGroupsRequest{
+		Name:  &names,
+		Limit: &limit,
+	}
 	resp, err := client.ListIpGroups(&req)
 	if err != nil {
 		return "", fmt.Errorf("listing IP groups by name %q: %w", name, err)

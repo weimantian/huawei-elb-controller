@@ -116,7 +116,6 @@ type LoadBalancerConfigReconciler struct {
 	NetworkDetector *huaweicloud.NetworkDetector
 }
 
-
 // getELBClient returns the ELB client for the given LoadBalancerConfig.
 // If the CR specifies a different region via the "huawei-elb.io/region"
 // annotation, a new client is created for that region (using the same
@@ -153,25 +152,28 @@ func (r *LoadBalancerConfigReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return r.reconcileDelete(ctx, logger, lbc)
 		}
 		return ctrl.Result{}, nil
-}
+	}
 
-// Skip Plan 2 parameter template LBCs (have huawei-elb.io/* annotations
-// in spec.annotations). These are handled by the Service Reconciler.
-if hasPlan2Annotations(lbc) {
-return ctrl.Result{}, nil
-}
-
-// Skip LBCs with manual elb.id binding (port conflict risk with PXC).
-if getSpecAnnotation(lbc, huaweicloud.AnnotationELBID) != "" {
-logger.Info("LBC has manual elb.id binding, skipping to avoid port conflict", "name", lbc.GetName())
-return ctrl.Result{}, nil
-}
+	// Skip Plan 2 parameter template LBCs (have huawei-elb.io/* annotations
+	// in spec.annotations). These are handled by the Service Reconciler.
+	if hasPlan2Annotations(lbc) {
+		return ctrl.Result{}, nil
+	}
 
 	// If the LBC is not controlled (no huawei-elb.io/vpc-id in spec.annotations),
 	// try to auto-detect VPC/subnet/AZ from cluster nodes. This gives a zero-config
 	// experience on CCE — users just create a LoadBalancerConfig with a name and
 	// the controller figures out the rest, similar to EKS/GKE.
 	if !isControlled(lbc) {
+		// Skip LBCs with manual elb.id binding (port conflict risk with PXC).
+		// This check is inside !isControlled so that controller-created ELBs
+		// (which have elb.id written by us + vpc-id in metadata.annotations)
+		// still reach reconcileEnsure for status verification.
+		if getSpecAnnotation(lbc, huaweicloud.AnnotationELBID) != "" {
+			logger.Info("LBC has manual elb.id binding, skipping to avoid port conflict", "name", lbc.GetName())
+			return ctrl.Result{}, nil
+		}
+
 		// Skip if using CCM autocreate (user chose the native CCE path).
 		if getSpecAnnotation(lbc, ccmAutocreateAnnotation) != "" {
 			return ctrl.Result{}, nil
@@ -186,31 +188,31 @@ return ctrl.Result{}, nil
 		}
 
 		// Wait if LBC is unconfigured (empty spec.annotations — still being edited in UI)
-// or very recently created (within grace period).
-if isUnconfiguredLBC(lbc) {
-logger.Info("LBC is unconfigured, waiting for UI edit to complete")
-return ctrl.Result{RequeueAfter: uiGracePeriod}, nil
-}
-if age := time.Since(lbc.GetCreationTimestamp().Time); age < uiGracePeriod {
-logger.Info("LBC recently created, waiting to avoid UI conflict",
-"age", age, "wait", uiGracePeriod-age)
-return ctrl.Result{RequeueAfter: uiGracePeriod - age}, nil
-}
+		// or very recently created (within grace period).
+		if isUnconfiguredLBC(lbc) {
+			logger.Info("LBC is unconfigured, waiting for UI edit to complete")
+			return ctrl.Result{RequeueAfter: uiGracePeriod}, nil
+		}
+		if age := time.Since(lbc.GetCreationTimestamp().Time); age < uiGracePeriod {
+			logger.Info("LBC recently created, waiting to avoid UI conflict",
+				"age", age, "wait", uiGracePeriod-age)
+			return ctrl.Result{RequeueAfter: uiGracePeriod - age}, nil
+		}
 
 		// Auto-detect VPC/subnet/AZ from cluster nodes.
 		vpcID, subnetID, azs, err := r.autoDetectParams(ctx, logger, lbc)
-if err != nil {
-logger.Error(err, "auto-detection failed")
-errMsg := fmt.Sprintf("auto-detection failed: %v", err)
-anns := lbc.GetAnnotations()
-if anns[errorAnnotation] != errMsg {
-_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
-}
-if anns[readyAnnotation] != "false" {
-_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
-}
-return ctrl.Result{RequeueAfter: errorRequeue}, nil
-}
+		if err != nil {
+			logger.Error(err, "auto-detection failed")
+			errMsg := fmt.Sprintf("auto-detection failed: %v", err)
+			anns := lbc.GetAnnotations()
+			if anns[errorAnnotation] != errMsg {
+				_ = r.setAnnotation(ctx, lbc, errorAnnotation, errMsg)
+			}
+			if anns[readyAnnotation] != "false" {
+				_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
+			}
+			return ctrl.Result{RequeueAfter: errorRequeue}, nil
+		}
 
 		// Write detected values into metadata.annotations (NOT spec.annotations)
 		// to avoid resourceVersion conflicts with the OpenEverest UI which edits
@@ -466,27 +468,28 @@ func hasForeignCloudAnnotations(lbc *unstructured.Unstructured) bool {
 		}
 	}
 	return false
-return false
 }
 
 // hasPlan2Annotations returns true if the LBC's spec.annotations contains
 // huawei-elb.io/* keys, indicating a Plan 2 parameter template.
 func hasPlan2Annotations(lbc *unstructured.Unstructured) bool {
-specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
-if !found { return false }
-for key := range specAnns {
-if strings.HasPrefix(key, "huawei-elb.io/") {
-return true
-}
-}
-return false
+	specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
+	if !found {
+		return false
+	}
+	for key := range specAnns {
+		if strings.HasPrefix(key, "huawei-elb.io/") {
+			return true
+		}
+	}
+	return false
 }
 
 // isUnconfiguredLBC returns true if the LBC has no spec.annotations,
 // indicating it is still being edited in the UI.
 func isUnconfiguredLBC(lbc *unstructured.Unstructured) bool {
-specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
-return !found || len(specAnns) == 0
+	specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
+	return !found || len(specAnns) == 0
 }
 
 // isInUse returns true if the CR has status.inUse == true,
@@ -534,22 +537,22 @@ func (r *LoadBalancerConfigReconciler) autoDetectParams(
 // It skips LBCs that use CCM's autocreate annotation (kubernetes.io/elb.autocreate),
 // as well as LBCs with huawei-elb.io/* annotations (Plan 2 parameter templates).
 func shouldReconcile(obj client.Object) bool {
-u, ok := obj.(*unstructured.Unstructured)
-if !ok {
-return false
-}
-// Skip LBCs using CCM autocreate.
-if getSpecAnnotation(u, ccmAutocreateAnnotation) != "" {
-return false
-}
-// Skip Plan 2 parameter template LBCs (have huawei-elb.io/* annotations).
-specAnns := getSpecAnnotations(u)
-for key := range specAnns {
-if strings.HasPrefix(key, "huawei-elb.io/") {
-return false
-}
-}
-return true
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return false
+	}
+	// Skip LBCs using CCM autocreate.
+	if getSpecAnnotation(u, ccmAutocreateAnnotation) != "" {
+		return false
+	}
+	// Skip Plan 2 parameter template LBCs (have huawei-elb.io/* annotations).
+	specAnns := getSpecAnnotations(u)
+	for key := range specAnns {
+		if strings.HasPrefix(key, "huawei-elb.io/") {
+			return false
+		}
+	}
+	return true
 }
 
 // getSpecAnnotations returns all annotations from spec.annotations as a map.
