@@ -182,6 +182,15 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 
 	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
 		latest.Annotations = svc.Annotations
+		// Persist finalizer changes (C-NEW-2 fix: previously the finalizer added
+		// above at line 165 was silently dropped because patchWithRetry only
+		// copied annotations, not finalizers. This caused IP group orphaning on
+		// Service deletion because the cleanup path checks ContainsFinalizer.)
+		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
+			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
+		} else {
+			controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
+		}
 		return nil
 	}); err != nil {
 		logger.Error(err, "patching Service with autocreate annotations")

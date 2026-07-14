@@ -23,6 +23,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
@@ -267,6 +268,56 @@ func TestServiceReconciler_CreatePath_ACLWithSourceRanges(t *testing.T) {
 	}
 	if svc.Annotations[aclIDAnnotation] != "ipgroup-mock-id" {
 		t.Errorf("expected acl-id=ipgroup-mock-id, got %s", svc.Annotations[aclIDAnnotation])
+	}
+}
+
+// TestServiceReconciler_CreatePath_ACLFinalizerPersisted 是 C-NEW-2 回归测试。
+// 之前 reconcileCreate 的 patchWithRetry 只拷贝了 annotations，
+// 没有拷贝 aclCleanupFinalizer，导致 finalizer 被静默丢弃，
+// Service 删除时清理路径不会触发，IP 组成为孤儿资源。
+// 此测试从 fake client 重新读取 service，验证 finalizer 真正落库。
+func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
+	ipGroupHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ipgroup": {"id": "ipgroup-mock-id"}}`))
+	})
+	mockClient, server := newMockELBClient(ipGroupHandler)
+	defer server.Close()
+
+	svc := makeTestService("acl-finalizer-svc")
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
+	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	r := &ServiceReconciler{
+		Client:          fakeClient,
+		NetworkDetector: detector,
+		ELBClient:       mockClient,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileCreate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileCreate returned error: %v", err)
+	}
+
+	// 从 API server 重新读取，验证 finalizer 真正持久化（不是只存在于内存对象）
+	persisted := &corev1.Service{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "acl-finalizer-svc", Namespace: "default"}, persisted); err != nil {
+		t.Fatalf("failed to get persisted service: %v", err)
+	}
+
+	if !controllerutil.ContainsFinalizer(persisted, aclCleanupFinalizer) {
+		t.Errorf("expected acl-cleanup finalizer to be persisted on service in API server, got finalizers=%v", persisted.Finalizers)
+	}
+
+	// 同时验证 ACL annotation 也持久化了
+	if persisted.Annotations[aclIDAnnotation] != "ipgroup-mock-id" {
+		t.Errorf("expected persisted acl-id=ipgroup-mock-id, got %s", persisted.Annotations[aclIDAnnotation])
+	}
+	if persisted.Annotations[aclStatusAnnotation] != "on" {
+		t.Errorf("expected persisted acl-status=on, got %s", persisted.Annotations[aclStatusAnnotation])
 	}
 }
 
