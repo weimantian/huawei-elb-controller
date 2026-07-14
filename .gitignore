@@ -19,8 +19,7 @@ DEVELOPMENT.md
 DEVELOPMENT-zh.md
 test-evidence
 
-# Local-only docs (restored from git history, not published)
-docs/
+# Documentation (published to repo)
 
 # Local test config (contains AK/SK, do not commit)
 my-values.yaml
