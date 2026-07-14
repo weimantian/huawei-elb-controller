@@ -426,8 +426,11 @@ func buildUpdateOption(current, lastKnown map[string]string) huaweicloud.UpdateE
 	}
 
 	if current["huawei-elb.io/name"] != lastKnown["huawei-elb.io/name"] {
-		// Name changes are not supported by the current UpdateELB API
-		// This would require adding Name to UpdateELBOption
+		// ELB name changes are intentionally NOT supported post-creation.
+		// Although UpdateELBOption.Name exists and UpdateELB handles it,
+		// we align with EKS/GKE (both disallow post-creation LB rename)
+		// and avoid FindELBByName name-drift issues (we track ELB by elb.id,
+		// but name changes could confuse manual lookups and audit trails).
 	}
 
 	return opt
