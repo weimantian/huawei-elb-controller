@@ -18,3 +18,6 @@ test-report-*.png
 DEVELOPMENT.md
 DEVELOPMENT-zh.md
 test-evidence
+
+# Local-only docs (restored from git history, not published)
+docs/
