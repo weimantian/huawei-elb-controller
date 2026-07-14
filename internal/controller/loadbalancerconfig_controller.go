@@ -185,14 +185,6 @@ return ctrl.Result{}, nil
 			return ctrl.Result{}, nil
 		}
 
-		// If ELB ID already exists and we have a finalizer, monitor it
-		// (could be a legacy LBC created by an older controller version).
-		if getSpecAnnotation(lbc, huaweicloud.AnnotationELBID) != "" {
-			if controllerutil.ContainsFinalizer(lbc, finalizerName) {
-				return r.reconcileEnsure(ctx, logger, lbc)
-			}
-			return ctrl.Result{}, nil
-		}
 		// Wait if LBC is unconfigured (empty spec.annotations — still being edited in UI)
 // or very recently created (within grace period).
 if isUnconfiguredLBC(lbc) {

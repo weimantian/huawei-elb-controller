@@ -126,17 +126,16 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 sourceRanges := svc.Spec.LoadBalancerSourceRanges
 filteredCIDRs := filterValidCIDRs(logger, sourceRanges)
 if len(filteredCIDRs) > 0 {
-ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
-ipGroupID, err := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
-			if err != nil {
-				logger.Error(err, "creating IP group for ACL")
-				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-} else {
-svc.Annotations[aclIDAnnotation] = ipGroupID
-svc.Annotations[aclStatusAnnotation] = "on"
-svc.Annotations[aclTypeAnnotation] = "white"
-controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
-}
+		ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
+		ipGroupID, err := findOrCreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
+		if err != nil {
+			logger.Error(err, "creating IP group for ACL")
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
+		svc.Annotations[aclIDAnnotation] = ipGroupID
+		svc.Annotations[aclStatusAnnotation] = "on"
+		svc.Annotations[aclTypeAnnotation] = "white"
+		controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 } else {
 svc.Annotations[aclStatusAnnotation] = "off"
 }
@@ -170,7 +169,10 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 	lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]
 	lastKnownParams := make(map[string]string)
 	if lastKnownJSON != "" {
-		_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
+		if err := json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams); err != nil {
+			logger.Error(err, "unmarshaling last-known params, resetting")
+			lastKnownParams = make(map[string]string)
+		}
 	}
 
 	lastSourceRangesJSON := lastKnownParams[sourceRangesKey]
@@ -178,7 +180,10 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 
 	var lastSourceRanges []string
 	if lastSourceRangesJSON != "" {
-		_ = json.Unmarshal([]byte(lastSourceRangesJSON), &lastSourceRanges)
+		if err := json.Unmarshal([]byte(lastSourceRangesJSON), &lastSourceRanges); err != nil {
+			logger.Error(err, "unmarshaling last-known source ranges, resetting")
+			lastSourceRanges = nil
+		}
 	}
 currentSourceRanges := svc.Spec.LoadBalancerSourceRanges
 validCurrentSourceRanges := filterValidCIDRs(logger, currentSourceRanges)
@@ -208,6 +213,7 @@ ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 			if ipGroupID != "" {
 				if err := huaweicloud.UpdateIPGroup(r.ELBClient, ipGroupID, ipGroupName, validCurrentSourceRanges); err != nil {
 					logger.Error(err, "updating IP group for ACL")
+					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 				} else {
 					svc.Annotations[aclStatusAnnotation] = "on"
 				}
@@ -215,6 +221,7 @@ ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
 				newID, err := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, validCurrentSourceRanges)
 				if err != nil {
 					logger.Error(err, "creating IP group for ACL")
+					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 				} else {
 					svc.Annotations[aclIDAnnotation] = newID
 					svc.Annotations[aclStatusAnnotation] = "on"
@@ -253,7 +260,10 @@ logger.Error(err, "finding ELB by name")
 			}
 			logger.Info("ELB updated", "elbID", elbID)
 		}
-	}
+		} else {
+			logger.Info("ELB ID not found, will retry", "service", svc.Name)
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
 
 	original := svc.DeepCopy()
 	compositeParams := make(map[string]string)
@@ -387,4 +397,15 @@ func sourceRangesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func findOrCreateIPGroup(client *elb.ElbClient, name, description string, cidrs []string) (string, error) {
+	id, err := huaweicloud.FindIPGroupByName(client, name)
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
+		return id, nil
+	}
+	return huaweicloud.CreateIPGroup(client, name, description, cidrs)
 }

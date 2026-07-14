@@ -110,10 +110,11 @@ func resolveStringParam(params map[string]string, key, defaultVal string) string
 return defaultVal
 }
 
-// truncateStr truncates s to maxLen characters.
+// truncateStr truncates s to maxLen characters (Unicode-safe).
 func truncateStr(s string, maxLen int) string {
-if len(s) <= maxLen {
-return s
-}
-return s[:maxLen]
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen])
 }

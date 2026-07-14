@@ -47,7 +47,7 @@ return d.detected.VPCID, d.detected.SubnetID, d.detected.AZs, nil
 }
 
 	nodeList := &corev1.NodeList{}
-	if err := c.List(ctx, nodeList, &client.ListOptions{Limit: 1}); err != nil {
+	if err := c.List(ctx, nodeList); err != nil {
 		return "", "", nil, fmt.Errorf("listing nodes: %w", err)
 	}
 	if len(nodeList.Items) == 0 {
