@@ -328,6 +328,11 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 	// Case 2: ELB ID is present — verify status.
 	info, err := huaweicloud.ShowELB(elbClient, elbID)
 	if err != nil {
+		if huaweicloud.IsNotFoundError(err) {
+			logger.Info("ELB no longer exists, clearing elb.id to trigger re-creation", "elbID", elbID)
+			_ = r.setSpecAnnotation(ctx, lbc, huaweicloud.AnnotationELBID, "")
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return r.handleTransientError(ctx, lbc, logger, fmt.Errorf("showing ELB %q: %w", elbID, err))
 	}
 
@@ -503,13 +508,6 @@ func hasPlan2Annotations(lbc *unstructured.Unstructured) bool {
 func isUnconfiguredLBC(lbc *unstructured.Unstructured) bool {
 	specAnns, found, _ := unstructured.NestedStringMap(lbc.Object, "spec", "annotations")
 	return !found || len(specAnns) == 0
-}
-
-// isInUse returns true if the CR has status.inUse == true,
-// indicating it is referenced by a DatabaseCluster.
-func isInUse(lbc *unstructured.Unstructured) bool {
-	inUse, found, _ := unstructured.NestedBool(lbc.Object, "status", "inUse")
-	return found && inUse
 }
 
 // autoDetectParams detects VPC ID, Neutron subnet ID, and availability zones

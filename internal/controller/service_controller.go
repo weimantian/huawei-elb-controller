@@ -11,6 +11,8 @@ import (
 	"github.com/go-logr/logr"
 	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -26,6 +28,24 @@ type ServiceReconciler struct {
 	ELBClient       *elb.ElbClient
 	NetworkDetector *huaweicloud.NetworkDetector
 	Creds           *huaweicloud.Credentials
+}
+
+// patchWithRetry applies a patch with conflict retry. The modifyFn is called
+// on the latest object version each attempt.
+func (r *ServiceReconciler) patchWithRetry(
+	ctx context.Context, key types.NamespacedName, modifyFn func(*corev1.Service) error,
+) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1.Service{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		original := latest.DeepCopy()
+		if err := modifyFn(latest); err != nil {
+			return err
+		}
+		return r.Patch(ctx, latest, client.MergeFrom(original))
+	})
 }
 
 const (
@@ -72,9 +92,17 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				}
 			}
 			controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
-			if err := r.Update(ctx, svc); err != nil {
+			if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+				latest := &corev1.Service{}
+				if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
+					return err
+				}
+				controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
+				return r.Update(ctx, latest)
+			}); err != nil {
 				return ctrl.Result{}, err
 			}
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -115,8 +143,6 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
-	original := svc.DeepCopy()
-
 	if svc.Annotations == nil {
 		svc.Annotations = make(map[string]string)
 	}
@@ -155,7 +181,10 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		svc.Annotations[lastKnownParamsAnnotation] = string(paramsJSON)
 	}
 
-	if err := r.Patch(ctx, svc, client.MergeFrom(original)); err != nil {
+	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+		latest.Annotations = svc.Annotations
+		return nil
+	}); err != nil {
 		logger.Error(err, "patching Service with autocreate annotations")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
@@ -257,6 +286,7 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 			info, err := huaweicloud.FindELBByName(r.ELBClient, elbName)
 			if err != nil {
 				logger.Error(err, "finding ELB by name")
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 			}
 			if info != nil {
 				elbID = info.ID
@@ -276,7 +306,6 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		}
 	}
 
-	original := svc.DeepCopy()
 	compositeParams := make(map[string]string)
 	for k, v := range currentParams {
 		compositeParams[k] = v
@@ -296,7 +325,13 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
-	if err := r.Patch(ctx, svc, client.MergeFrom(original)); err != nil {
+	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+		if latest.Annotations == nil {
+			latest.Annotations = make(map[string]string)
+		}
+		latest.Annotations[lastKnownParamsAnnotation] = svc.Annotations[lastKnownParamsAnnotation]
+		return nil
+	}); err != nil {
 		logger.Error(err, "patching last-known params")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
