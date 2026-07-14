@@ -275,7 +275,7 @@ func (r *LoadBalancerConfigReconciler) reconcileEnsure(
 		_ = r.setAnnotation(ctx, lbc, readyAnnotation, "false")
 
 		// Idempotency: check if an ELB already exists by name (e.g. after a crash).
-		elbName := huaweicloud.ELBNamePrefix + lbc.GetName()
+		elbName := elbNameForLBC(lbc)
 		existing, err := huaweicloud.FindELBByName(elbClient, elbName)
 		if err != nil {
 			return r.handleTransientError(ctx, lbc, logger, fmt.Errorf("checking for existing ELB %q: %w", elbName, err))
@@ -438,6 +438,19 @@ func (r *LoadBalancerConfigReconciler) getLoadBalancerConfig(
 		return nil, err
 	}
 	return lbc, nil
+}
+
+// elbNameForLBC builds a unique ELB name from the LBC namespace and name.
+// Format: "elb-<namespace>-<name>", truncated to 64 chars (Huawei Cloud limit).
+// Including the namespace prevents collisions between same-named LBCs in
+// different namespaces (ELB names are region-scoped, not namespace-scoped).
+func elbNameForLBC(lbc *unstructured.Unstructured) string {
+	name := huaweicloud.ELBNamePrefix + lbc.GetNamespace() + "-" + lbc.GetName()
+	runes := []rune(name)
+	if len(runes) > 64 {
+		return string(runes[:64])
+	}
+	return name
 }
 
 // isControlled returns true if the CR has huawei-elb.io/vpc-id in either
@@ -691,7 +704,7 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 	}
 
 	opt := &huaweicloud.CreateELBOption{
-		Name:                 huaweicloud.ELBNamePrefix + lbc.GetName(),
+		Name:                 elbNameForLBC(lbc),
 		VpcID:                vpcID,
 		VipSubnetCidrID:      subnetID,
 		AvailabilityZoneList: azs,
