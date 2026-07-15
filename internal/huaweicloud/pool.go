@@ -65,28 +65,39 @@ func DeletePool(client *elb.ElbClient, poolID string) error {
 func ListPools(client *elb.ElbClient, elbID string) ([]PoolInfo, error) {
 	elbIDs := []string{elbID}
 	limit := int32(2000)
-	req := model.ListPoolsRequest{
-		LoadbalancerId: &elbIDs,
-		Limit:          &limit,
-	}
+	var result []PoolInfo
+	var marker *string
 
-	resp, err := client.ListPools(&req)
-	if err != nil {
-		return nil, fmt.Errorf("listing pools on ELB %q: %w", elbID, err)
-	}
-	if resp.Pools == nil {
-		return nil, nil
-	}
+	for {
+		req := model.ListPoolsRequest{
+			LoadbalancerId: &elbIDs,
+			Limit:          &limit,
+			Marker:         marker,
+		}
 
-	pools := *resp.Pools
-	result := make([]PoolInfo, 0, len(pools))
-	for i := range pools {
-		result = append(result, PoolInfo{
-			ID:          pools[i].Id,
-			Name:        pools[i].Name,
-			Protocol:    pools[i].Protocol,
-			LbAlgorithm: pools[i].LbAlgorithm,
-		})
+		resp, err := client.ListPools(&req)
+		if err != nil {
+			return nil, fmt.Errorf("listing pools on ELB %q: %w", elbID, err)
+		}
+		if resp.Pools == nil {
+			break
+		}
+
+		pools := *resp.Pools
+		for i := range pools {
+			result = append(result, PoolInfo{
+				ID:          pools[i].Id,
+				Name:        pools[i].Name,
+				Protocol:    pools[i].Protocol,
+				LbAlgorithm: pools[i].LbAlgorithm,
+			})
+		}
+
+		// Check for next page.
+		if resp.PageInfo == nil || resp.PageInfo.NextMarker == nil {
+			break
+		}
+		marker = resp.PageInfo.NextMarker
 	}
 	return result, nil
 }

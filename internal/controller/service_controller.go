@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"sort"
 	"strconv"
 	"time"
 
@@ -60,8 +59,9 @@ func (r *ServiceReconciler) updateStatusWithRetry(
 		if err := r.Get(ctx, key, latest); err != nil {
 			return err
 		}
+		original := latest.DeepCopy()
 		latest.Status.LoadBalancer.Ingress = ingress
-		return r.Status().Patch(ctx, latest, client.MergeFrom(latest.DeepCopy()))
+		return r.Status().Patch(ctx, latest, client.MergeFrom(original))
 	})
 }
 
@@ -156,28 +156,12 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		}
 	}
 
-	// Get node backends for member creation (NodePort mode, multi-AZ aware).
-	backends := r.getNodeBackends(ctx)
-
-	// Create listener + pool + healthcheck + members for each Service port.
-	for _, port := range svc.Spec.Ports {
-		if err := r.createListenerStack(ctx, logger, info.ID, svc, port, backends); err != nil {
-			logger.Error(err, "creating listener stack", "port", port.Port)
-			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-		}
-	}
-
-	// ACL handling (IP groups for source ranges).
-	if err := r.ensureACL(ctx, logger, svc); err != nil {
-		logger.Error(err, "ensuring ACL")
-		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-	}
-
-	// Write ELB ID annotation + finalizer + last-known-params.
-	ingressIP := info.VipAddress
-	if info.PublicIP != "" {
-		ingressIP = info.PublicIP
-	}
+	// CRITICAL: Write elbID annotation + finalizer immediately after ELB creation.
+	// This ensures that if subsequent steps (listener/pool/AACL/status) fail or the
+	// process crashes, the next reconcile will find the elbID and route to
+	// reconcileUpdate, which can complete provisioning via syncListenerStacks.
+	// Without this, a crash after ELB creation but before annotation write would
+	// orphan the ELB (leak) and create a duplicate on retry.
 	compositeParams := buildCompositeParams(lbcParams, filterValidCIDRs(logger, svc.Spec.LoadBalancerSourceRanges))
 	paramsJSON, _ := json.Marshal(compositeParams)
 
@@ -187,23 +171,62 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		}
 		latest.Annotations[huaweicloud.AnnotationELBID] = info.ID
 		latest.Annotations[lastKnownParamsAnnotation] = string(paramsJSON)
-		// ACL annotations
-		for _, key := range []string{aclIDAnnotation, aclStatusAnnotation, aclTypeAnnotation} {
-			if v, ok := svc.Annotations[key]; ok {
-				latest.Annotations[key] = v
-			}
-		}
 		controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
-		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
-			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
-		}
 		return nil
 	}); err != nil {
 		logger.Error(err, "patching Service with ELB ID and finalizer")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
+	// Get node backends for member creation (NodePort mode, multi-AZ aware).
+	backends, err := r.getNodeBackends(ctx)
+	if err != nil {
+		logger.Error(err, "getting node backends")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+
+	// Create listener + pool + healthcheck + members for each Service port.
+	// If this fails mid-way, reconcileUpdate's syncListenerStacks will complete
+	// the remaining ports on the next reconcile.
+	for _, port := range svc.Spec.Ports {
+		if err := r.createListenerStack(ctx, logger, info.ID, svc, port, backends); err != nil {
+			logger.Error(err, "creating listener stack, will complete on retry", "port", port.Port)
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
+	}
+
+	// ACL handling (IP groups for source ranges).
+	if err := r.ensureACL(ctx, logger, svc); err != nil {
+		logger.Error(err, "ensuring ACL, will retry")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+
+	// Persist ACL annotations (ensureACL modifies svc.Annotations in-memory).
+	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+		if latest.Annotations == nil {
+			latest.Annotations = make(map[string]string)
+		}
+		for _, key := range []string{aclIDAnnotation, aclStatusAnnotation, aclTypeAnnotation} {
+			if v, ok := svc.Annotations[key]; ok {
+				latest.Annotations[key] = v
+			} else {
+				delete(latest.Annotations, key)
+			}
+		}
+		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
+			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
+		}
+		return nil
+	}); err != nil {
+		logger.Error(err, "patching ACL annotations")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+
 	// Write service.status.loadBalancer.ingress.
+	ingressIP := info.VipAddress
+	if info.PublicIP != "" {
+		ingressIP = info.PublicIP
+	}
 	if err := r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), []corev1.LoadBalancerIngress{
 		{IP: ingressIP},
 	}); err != nil {
@@ -286,12 +309,14 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 
 	if !paramsEqual(currentParams, lastKnownParams) {
 		opt := buildUpdateOption(currentParams, lastKnownParams)
-		if opt.BandwidthSize > 0 {
+		// Call UpdateELB if either bandwidth size or charge mode changed.
+		// BandwidthSize=0 with non-empty ChargeMode means only charge mode changed.
+		if opt.BandwidthSize > 0 || opt.BandwidthChargeMode != "" {
 			if err := huaweicloud.UpdateELB(r.ELBClient, elbID, opt, r.Creds); err != nil {
 				logger.Error(err, "updating ELB params", "elbID", elbID)
 				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 			}
-			logger.Info("ELB params updated", "elbID", elbID)
+			logger.Info("ELB params updated", "elbID", elbID, "bandwidthSize", opt.BandwidthSize, "chargeMode", opt.BandwidthChargeMode)
 		}
 	}
 
@@ -326,6 +351,21 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		logger.Error(err, "patching last-known params")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
+	// Ensure status has the ELB IP (fixes status lost during create-time RBAC failure).
+	if len(svc.Status.LoadBalancer.Ingress) == 0 {
+		info, err := huaweicloud.ShowELB(r.ELBClient, elbID)
+		if err != nil {
+			logger.Error(err, "getting ELB for status update", "elbID", elbID)
+		} else {
+			ingressIP := info.VipAddress
+			if info.PublicIP != "" {
+				ingressIP = info.PublicIP
+			}
+			if err := r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), []corev1.LoadBalancerIngress{{IP: ingressIP}}); err != nil {
+				logger.Error(err, "updating Service status", "elbID", elbID)
+			}
+		}
+	}
 
 	return ctrl.Result{RequeueAfter: serviceRequeue}, nil
 }
@@ -347,8 +387,13 @@ func (r *ServiceReconciler) syncListenerStacks(ctx context.Context, logger logr.
 		existingPorts[l.ProtocolPort] = l
 	}
 
-	backends := r.getNodeBackends(ctx)
-
+	backends, err := r.getNodeBackends(ctx)
+	if err != nil {
+		// Skip listener sync if we can't list nodes; avoid creating listeners with no members.
+		logger.Info("Skipping listener sync: failed to list nodes", "error", err)
+		return nil
+	}
+	
 	// Add new ports.
 	for port, svcPort := range desiredPorts {
 		if _, exists := existingPorts[port]; !exists {
@@ -379,8 +424,14 @@ func (r *ServiceReconciler) syncAllPoolMembers(ctx context.Context, logger logr.
 		return fmt.Errorf("listing pools: %w", err)
 	}
 
-	backends := r.getNodeBackends(ctx)
-
+	backends, err := r.getNodeBackends(ctx)
+	if err != nil {
+		// CRITICAL: Skip member sync on API failure to avoid clearing all members
+		// with an empty list. Transient API failures must not cause service disruption.
+		logger.Info("Skipping pool member sync: failed to list nodes", "error", err)
+		return nil
+	}
+	
 	for _, pool := range pools {
 		// Match pool to Service port by name (pool-<svc-name>-<port>).
 		var nodePort int32
@@ -423,14 +474,13 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 	if controllerutil.ContainsFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer) {
 		elbID := svc.Annotations[huaweicloud.AnnotationELBID]
 		if elbID != "" {
-			logger.Info("Deleting ELB", "elbID", elbID, "service", svc.Name)
-			if err := huaweicloud.DeleteELB(r.ELBClient, elbID); err != nil {
-				if !huaweicloud.IsNotFoundError(err) {
-					logger.Error(err, "deleting ELB, will retry", "elbID", elbID)
-					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-				}
-				logger.Info("ELB already deleted", "elbID", elbID)
+		if err := r.deleteELBStack(logger, elbID); err != nil {
+			if !huaweicloud.IsNotFoundError(err) {
+				logger.Error(err, "deleting ELB, will retry", "elbID", elbID)
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 			}
+			logger.Info("ELB already deleted", "elbID", elbID)
+		}
 		}
 		// Clear service status.
 		_ = r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), nil)
@@ -462,6 +512,63 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// deleteELBStack deletes all child resources on the ELB in dependency order, then deletes the ELB.
+// Order: HealthCheck -> Pool (cascades Member) -> Listener -> ELB.
+// Huawei Cloud API requires each child resource to be deleted before its parent.
+func (r *ServiceReconciler) deleteELBStack(logger logr.Logger, elbID string) error {
+	pools, err := huaweicloud.ListPools(r.ELBClient, elbID)
+	if err != nil {
+		return fmt.Errorf("listing pools for deletion: %w", err)
+	}
+
+	// Delete health checks, members, then pools for each pool.
+	for _, p := range pools {
+		// Delete health check for this pool.
+		hcs, err := huaweicloud.ListHealthChecks(r.ELBClient)
+		if err != nil {
+			return fmt.Errorf("listing health checks: %w", err)
+		}
+		for _, hc := range hcs {
+			if hc.PoolID == p.ID {
+				logger.Info("Deleting health check", "healthcheck", hc.ID, "pool", p.ID)
+				if err := huaweicloud.DeleteHealthCheck(r.ELBClient, hc.ID); err != nil {
+					return fmt.Errorf("deleting health check %s: %w", hc.ID, err)
+				}
+			}
+		}
+
+		// Delete all members in this pool.
+		members, err := huaweicloud.ListMembers(r.ELBClient, p.ID)
+		if err != nil {
+			return fmt.Errorf("listing members for pool %s: %w", p.ID, err)
+		}
+		for _, m := range members {
+			logger.Info("Deleting member", "member", m.ID, "pool", p.ID)
+			if err := huaweicloud.DeleteMember(r.ELBClient, p.ID, m.ID); err != nil {
+				return fmt.Errorf("deleting member %s: %w", m.ID, err)
+			}
+		}
+
+		// Now safe to delete the pool.
+		logger.Info("Deleting pool", "pool", p.ID, "name", p.Name)
+		if err := huaweicloud.DeletePool(r.ELBClient, p.ID); err != nil {
+			return fmt.Errorf("deleting pool %s: %w", p.ID, err)
+		}
+	}
+
+	listeners, err := huaweicloud.ListListeners(r.ELBClient, elbID)
+	if err != nil {
+		return fmt.Errorf("listing listeners for deletion: %w", err)
+	}
+	for _, l := range listeners {
+		logger.Info("Deleting listener before ELB deletion", "listener", l.ID, "port", l.ProtocolPort)
+		if err := huaweicloud.DeleteListener(r.ELBClient, l.ID); err != nil {
+			return fmt.Errorf("deleting listener %s: %w", l.ID, err)
+		}
+	}
+	return huaweicloud.DeleteELB(r.ELBClient, elbID)
 }
 
 // ensureACL creates/updates/deletes the ACL IP group based on loadBalancerSourceRanges.
@@ -527,10 +634,12 @@ type NodeBackend struct {
 }
 
 // getNodeBackends returns all ready nodes' internal IPs and their virsubnet IDs.
-func (r *ServiceReconciler) getNodeBackends(ctx context.Context) []NodeBackend {
+// Returns an error if the Kubernetes API call fails, so callers can skip member
+// sync rather than accidentally clearing all members with an empty list.
+func (r *ServiceReconciler) getNodeBackends(ctx context.Context) ([]NodeBackend, error) {
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList); err != nil {
-		return nil
+		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
 	var backends []NodeBackend
 	for _, node := range nodeList.Items {
@@ -547,7 +656,7 @@ func (r *ServiceReconciler) getNodeBackends(ctx context.Context) []NodeBackend {
 			}
 		}
 	}
-	return backends
+	return backends, nil
 }
 
 func isNodeReady(node *corev1.Node) bool {
@@ -679,20 +788,3 @@ func filterValidCIDRs(logger logr.Logger, cidrs []string) []string {
 	return valid
 }
 
-func sourceRangesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	sortedA := make([]string, len(a))
-	sortedB := make([]string, len(b))
-	copy(sortedA, a)
-	copy(sortedB, b)
-	sort.Strings(sortedA)
-	sort.Strings(sortedB)
-	for i := range sortedA {
-		if sortedA[i] != sortedB[i] {
-			return false
-		}
-	}
-	return true
-}

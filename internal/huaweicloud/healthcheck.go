@@ -72,30 +72,41 @@ func DeleteHealthCheck(client *elb.ElbClient, healthCheckID string) error {
 // filtering by pool_id directly, so callers must filter client-side.
 func ListHealthChecks(client *elb.ElbClient) ([]HealthMonitorInfo, error) {
 	limit := int32(2000)
-	req := model.ListHealthMonitorsRequest{
-		Limit: &limit,
-	}
+	var result []HealthMonitorInfo
+	var marker *string
 
-	resp, err := client.ListHealthMonitors(&req)
-	if err != nil {
-		return nil, fmt.Errorf("listing health checks: %w", err)
-	}
-	if resp.Healthmonitors == nil {
-		return nil, nil
-	}
-
-	hcs := *resp.Healthmonitors
-	result := make([]HealthMonitorInfo, 0, len(hcs))
-	for i := range hcs {
-		poolID := ""
-		if len(hcs[i].Pools) > 0 {
-			poolID = hcs[i].Pools[0].Id
+	for {
+		req := model.ListHealthMonitorsRequest{
+			Limit:  &limit,
+			Marker: marker,
 		}
-		result = append(result, HealthMonitorInfo{
-			ID:     hcs[i].Id,
-			PoolID: poolID,
-			Type:   hcs[i].Type,
-		})
+
+		resp, err := client.ListHealthMonitors(&req)
+		if err != nil {
+			return nil, fmt.Errorf("listing health checks: %w", err)
+		}
+		if resp.Healthmonitors == nil {
+			break
+		}
+
+		hcs := *resp.Healthmonitors
+		for i := range hcs {
+			poolID := ""
+			if len(hcs[i].Pools) > 0 {
+				poolID = hcs[i].Pools[0].Id
+			}
+			result = append(result, HealthMonitorInfo{
+				ID:     hcs[i].Id,
+				PoolID: poolID,
+				Type:   hcs[i].Type,
+			})
+		}
+
+		// Check for next page.
+		if resp.PageInfo == nil || resp.PageInfo.NextMarker == nil {
+			break
+		}
+		marker = resp.PageInfo.NextMarker
 	}
 	return result, nil
 }

@@ -63,24 +63,35 @@ func DeleteListener(client *elb.ElbClient, listenerID string) error {
 // ListListeners lists all listeners on the specified ELB.
 func ListListeners(client *elb.ElbClient, elbID string) ([]ListenerInfo, error) {
 	elbIDs := []string{elbID}
-	limit := int32(2000) // max page size; one call covers typical ELB listener counts
-	req := model.ListListenersRequest{
-		LoadbalancerId: &elbIDs,
-		Limit:          &limit,
-	}
+	limit := int32(2000)
+	var result []ListenerInfo
+	var marker *string
 
-	resp, err := client.ListListeners(&req)
-	if err != nil {
-		return nil, fmt.Errorf("listing listeners on ELB %q: %w", elbID, err)
-	}
-	if resp.Listeners == nil {
-		return nil, nil
-	}
+	for {
+		req := model.ListListenersRequest{
+			LoadbalancerId: &elbIDs,
+			Limit:          &limit,
+			Marker:         marker,
+		}
 
-	listeners := *resp.Listeners
-	result := make([]ListenerInfo, 0, len(listeners))
-	for i := range listeners {
-		result = append(result, *listenerToInfo(&listeners[i]))
+		resp, err := client.ListListeners(&req)
+		if err != nil {
+			return nil, fmt.Errorf("listing listeners on ELB %q: %w", elbID, err)
+		}
+		if resp.Listeners == nil {
+			break
+		}
+
+		listeners := *resp.Listeners
+		for i := range listeners {
+			result = append(result, *listenerToInfo(&listeners[i]))
+		}
+
+		// Check for next page.
+		if resp.PageInfo == nil || resp.PageInfo.NextMarker == nil {
+			break
+		}
+		marker = resp.PageInfo.NextMarker
 	}
 	return result, nil
 }

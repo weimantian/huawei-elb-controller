@@ -170,7 +170,9 @@ func UpdateELB(client *elb.ElbClient, elbID string, opt UpdateELBOption, creds *
 		}
 	}
 
-	if opt.BandwidthSize > 0 {
+	// Update bandwidth when size > 0 (resize) or charge mode changed (size may be 0
+	// if only charge mode changed). The EIP API handles size=0 by keeping current size.
+	if opt.BandwidthSize > 0 || opt.BandwidthChargeMode != "" {
 		if err := updateELBBandwidth(elbID, opt.BandwidthSize, opt.BandwidthChargeMode, creds, client); err != nil {
 			return fmt.Errorf("updating ELB %q bandwidth: %w", elbID, err)
 		}
@@ -291,8 +293,11 @@ func updateELBBandwidth(elbID string, size int32, chargeMode string, creds *Cred
 		return fmt.Errorf("getting bandwidth ID: %w", err)
 	}
 
-	bandwidthOpt := &eipv2model.UpdateBandwidthOption{
-		Size: &size,
+	bandwidthOpt := &eipv2model.UpdateBandwidthOption{}
+	// Only set Size when > 0; size=0 means only charge mode is changing.
+	// Passing Size=0 to the EIP API would attempt to resize to 0 (invalid).
+	if size > 0 {
+		bandwidthOpt.Size = &size
 	}
 	if chargeMode != "" {
 		chargeModeEnum := eipResolveChargeMode(chargeMode)
