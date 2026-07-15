@@ -677,7 +677,10 @@ func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, e
 		if err := huaweicloud.UpdateIPGroup(r.ELBClient, ipGroupID, ipGroupName, filteredCIDRs); err != nil {
 			return err
 		}
+		svc.Annotations[aclIDAnnotation] = ipGroupID
 		svc.Annotations[aclStatusAnnotation] = "on"
+		svc.Annotations[aclTypeAnnotation] = "white"
+		controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 	} else {
 		newID, err := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
 		if err != nil {
