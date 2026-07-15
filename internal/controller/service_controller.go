@@ -617,6 +617,7 @@ func (r *ServiceReconciler) deleteELBStack(logger logr.Logger, elbID string) err
 	if err := huaweicloud.DeleteELB(r.ELBClient, elbID); err != nil {
 		return err
 	}
+	logger.Info("ELB deleted", "elbID", elbID)
 
 	// Delete the EIP if the ELB had one.
 	// DeleteELB unbinds the EIP but does not delete it; without this step the EIP leaks.
