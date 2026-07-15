@@ -22,10 +22,11 @@
 - **Manual mode with LBC parameter template** - LBC stores ELB parameters (bandwidth, EIP type, etc.); each Service gets its own independent ELB with zero port conflicts
 - **Auto-detection of VPC/subnet/AZ** - automatically detects network topology from cluster nodes
 - **Node-aware** - watches node changes and syncs ELB backend members (NodePort mode)
-- **ACL auto-handling** - `loadBalancerSourceRanges` -> IP groups on the ELB
+- **ACL auto-handling** - `loadBalancerSourceRanges` -> IP groups created and bound to all ELB listeners
 - **Hot parameter updates** - modifying LBC or Service annotations triggers live ELB parameter updates via API
-- **Finalizer cleanup** - Service deletion triggers automatic ELB and IP group cleanup, preventing orphaned resources
+- **Finalizer cleanup** - Service deletion triggers automatic cleanup of ELB, IP groups, and EIP, preventing orphaned resources
 - **No annotation conflicts** - writes zero `kubernetes.io/elb.*` annotations, permanently resolving PSMDB operator conflicts
+- **Duplicate ELB prevention** - when OpenEverest overwrites the `elb-id` annotation, the controller recovers the association via name-based reverse lookup, avoiding duplicate orphan ELBs
 
 ---
 
