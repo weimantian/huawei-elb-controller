@@ -3,6 +3,8 @@ package controller
 import (
 	corev1 "k8s.io/api/core/v1"
 	"strings"
+
+	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
 
 const (
@@ -20,21 +22,16 @@ func isLoadBalancerService(svc *corev1.Service) bool {
 	return svc.Spec.Type == corev1.ServiceTypeLoadBalancer
 }
 
-func hasELBID(svc *corev1.Service) bool {
+// hasELBIDManaged checks if the Service has our huawei-elb.io/elb-id annotation,
+// indicating we already created an ELB for it (Plan B direct-API mode).
+func hasManagedELBID(svc *corev1.Service) bool {
 	if svc.Annotations == nil {
 		return false
 	}
-	_, ok := svc.Annotations["kubernetes.io/elb.id"]
+	_, ok := svc.Annotations[huaweicloud.AnnotationELBID]
 	return ok
 }
 
-func hasAutocreate(svc *corev1.Service) bool {
-	if svc.Annotations == nil {
-		return false
-	}
-	_, ok := svc.Annotations["kubernetes.io/elb.autocreate"]
-	return ok
-}
 
 func hasLBCParams(svc *corev1.Service) bool {
 	if svc.Annotations == nil {
@@ -97,10 +94,14 @@ func shouldReconcileService(svc *corev1.Service) bool {
 	if !isLoadBalancerService(svc) {
 		return false
 	}
-	if hasELBID(svc) && !hasAutocreate(svc) {
-// Skip legacy ELB ID bindings, but allow Plan 2 autocreate Services
-return false
-}
+	// Skip Services with legacy kubernetes.io/elb.id (CCM-managed, not ours)
+	if hasLegacyELBID(svc) {
+		return false
+	}
+	// Skip Services with legacy kubernetes.io/elb.autocreate (old Plan 2 CCM mode)
+	if hasLegacyAutocreate(svc) {
+		return false
+	}
 	if hasForeignCloudServiceAnnotations(svc) {
 		return false
 	}
@@ -108,4 +109,24 @@ return false
 		return false
 	}
 	return true
+}
+
+// hasLegacyELBID checks for the old CCM-managed kubernetes.io/elb.id annotation.
+// Services with this annotation were created by the old autocreate controller
+// or by CCM directly. We skip them to avoid conflicts.
+func hasLegacyELBID(svc *corev1.Service) bool {
+	if svc.Annotations == nil {
+		return false
+	}
+	_, ok := svc.Annotations["kubernetes.io/elb.id"]
+	return ok
+}
+
+// hasLegacyAutocreate checks for the old kubernetes.io/elb.autocreate annotation.
+func hasLegacyAutocreate(svc *corev1.Service) bool {
+	if svc.Annotations == nil {
+		return false
+	}
+	_, ok := svc.Annotations["kubernetes.io/elb.autocreate"]
+	return ok
 }

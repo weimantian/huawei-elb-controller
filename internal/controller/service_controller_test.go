@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -30,19 +31,19 @@ import (
 )
 
 func newTestDetector(vpcID, subnetID string, azs []string) *huaweicloud.NetworkDetector {
-d := huaweicloud.NewNetworkDetector(nil)
-v := reflect.ValueOf(d).Elem()
-f := v.FieldByName("detected")
-f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
-f.Set(reflect.ValueOf(&huaweicloud.DetectedParams{
-VPCID:    vpcID,
-SubnetID: subnetID,
-AZs:      azs,
-}))
-t := v.FieldByName("detectedAt")
-t = reflect.NewAt(t.Type(), unsafe.Pointer(t.UnsafeAddr())).Elem()
-t.Set(reflect.ValueOf(time.Now()))
-return d
+	d := huaweicloud.NewNetworkDetector(nil)
+	v := reflect.ValueOf(d).Elem()
+	f := v.FieldByName("detected")
+	f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+	f.Set(reflect.ValueOf(&huaweicloud.DetectedParams{
+		VPCID:    vpcID,
+		SubnetID: subnetID,
+		AZs:      azs,
+	}))
+	t := v.FieldByName("detectedAt")
+	t = reflect.NewAt(t.Type(), unsafe.Pointer(t.UnsafeAddr())).Elem()
+	t.Set(reflect.ValueOf(time.Now()))
+	return d
 }
 
 type mockRoundTripper struct {
@@ -96,23 +97,117 @@ func makeTestService(name string) *corev1.Service {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
+			UID:       types.UID("test-uid-1234567890"),
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "percona-xtradb-cluster-operator",
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeLoadBalancer,
+			Ports: []corev1.ServicePort{
+				{
+					Port:     3306,
+					NodePort: 30006,
+					Protocol: corev1.ProtocolTCP,
+				},
+			},
 		},
 	}
 }
 
-func TestServiceReconciler_CreatePath_InjectsAutocreate(t *testing.T) {
-	svc := makeTestService("my-svc")
+// elbAPIRouter is a configurable mock ELB API server that routes by method+path.
+type elbAPIRouter struct {
+	createLBResp     string
+	createListenerResp string
+	createPoolResp   string
+	createMemberResp string
+	createHCResp     string
+	createIPGroupResp string
+	listListenersResp string
+	listPoolsResp    string
+	listMembersResp  string
+}
+
+func (m *elbAPIRouter) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		method := r.Method
+
+		switch {
+		// Create ELB
+		case method == "POST" && strings.HasSuffix(path, "/elb/loadbalancers"):
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(m.createLBResp))
+		// Show ELB (for WaitForELBActive)
+		case method == "GET" && strings.Contains(path, "/elb/loadbalancers/") && !strings.Contains(path, "listeners") && !strings.Contains(path, "pools"):
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(m.createLBResp))
+		// Create Listener
+		case method == "POST" && strings.HasSuffix(path, "/elb/listeners"):
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(m.createListenerResp))
+		// List Listeners
+		case method == "GET" && strings.HasSuffix(path, "/elb/listeners"):
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(m.listListenersResp))
+		// Create Pool
+		case method == "POST" && strings.HasSuffix(path, "/elb/pools"):
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(m.createPoolResp))
+		// List Pools
+		case method == "GET" && strings.HasSuffix(path, "/elb/pools"):
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(m.listPoolsResp))
+		// Create Member
+		case method == "POST" && strings.Contains(path, "/elb/pools/") && strings.HasSuffix(path, "/members"):
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(m.createMemberResp))
+		// List Members
+		case method == "GET" && strings.Contains(path, "/members"):
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(m.listMembersResp))
+		// Create Health Monitor
+		case method == "POST" && strings.HasSuffix(path, "/elb/healthmonitors"):
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(m.createHCResp))
+		// Create IP Group
+		case method == "POST" && strings.HasSuffix(path, "/elb/ipgroups"):
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(m.createIPGroupResp))
+		default:
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		}
+	})
+}
+
+func defaultRouter() *elbAPIRouter {
+	return &elbAPIRouter{
+		createLBResp:     `{"loadbalancer": {"id": "elb-mock-id", "name": "k8s-default-test", "provisioning_status": "ACTIVE", "vip_address": "192.168.1.10", "eips": [{"ip_address": "1.2.3.4", "id": "eip-1"}]}}`,
+		createListenerResp: `{"listener": {"id": "listener-1", "name": "test-3306", "protocol": "TCP", "protocol_port": 3306}}`,
+		createPoolResp:   `{"pool": {"id": "pool-1", "name": "pool-test-3306", "protocol": "TCP", "lb_algorithm": "ROUND_ROBIN"}}`,
+		createMemberResp: `{"member": {"id": "member-1", "address": "10.0.0.1", "protocol_port": 30006}}`,
+		createHCResp:     `{"healthmonitor": {"id": "hc-1", "type": "TCP"}}`,
+		createIPGroupResp: `{"ipgroup": {"id": "ipgroup-mock-id"}}`,
+		listListenersResp: `{"listeners": []}`,
+		listPoolsResp:    `{"pools": []}`,
+		listMembersResp:  `{"members": []}`,
+	}
+}
+
+func TestServiceReconciler_CreatePath_DirectAPI(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("direct-api-svc")
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1", "az2"})
 
 	r := &ServiceReconciler{
 		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
 		NetworkDetector: detector,
+		ELBClient:       mockClient,
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -124,39 +219,18 @@ func TestServiceReconciler_CreatePath_InjectsAutocreate(t *testing.T) {
 		t.Errorf("expected requeue after %v, got %v", serviceRequeue, result.RequeueAfter)
 	}
 
-	autocreate := svc.Annotations[huaweicloud.CCEAutocreateAnnotation]
-	if autocreate == "" {
-		t.Fatal("expected autocreate annotation to be set")
+	// Verify the ELB ID is persisted in the fake client (patchWithRetry writes to API server, not in-memory)
+	persisted := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "direct-api-svc", Namespace: "default"}, persisted); err != nil {
+		t.Fatalf("failed to get persisted service: %v", err)
 	}
-
-	var config huaweicloud.AutocreateConfig
-	if err := json.Unmarshal([]byte(autocreate), &config); err != nil {
-		t.Fatalf("autocreate JSON is invalid: %v", err)
+	if persisted.Annotations[huaweicloud.AnnotationELBID] != "elb-mock-id" {
+		t.Errorf("expected persisted elb-id=elb-mock-id, got %s", persisted.Annotations[huaweicloud.AnnotationELBID])
 	}
-	if config.VipSubnetCidrID != "subnet-test" {
-		t.Errorf("expected VipSubnetCidrID=subnet-test, got %s", config.VipSubnetCidrID)
+	if !controllerutil.ContainsFinalizer(persisted, huaweicloud.AnnotationELBCleanupFinalizer) {
+		t.Error("expected elb-cleanup finalizer to be persisted")
 	}
-	if config.Type != "public" {
-		t.Errorf("expected type=public, got %s", config.Type)
-	}
-	if config.BandwidthSize != int32(huaweicloud.DefaultBandwidthSize) {
-		t.Errorf("expected BandwidthSize=%d, got %d", huaweicloud.DefaultBandwidthSize, config.BandwidthSize)
-	}
-	if len(config.AvailableZone) != 2 || config.AvailableZone[0] != "az1" || config.AvailableZone[1] != "az2" {
-		t.Errorf("expected AvailableZone=[az1 az2], got %v", config.AvailableZone)
-	}
-
-	if svc.Annotations[elbClassAnnotation] != "union" {
-		t.Errorf("expected elb.class=union, got %s", svc.Annotations[elbClassAnnotation])
-	}
-	if svc.Annotations[reclaimPolicyAnnotation] != "alwaysDelete" {
-		t.Errorf("expected reclaim-policy=alwaysDelete, got %s", svc.Annotations[reclaimPolicyAnnotation])
-	}
-	if svc.Annotations[aclStatusAnnotation] != "off" {
-		t.Errorf("expected acl-status=off, got %s", svc.Annotations[aclStatusAnnotation])
-	}
-
-	lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]
+	lastKnownJSON := persisted.Annotations[lastKnownParamsAnnotation]
 	if lastKnownJSON == "" {
 		t.Error("expected last-known-params annotation to be set")
 	} else {
@@ -169,43 +243,12 @@ func TestServiceReconciler_CreatePath_InjectsAutocreate(t *testing.T) {
 	}
 }
 
-func TestServiceReconciler_CreatePath_WithLBCParams(t *testing.T) {
-	svc := makeTestService("my-svc")
-	svc.Annotations = map[string]string{
-		huaweicloud.LBCBandwidthSizeAnnotation: "50",
-		huaweicloud.LBCNameAnnotation:          "custom-name",
-	}
-	detector := newTestDetector("vpc-x", "subnet-y", []string{"az-a"})
-
-	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
-		NetworkDetector: detector,
-	}
-
-	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
-	_, err := r.reconcileCreate(ctx, logr.Discard(), svc)
-	if err != nil {
-		t.Fatalf("reconcileCreate returned error: %v", err)
-	}
-
-	autocreate := svc.Annotations[huaweicloud.CCEAutocreateAnnotation]
-	if autocreate == "" {
-		t.Fatal("expected autocreate annotation to be set")
-	}
-
-	var config huaweicloud.AutocreateConfig
-	if err := json.Unmarshal([]byte(autocreate), &config); err != nil {
-		t.Fatalf("autocreate JSON is invalid: %v", err)
-	}
-	if config.BandwidthSize != 50 {
-		t.Errorf("expected BandwidthSize=50 from LBC params, got %d", config.BandwidthSize)
-	}
-	if config.Name != "custom-name" {
-		t.Errorf("expected Name=custom-name from LBC params, got %s", config.Name)
-	}
-}
-
 func TestServiceReconciler_CreatePath_InternalELB(t *testing.T) {
+	router := defaultRouter()
+	router.createLBResp = `{"loadbalancer": {"id": "elb-internal-id", "name": "k8s-default-internal-svc", "provisioning_status": "ACTIVE", "vip_address": "192.168.1.20"}}`
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
 	svc := makeTestService("internal-svc")
 	svc.Annotations = map[string]string{
 		huaweicloud.LBCPublicAnnotation: "false",
@@ -215,6 +258,7 @@ func TestServiceReconciler_CreatePath_InternalELB(t *testing.T) {
 	r := &ServiceReconciler{
 		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
 		NetworkDetector: detector,
+		ELBClient:       mockClient,
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -223,25 +267,51 @@ func TestServiceReconciler_CreatePath_InternalELB(t *testing.T) {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
 
-	var config huaweicloud.AutocreateConfig
-	if err := json.Unmarshal([]byte(svc.Annotations[huaweicloud.CCEAutocreateAnnotation]), &config); err != nil {
-		t.Fatalf("autocreate JSON is invalid: %v", err)
+	persisted := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "internal-svc", Namespace: "default"}, persisted); err != nil {
+		t.Fatalf("failed to get persisted service: %v", err)
 	}
-	if config.Type != "" {
-		t.Errorf("expected type empty for internal ELB, got %s", config.Type)
+	if persisted.Annotations[huaweicloud.AnnotationELBID] != "elb-internal-id" {
+		t.Errorf("expected elb-id=elb-internal-id, got %s", persisted.Annotations[huaweicloud.AnnotationELBID])
 	}
-	if config.BandwidthSize != 0 {
-		t.Errorf("expected BandwidthSize=0 for internal ELB, got %d", config.BandwidthSize)
+}
+
+func TestServiceReconciler_CreatePath_WithLBCParams(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("lbc-params-svc")
+	svc.Annotations = map[string]string{
+		huaweicloud.LBCBandwidthSizeAnnotation: "50",
+		huaweicloud.LBCNameAnnotation:          "custom-elb-name",
+	}
+	detector := newTestDetector("vpc-x", "subnet-y", []string{"az-a"})
+
+	r := &ServiceReconciler{
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		NetworkDetector: detector,
+		ELBClient:       mockClient,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileCreate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileCreate returned error: %v", err)
+	}
+
+	persisted := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "lbc-params-svc", Namespace: "default"}, persisted); err != nil {
+		t.Fatalf("failed to get persisted service: %v", err)
+	}
+	if persisted.Annotations[huaweicloud.AnnotationELBID] == "" {
+		t.Error("expected ELB ID to be set")
 	}
 }
 
 func TestServiceReconciler_CreatePath_ACLWithSourceRanges(t *testing.T) {
-	ipGroupHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"ipgroup": {"id": "ipgroup-mock-id"}}`))
-	})
-	mockClient, server := newMockELBClient(ipGroupHandler)
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
 	defer server.Close()
 
 	svc := makeTestService("acl-svc")
@@ -271,18 +341,12 @@ func TestServiceReconciler_CreatePath_ACLWithSourceRanges(t *testing.T) {
 	}
 }
 
-// TestServiceReconciler_CreatePath_ACLFinalizerPersisted 是 C-NEW-2 回归测试。
-// 之前 reconcileCreate 的 patchWithRetry 只拷贝了 annotations，
-// 没有拷贝 aclCleanupFinalizer，导致 finalizer 被静默丢弃，
-// Service 删除时清理路径不会触发，IP 组成为孤儿资源。
-// 此测试从 fake client 重新读取 service，验证 finalizer 真正落库。
+// TestServiceReconciler_CreatePath_ACLFinalizerPersisted is a regression test for C-NEW-2.
+// Verifies that aclCleanupFinalizer is actually persisted to the API server, not just
+// set on the in-memory object.
 func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
-	ipGroupHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"ipgroup": {"id": "ipgroup-mock-id"}}`))
-	})
-	mockClient, server := newMockELBClient(ipGroupHandler)
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
 	defer server.Close()
 
 	svc := makeTestService("acl-finalizer-svc")
@@ -302,22 +366,40 @@ func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
 
-	// 从 API server 重新读取，验证 finalizer 真正持久化（不是只存在于内存对象）
+	// Read back from API server to verify finalizer persistence
 	persisted := &corev1.Service{}
 	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "acl-finalizer-svc", Namespace: "default"}, persisted); err != nil {
 		t.Fatalf("failed to get persisted service: %v", err)
 	}
 
 	if !controllerutil.ContainsFinalizer(persisted, aclCleanupFinalizer) {
-		t.Errorf("expected acl-cleanup finalizer to be persisted on service in API server, got finalizers=%v", persisted.Finalizers)
+		t.Errorf("expected acl-cleanup finalizer to be persisted, got finalizers=%v", persisted.Finalizers)
 	}
-
-	// 同时验证 ACL annotation 也持久化了
 	if persisted.Annotations[aclIDAnnotation] != "ipgroup-mock-id" {
 		t.Errorf("expected persisted acl-id=ipgroup-mock-id, got %s", persisted.Annotations[aclIDAnnotation])
 	}
-	if persisted.Annotations[aclStatusAnnotation] != "on" {
-		t.Errorf("expected persisted acl-status=on, got %s", persisted.Annotations[aclStatusAnnotation])
+}
+
+func TestServiceReconciler_CreatePath_DetectorError(t *testing.T) {
+	svc := makeTestService("detector-error-svc")
+	// Fresh detector with no cached detection result
+	detector := huaweicloud.NewNetworkDetector(nil)
+
+	r := &ServiceReconciler{
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		NetworkDetector: detector,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	result, err := r.reconcileCreate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileCreate returned error: %v", err)
+	}
+	if result.RequeueAfter != serviceRetryRequeue {
+		t.Errorf("expected retry requeue after %v for detector error, got %v", serviceRetryRequeue, result.RequeueAfter)
+	}
+	if svc.Annotations[huaweicloud.AnnotationELBID] != "" {
+		t.Error("expected no ELB ID annotation on detector error")
 	}
 }
 
@@ -348,8 +430,8 @@ func TestServiceReconciler_Skips_NonLoadBalancer(t *testing.T) {
 	}
 }
 
-func TestServiceReconciler_Skips_WithELBID(t *testing.T) {
-	svc := makeTestService("with-elb-id")
+func TestServiceReconciler_Skips_LegacyELBID(t *testing.T) {
+	svc := makeTestService("legacy-elb-id-svc")
 	svc.Annotations = map[string]string{
 		"kubernetes.io/elb.id": "elb-existing-id",
 	}
@@ -359,17 +441,36 @@ func TestServiceReconciler_Skips_WithELBID(t *testing.T) {
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "with-elb-id", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "legacy-elb-id-svc", Namespace: "default"}}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {
 		t.Fatalf("Reconcile returned error: %v", err)
 	}
 	if !result.IsZero() {
-		t.Errorf("expected zero result when ELB ID exists, got %v", result)
+		t.Errorf("expected zero result for legacy ELB ID, got %v", result)
 	}
-	if svc.Annotations[huaweicloud.CCEAutocreateAnnotation] != "" {
-		t.Error("expected no autocreate annotation when ELB ID exists")
+}
+
+func TestServiceReconciler_Skips_LegacyAutocreate(t *testing.T) {
+	svc := makeTestService("legacy-autocreate-svc")
+	svc.Annotations = map[string]string{
+		"kubernetes.io/elb.autocreate": `{"type":"public"}`,
+	}
+
+	r := &ServiceReconciler{
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "legacy-autocreate-svc", Namespace: "default"}}
+
+	result, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.IsZero() {
+		t.Errorf("expected zero result for legacy autocreate, got %v", result)
 	}
 }
 
@@ -422,50 +523,24 @@ func TestServiceReconciler_Skips_ForeignCloudAnnotations(t *testing.T) {
 	}
 }
 
-func TestServiceReconciler_UpdatePath_ParamsChangedWithMock(t *testing.T) {
-	listHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"loadbalancers":[]}`))
-	})
-	mockClient, server := newMockELBClient(listHandler)
+func TestServiceReconciler_UpdatePath_WithManagedELBID(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
 	defer server.Close()
 
-	svc := makeTestService("update-svc")
+	svc := makeTestService("managed-update-svc")
 	svc.Annotations = map[string]string{
-		huaweicloud.CCEAutocreateAnnotation:      `{"type":"public"}`,
-		lastKnownParamsAnnotation:                `{"huawei-elb.io/bandwidth-size":"10","source-ranges":"[]"}`,
-		huaweicloud.LBCBandwidthSizeAnnotation:   "20",
-		aclStatusAnnotation:                      "off",
-	}
-
-	r := &ServiceReconciler{
-		Client:    fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
-		ELBClient: mockClient,
-	}
-
-	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
-	result, err := r.reconcileUpdate(ctx, logr.Discard(), svc)
-	if err != nil {
-		t.Fatalf("reconcileUpdate returned error: %v", err)
-	}
-	if result.RequeueAfter != serviceRetryRequeue {
-		t.Errorf("expected requeue after %v (ELB not found, fast retry), got %v", serviceRetryRequeue, result.RequeueAfter)
-	}
-}
-
-func TestServiceReconciler_UpdatePath_WithELBID(t *testing.T) {
-	svc := makeTestService("elbid-update-svc")
-	svc.Annotations = map[string]string{
-		huaweicloud.CCEAutocreateAnnotation:    `{"type":"public"}`,
-		huaweicloud.AnnotationELBID:            "elb-123",
+		huaweicloud.AnnotationELBID:           "elb-123",
 		lastKnownParamsAnnotation:              `{"huawei-elb.io/bandwidth-size":"10","source-ranges":"[]"}`,
 		huaweicloud.LBCBandwidthSizeAnnotation: "10",
 		aclStatusAnnotation:                    "off",
 	}
+	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
 	r := &ServiceReconciler{
-		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		ELBClient:       mockClient,
+		NetworkDetector: detector,
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -478,36 +553,111 @@ func TestServiceReconciler_UpdatePath_WithELBID(t *testing.T) {
 	}
 }
 
-func TestAclAnnotationLogic(t *testing.T) {
-	svc := makeTestService("acl-test")
+func TestServiceReconciler_UpdatePath_FallsBackToCreateWhenELBIDMissing(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("fallback-create-svc")
+	// hasManagedELBID was true (entered update path) but elb-id annotation is empty
+	// This is an edge case - should fall back to create
+	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
+
+	r := &ServiceReconciler{
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		ELBClient:       mockClient,
+		NetworkDetector: detector,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileUpdate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileUpdate returned error: %v", err)
+	}
+	// After fallback to create, ELB ID should be persisted
+	persisted := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "fallback-create-svc", Namespace: "default"}, persisted); err != nil {
+		t.Fatalf("failed to get persisted service: %v", err)
+	}
+	if persisted.Annotations[huaweicloud.AnnotationELBID] == "" {
+		t.Error("expected ELB ID to be set after fallback to create")
+	}
+}
+
+func TestServiceReconciler_DeletePath_RemovesELBAndFinalizer(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("delete-svc")
+	now := metav1.Now()
+	svc.DeletionTimestamp = &now
 	svc.Annotations = map[string]string{
-		huaweicloud.CCEAutocreateAnnotation: `{"type":"public"}`,
-		lastKnownParamsAnnotation:           `{"huawei-elb.io/bandwidth-size":"10","source-ranges":"[\"10.0.0.0/8\"]"}`,
+		huaweicloud.AnnotationELBID: "elb-to-delete",
+	}
+	controllerutil.AddFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	r := &ServiceReconciler{
+		Client:    fakeClient,
+		ELBClient: mockClient,
 	}
 
-	lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]
-	var lastKnownParams map[string]string
-	_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
-	t.Logf("lastKnownParams: %v", lastKnownParams)
-
-	lastSourceRangesJSON := lastKnownParams[sourceRangesKey]
-	t.Logf("lastSourceRangesJSON: %q", lastSourceRangesJSON)
-	var lastSourceRanges []string
-	_ = json.Unmarshal([]byte(lastSourceRangesJSON), &lastSourceRanges)
-
-	currentSourceRanges := svc.Spec.LoadBalancerSourceRanges
-	t.Logf("lastSourceRanges=%v, currentSourceRanges=%v", lastSourceRanges, currentSourceRanges)
-	t.Logf("sourceRangesEqual=%v", sourceRangesEqual(lastSourceRanges, currentSourceRanges))
-
-	aclChanged := !sourceRangesEqual(lastSourceRanges, currentSourceRanges)
-	t.Logf("aclChanged=%v, len(current)=%d", aclChanged, len(currentSourceRanges))
-
-	if aclChanged && len(currentSourceRanges) == 0 {
-		svc.Annotations[aclStatusAnnotation] = "off"
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	result, err := r.reconcileDelete(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileDelete returned error: %v", err)
+	}
+	if !result.IsZero() {
+		t.Errorf("expected zero result after delete, got %v", result)
 	}
 
-	if svc.Annotations[aclStatusAnnotation] != "off" {
-		t.Errorf("expected off, got %q. aclChanged=%v", svc.Annotations[aclStatusAnnotation], aclChanged)
+	// After all finalizers removed, the fake client (like a real API server) deletes the object.
+	persisted := &corev1.Service{}
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "delete-svc", Namespace: "default"}, persisted)
+	if err == nil {
+		t.Fatalf("expected service to be deleted after finalizers removed, but it still exists with finalizers=%v", persisted.Finalizers)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected NotFound error, got: %v", err)
+	}
+}
+
+func TestServiceReconciler_DeletePath_ACLFinalizerCleanup(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("delete-acl-svc")
+	now := metav1.Now()
+	svc.DeletionTimestamp = &now
+	svc.Annotations = map[string]string{
+		huaweicloud.AnnotationELBID: "elb-to-delete",
+		aclIDAnnotation:              "ipgroup-to-delete",
+	}
+	controllerutil.AddFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer)
+	controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	r := &ServiceReconciler{
+		Client:    fakeClient,
+		ELBClient: mockClient,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileDelete(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileDelete returned error: %v", err)
+	}
+
+	// After all finalizers removed, the fake client deletes the object.
+	persisted := &corev1.Service{}
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "delete-acl-svc", Namespace: "default"}, persisted)
+	if err == nil {
+		t.Fatalf("expected service to be deleted after finalizers removed, but it still exists with finalizers=%v", persisted.Finalizers)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected NotFound error, got: %v", err)
 	}
 }
 
@@ -746,24 +896,26 @@ func TestBuildUpdateOption_MissingKeys(t *testing.T) {
 	}
 }
 
-func TestServiceReconciler_CreatePath_DetectorError(t *testing.T) {
-	svc := makeTestService("detector-error-svc")
-	detector := huaweicloud.NewNetworkDetector(nil)
-
-	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).Build(),
-		NetworkDetector: detector,
+func TestFilterValidCIDRs(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected int
+	}{
+		{name: "nil", input: nil, expected: 0},
+		{name: "empty", input: []string{}, expected: 0},
+		{name: "all valid", input: []string{"10.0.0.0/8", "192.168.0.0/16"}, expected: 2},
+		{name: "mixed valid/invalid", input: []string{"10.0.0.0/8", "invalid", "192.168.0.0/16"}, expected: 2},
+		{name: "all invalid", input: []string{"invalid", "also-invalid"}, expected: 0},
+		{name: "ipv6 valid", input: []string{"::1/128", "2001:db8::/32"}, expected: 2},
 	}
 
-	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
-	result, err := r.reconcileCreate(ctx, logr.Discard(), svc)
-	if err != nil {
-		t.Fatalf("reconcileCreate returned error: %v", err)
-	}
-	if result.RequeueAfter != serviceRetryRequeue {
-		t.Errorf("expected retry requeue after %v for detector error, got %v", serviceRetryRequeue, result.RequeueAfter)
-	}
-	if svc.Annotations[huaweicloud.CCEAutocreateAnnotation] != "" {
-		t.Error("expected no autocreate annotation on detector error")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterValidCIDRs(logr.Discard(), tt.input)
+			if len(result) != tt.expected {
+				t.Errorf("expected %d valid CIDRs, got %d: %v", tt.expected, len(result), result)
+			}
+		})
 	}
 }

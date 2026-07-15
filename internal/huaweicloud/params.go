@@ -1,7 +1,6 @@
 package huaweicloud
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,9 +13,9 @@ const (
 	LBCEIPTypeAnnotation             = "huawei-elb.io/eip-type"
 	LBCBandwidthShareTypeAnnotation  = "huawei-elb.io/bandwidth-share-type"
 	LBCNameAnnotation                = "huawei-elb.io/name"
+	AnnotationELBID                = "huawei-elb.io/elb-id"
+	AnnotationELBCleanupFinalizer  = "huawei-elb.io/elb-cleanup"
 )
-
-const CCEAutocreateAnnotation = "kubernetes.io/elb.autocreate"
 
 const (
 	DefaultBandwidthSize       = 10
@@ -27,67 +26,36 @@ const (
 	ipGroupListLimit           = 200
 )
 
-type AutocreateConfig struct {
-	Name                string   `json:"name,omitempty"`
-	Type                string   `json:"type,omitempty"`
-	BandwidthName       string   `json:"bandwidth_name,omitempty"`
-	BandwidthChargeMode string   `json:"bandwidth_chargemode,omitempty"`
-	BandwidthSize       int32    `json:"bandwidth_size,omitempty"`
-	BandwidthShareType  string   `json:"bandwidth_sharetype,omitempty"`
-	EipType             string   `json:"eip_type,omitempty"`
-	VipSubnetCidrID     string   `json:"vip_subnet_cidr_id,omitempty"`
-	AvailableZone       []string `json:"available_zone,omitempty"`
-}
 
-func BuildAutocreateJSON(lbcParams map[string]string, detectedSubnetID string, detectedAZs []string, serviceName string) (string, error) {
-	config := BuildAutocreateConfig(lbcParams, detectedSubnetID, detectedAZs, serviceName)
-	data, err := json.Marshal(config)
-	if err != nil {
-		return "", fmt.Errorf("marshaling autocreate config: %w", err)
-	}
-	return string(data), nil
-}
-
-func BuildAutocreateConfig(lbcParams map[string]string, detectedSubnetID string, detectedAZs []string, serviceName string) *AutocreateConfig {
-	elbType := resolveELBType(lbcParams)
-
-	cfg := &AutocreateConfig{
-		VipSubnetCidrID: detectedSubnetID,
-		AvailableZone:   detectedAZs,
-	}
-
-	if elbType == "inner" {
-		cfg.Name = resolveName(lbcParams, serviceName)
-		return cfg
-	}
-
-	cfg.Type = elbType
-	cfg.Name = resolveName(lbcParams, serviceName)
-	cfg.BandwidthName = truncateStr(fmt.Sprintf("cce-lb-%s-bw", serviceName), 64)
-	cfg.BandwidthSize = resolveBandwidthSize(lbcParams)
-	cfg.BandwidthChargeMode = resolveStringParam(lbcParams, LBCBandwidthChargeModeAnnotation, DefaultBandwidthChargeMode)
-	cfg.BandwidthShareType = resolveStringParam(lbcParams, LBCBandwidthShareTypeAnnotation, DefaultBandwidthShareType)
-	cfg.EipType = resolveStringParam(lbcParams, LBCEIPTypeAnnotation, DefaultEIPType)
-
-	return cfg
-}
-
-func DefaultAutocreateConfig(detectedSubnetID string, detectedAZs []string, serviceName string) *AutocreateConfig {
-	return BuildAutocreateConfig(nil, detectedSubnetID, detectedAZs, serviceName)
-}
-
-func resolveELBType(params map[string]string) string {
-	if v, ok := params[LBCPublicAnnotation]; ok && strings.ToLower(v) == "false" {
-		return "inner"
-	}
-	return "public"
-}
-
-func resolveName(params map[string]string, serviceName string) string {
-	if v, ok := params[LBCNameAnnotation]; ok && v != "" {
+// BuildELBName generates the ELB name following EKS/GKE naming conventions:
+// k8s-{ns_8}-{name_8}-{uid_10}
+// Total length ~32 chars, well within Huawei Cloud's 64-char limit.
+// If the user specified huawei-elb.io/name, that takes precedence.
+func BuildELBName(lbcParams map[string]string, namespace, name, uid string) string {
+	if v, ok := lbcParams[LBCNameAnnotation]; ok && v != "" {
 		return truncateStr(v, 64)
 	}
-	return truncateStr(fmt.Sprintf("cce-lb-%s", serviceName), 64)
+	return truncateStr(fmt.Sprintf("k8s-%s-%s-%s", shortStr(namespace, 8), shortStr(name, 8), shortStr(uid, 10)), 64)
+}
+
+// IsInternalELB returns true if the params indicate an internal (private) ELB.
+func IsInternalELB(params map[string]string) bool {
+	v, ok := params[LBCPublicAnnotation]
+	return ok && strings.ToLower(v) == "false"
+}
+
+// BuildCreateELBOption builds the CreateELBOption from LBC params and detected network info.
+func BuildCreateELBOption(lbcParams map[string]string, vpcID, subnetID string, azs []string, namespace, name, uid string) CreateELBOption {
+	return CreateELBOption{
+		Name:                 BuildELBName(lbcParams, namespace, name, uid),
+		VpcID:                vpcID,
+		VipSubnetCidrID:      subnetID,
+		AvailabilityZoneList: azs,
+		IsPublic:             !IsInternalELB(lbcParams),
+		BandwidthSize:        resolveBandwidthSize(lbcParams),
+		BandwidthChargeMode:  resolveStringParam(lbcParams, LBCBandwidthChargeModeAnnotation, DefaultBandwidthChargeMode),
+		PublicIPNetworkType:  resolveStringParam(lbcParams, LBCEIPTypeAnnotation, DefaultEIPType),
+	}
 }
 
 func resolveBandwidthSize(params map[string]string) int32 {
@@ -114,6 +82,15 @@ func resolveStringParam(params map[string]string, key, defaultVal string) string
 
 // truncateStr truncates s to maxLen characters (Unicode-safe).
 func truncateStr(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen])
+}
+
+// shortStr truncates s to maxLen characters.
+func shortStr(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s

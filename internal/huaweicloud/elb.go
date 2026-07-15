@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	eipv2 "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2"
 	eipv2model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2/model"
@@ -97,6 +98,25 @@ func ShowELB(client *elb.ElbClient, id string) (*ELBInfo, error) {
 	}
 
 	return loadBalancerToInfo(resp.Loadbalancer), nil
+}
+
+// WaitForELBActive polls the ELB until its provisioning status becomes ACTIVE
+// or the timeout is reached. Returns (true, nil) if ACTIVE, (false, nil) if
+// timeout, or (false, err) on lookup error.
+func WaitForELBActive(client *elb.ElbClient, elbID string, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	const interval = 3 * time.Second
+	for time.Now().Before(deadline) {
+		info, err := ShowELB(client, elbID)
+		if err != nil {
+			return false, err
+		}
+		if info.ProvisioningStatus == "ACTIVE" {
+			return true, nil
+		}
+		time.Sleep(interval)
+	}
+	return false, nil
 }
 
 // FindELBByName lists ELBs filtered by name and returns the first match.
@@ -330,8 +350,6 @@ func eipResolveChargeMode(mode string) eipv2model.UpdateBandwidthOptionChargeMod
 	return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().TRAFFIC
 }
 
-// AnnotationELBID is the Kubernetes annotation for CCE ELB integration.
-const AnnotationELBID = "kubernetes.io/elb.id"
 
 // ELBNamePrefix is prepended to the LoadBalancerConfig name to form the ELB name.
 const ELBNamePrefix = "elb-"

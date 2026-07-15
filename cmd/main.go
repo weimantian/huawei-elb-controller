@@ -1,9 +1,11 @@
 // Command huawei-elb-controller is a Kubernetes controller that manages Huawei
-// Cloud ELBs for OpenEverest V1 (Percona Everest). It provides two reconcilers:
+// Cloud ELBs for OpenEverest database clusters. It provides two reconcilers:
 //
-//  1. Service Reconciler (Plan 2): watches LoadBalancer Services, injects
-//     CCE autocreate annotations for ELB creation, and updates ELB parameters
-//     when LBC annotations change.
+//  1. Service Reconciler (Plan B - direct API): watches LoadBalancer Services
+//     created by OpenEverest and manages ELBs directly via the Huawei Cloud ELB v3
+//     API (create/delete ELB + listener + pool + members + health check). This
+//     replaces CCM autocreate to permanently avoid kubernetes.io/elb.* annotation
+//     conflicts with PSMDB operator.
 //  2. LoadBalancerConfig Reconciler (legacy): watches LoadBalancerConfig CRs
 //     and creates/deletes ELBs via the Huawei Cloud ELB v3 API.
 package main
@@ -64,9 +66,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 5. Register the Service Reconciler (Plan 2 — primary reconciler).
-	//    Watches LoadBalancer Services, injects autocreate annotations for ELB
-	//    creation, and handles parameter updates via Huawei Cloud ELB API.
+	// 5. Register the Service Reconciler (Plan B - direct ELB API).
+	//    Watches LoadBalancer Services, creates/manages ELBs directly via Huawei
+	//    Cloud API (no CCM autocreate annotations). Handles full lifecycle:
+	//    create/update/delete ELB + listener + pool + members + health check.
 	if err := (&controller.ServiceReconciler{
 		Client:          mgr.GetClient(),
 		ELBClient:       elbClient,
@@ -99,7 +102,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("starting huawei-elb-controller (Plan 2: Service Reconciler + legacy LBC Reconciler)",
+	logger.Info("starting huawei-elb-controller (Plan B: direct ELB API Service Reconciler + legacy LBC Reconciler)",
 		"region", creds.Region, "metrics", metricsAddr)
 
 	// 6. Run until SIGTERM/SIGINT.
