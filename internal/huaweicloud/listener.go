@@ -60,6 +60,34 @@ func DeleteListener(client *elb.ElbClient, listenerID string) error {
 	return nil
 }
 
+// UpdateListenerACL binds or unbinds an IP group to/from a listener.
+// When enable is true, ipGroupID must be non-empty; the IP group is attached as a white list.
+// When enable is false, the ACL is disabled on the listener (IP group detached).
+func UpdateListenerACL(client *elb.ElbClient, listenerID, ipGroupID string, enable bool) error {
+	ipgroup := model.UpdateListenerIpGroupOption{
+		EnableIpgroup: &enable,
+	}
+	if enable {
+		ipgroup.IpgroupId = &ipGroupID
+		t := model.GetUpdateListenerIpGroupOptionTypeEnum().WHITE
+		ipgroup.Type = &t
+	}
+
+	req := model.UpdateListenerRequest{
+		ListenerId: listenerID,
+		Body: &model.UpdateListenerRequestBody{
+			Listener: &model.UpdateListenerOption{
+				Ipgroup: &ipgroup,
+			},
+		},
+	}
+
+	if _, err := client.UpdateListener(&req); err != nil {
+		return fmt.Errorf("updating listener %q ACL: %w", listenerID, err)
+	}
+	return nil
+}
+
 // ListListeners lists all listeners on the specified ELB.
 func ListListeners(client *elb.ElbClient, elbID string) ([]ListenerInfo, error) {
 	elbIDs := []string{elbID}

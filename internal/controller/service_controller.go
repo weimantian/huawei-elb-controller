@@ -133,6 +133,33 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
+	// Guard against annotation loss: OpenEverest may overwrite our huawei-elb.io/elb-id
+	// annotation when syncing LBC params, causing Reconcile to route back to create.
+	// Before creating, check if an ELB with the expected name already exists.
+	// If found, restore the annotation + finalizer and return; the next reconcile
+	// will route to reconcileUpdate and complete provisioning.
+	elbName := huaweicloud.BuildELBName(lbcParams, svc.Namespace, svc.Name, string(svc.UID))
+	existing, findErr := huaweicloud.FindELBByName(r.ELBClient, elbName)
+	if findErr != nil {
+		logger.Error(findErr, "checking for existing ELB by name before create")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+	if existing != nil {
+		logger.Info("Found existing ELB by name, restoring annotation and routing to update", "elbID", existing.ID, "name", elbName)
+		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+			if latest.Annotations == nil {
+				latest.Annotations = make(map[string]string)
+			}
+			latest.Annotations[huaweicloud.AnnotationELBID] = existing.ID
+			controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
+			return nil
+		}); err != nil {
+			logger.Error(err, "restoring ELB ID annotation")
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Create the ELB.
 	opt := huaweicloud.BuildCreateELBOption(lbcParams, vpcID, subnetID, azs, svc.Namespace, svc.Name, string(svc.UID))
 	logger.Info("Creating ELB via direct API", "name", opt.Name, "public", opt.IsPublic)
@@ -196,7 +223,7 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}
 
 	// ACL handling (IP groups for source ranges).
-	if err := r.ensureACL(ctx, logger, svc); err != nil {
+	if err := r.ensureACL(ctx, logger, info.ID, svc); err != nil {
 		logger.Error(err, "ensuring ACL, will retry")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
@@ -321,7 +348,7 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 	}
 
 	// 4. Handle ACL changes (source ranges).
-	if err := r.ensureACL(ctx, logger, svc); err != nil {
+	if err := r.ensureACL(ctx, logger, elbID, svc); err != nil {
 		logger.Error(err, "ensuring ACL")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
@@ -568,11 +595,37 @@ func (r *ServiceReconciler) deleteELBStack(logger logr.Logger, elbID string) err
 			return fmt.Errorf("deleting listener %s: %w", l.ID, err)
 		}
 	}
-	return huaweicloud.DeleteELB(r.ELBClient, elbID)
+	// Get EIP ID before deleting ELB (ShowELB fails after ELB is deleted).
+	eipID := ""
+	info, showErr := huaweicloud.ShowELB(r.ELBClient, elbID)
+	if showErr != nil {
+		if !huaweicloud.IsNotFoundError(showErr) {
+			logger.Error(showErr, "showing ELB to get EIP ID before deletion", "elbID", elbID)
+		}
+	} else {
+		eipID = info.EipID
+	}
+
+	// Delete the ELB.
+	if err := huaweicloud.DeleteELB(r.ELBClient, elbID); err != nil {
+		return err
+	}
+
+	// Delete the EIP if the ELB had one.
+	// DeleteELB unbinds the EIP but does not delete it; without this step the EIP leaks.
+	if eipID != "" {
+		logger.Info("Deleting EIP after ELB deletion", "eipID", eipID, "elbID", elbID)
+		if err := huaweicloud.DeleteEIPByID(r.Creds, eipID); err != nil {
+			logger.Error(err, "deleting EIP, manual cleanup needed", "eipID", eipID)
+			// Don't fail: ELB is already deleted, EIP is just orphaned.
+		}
+	}
+
+	return nil
 }
 
 // ensureACL creates/updates/deletes the ACL IP group based on loadBalancerSourceRanges.
-func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, svc *corev1.Service) error {
+func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, elbID string, svc *corev1.Service) error {
 	sourceRanges := svc.Spec.LoadBalancerSourceRanges
 	filteredCIDRs := filterValidCIDRs(logger, sourceRanges)
 
@@ -582,8 +635,14 @@ func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, s
 
 
 	if len(filteredCIDRs) == 0 {
-		// No source ranges: disable ACL, delete IP group if exists.
+		// No source ranges: unbind ACL from listeners, then delete IP group if exists.
 		if oldID := svc.Annotations[aclIDAnnotation]; oldID != "" {
+			// Unbind IP group from all listeners before deleting it.
+			if elbID != "" {
+				if err := r.unbindACLFromAllListeners(logger, elbID); err != nil {
+					return err
+				}
+			}
 			if err := huaweicloud.DeleteIPGroup(r.ELBClient, oldID); err != nil {
 				if !huaweicloud.IsNotFoundError(err) {
 					return err
@@ -618,10 +677,47 @@ func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, s
 			return err
 		}
 		svc.Annotations[aclIDAnnotation] = newID
+		ipGroupID = newID
 		svc.Annotations[aclStatusAnnotation] = "on"
 		svc.Annotations[aclTypeAnnotation] = "white"
 		controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 	}
+	// Bind IP group to all listeners on the ELB.
+	if elbID != "" {
+		if err := r.bindACLToAllListeners(logger, elbID, ipGroupID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bindACLToAllListeners binds the IP group to all listeners on the specified ELB.
+func (r *ServiceReconciler) bindACLToAllListeners(logger logr.Logger, elbID, ipGroupID string) error {
+	listeners, err := huaweicloud.ListListeners(r.ELBClient, elbID)
+	if err != nil {
+		return fmt.Errorf("listing listeners for ACL binding: %w", err)
+	}
+	for _, l := range listeners {
+		if err := huaweicloud.UpdateListenerACL(r.ELBClient, l.ID, ipGroupID, true); err != nil {
+			return fmt.Errorf("binding ACL to listener %s: %w", l.ID, err)
+		}
+	}
+	logger.Info("ACL bound to listeners", "elbID", elbID, "ipGroupID", ipGroupID, "listenerCount", len(listeners))
+	return nil
+}
+
+// unbindACLFromAllListeners disables the ACL on all listeners on the specified ELB.
+func (r *ServiceReconciler) unbindACLFromAllListeners(logger logr.Logger, elbID string) error {
+	listeners, err := huaweicloud.ListListeners(r.ELBClient, elbID)
+	if err != nil {
+		return fmt.Errorf("listing listeners for ACL unbinding: %w", err)
+	}
+	for _, l := range listeners {
+		if err := huaweicloud.UpdateListenerACL(r.ELBClient, l.ID, "", false); err != nil {
+			return fmt.Errorf("unbinding ACL from listener %s: %w", l.ID, err)
+		}
+	}
+	logger.Info("ACL unbound from listeners", "elbID", elbID, "listenerCount", len(listeners))
 	return nil
 }
 

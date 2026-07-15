@@ -151,6 +151,24 @@ func DeleteELB(client *elb.ElbClient, id string) error {
 	return nil
 }
 
+// DeleteEIPByID deletes an EIP by its ID using the EIP v2 API.
+// This is used to clean up the EIP after ELB deletion, since DeleteELB does not
+// automatically delete the associated EIP (it only unbinds it).
+func DeleteEIPByID(creds *Credentials, eipID string) error {
+	eipClient, err := NewEIPClient(creds)
+	if err != nil {
+		return fmt.Errorf("creating EIP client: %w", err)
+	}
+
+	req := eipv2model.DeletePublicipRequest{
+		PublicipId: eipID,
+	}
+	if _, err := eipClient.DeletePublicip(&req); err != nil {
+		return fmt.Errorf("deleting EIP %q: %w", eipID, err)
+	}
+	return nil
+}
+
 // UpdateELB updates an existing Huawei Cloud ELB.
 func UpdateELB(client *elb.ElbClient, elbID string, opt UpdateELBOption, creds *Credentials) error {
 	if opt.Name != "" {
