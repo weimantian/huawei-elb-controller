@@ -140,8 +140,6 @@ kubectl get dbengine -n everest
 
 ### Step 1: Deploy the Controller
 
-#### Option A: Using Helm (Recommended)
-
 ```bash
 # 1. Build the image
 #    Use --provenance=false to avoid SWR's "Invalid image, fail to parse 'manifest.json'" error
@@ -164,48 +162,7 @@ docker push <swr-registry>/huawei-elb-controller:latest
 # nerdctl tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 # nerdctl push <swr-registry>/huawei-elb-controller:latest
 
-# 3. Create a values file with your Huawei Cloud credentials
-cat > my-values.yaml << 'EOF'
-image:
-  repository: <swr-registry>/huawei-elb-controller
-  tag: latest
-  pullPolicy: Always
-
-# Required on CCE: nodes have no SWR auth by default.
-# Use CCE's built-in `default-secret` (exists in every namespace)
-# or create your own image pull secret.
-imagePullSecrets:
-  - name: default-secret
-
-credentials:
-  ak: "<your-AK>"
-  sk: "<your-SK>"
-  projectId: "<your-ProjectID>"
-  region: "<your-region>"  # e.g. cn-north-4, sa-brazil-1
-
-namespace: everest-system
-EOF
-
-# 4. Install via Helm
-helm install huawei-elb-controller \
-  ./charts/huawei-elb-controller \
-  -f my-values.yaml \
-  -n everest-system
-
-# 5. Install ELBBinding CRD + Mutating Webhook (not yet in Helm chart, apply manually)
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/webhook.yaml
-bash deploy/gen-webhook-cert.sh
-```
-
-> ⚠️ **Helm chart is incomplete**: The Helm chart's Deployment template **does not include the webhook port (9443) or certificate mount**. After the steps above, the webhook still won't work (pod has no 9443 port, no cert mounted). Remediation options:
-> - **Recommended**: After Helm install, overwrite the Deployment with the raw `deploy/deployment.yaml` (update the image on line 24 first): `kubectl apply -f deploy/deployment.yaml`
-> - Or use **Option B: Raw Manifests** below (includes full webhook config, recommended for production)
-
-#### Option B: Using Raw Manifests
-
-```bash
-# 1. Create the credentials Secret
+# 3. Create the credentials Secret
 kubectl create secret generic huawei-cloud-credentials \
   --namespace everest-system \
   --from-literal=ak=<your-AK> \
@@ -213,27 +170,26 @@ kubectl create secret generic huawei-cloud-credentials \
   --from-literal=project-id=<your-ProjectID> \
   --from-literal=region=cn-north-4
 
-# 2. Build and push the container image to SWR (same as Option A steps 1-2)
-#    Then update the image in deploy/deployment.yaml (line 24)
+# 4. Update the image in deploy/deployment.yaml (line 24):
+#    image: <swr-registry>/huawei-elb-controller:latest
 
-# 3. Install the ELBBinding CRD
+# 5. Install the ELBBinding CRD
 kubectl apply -f deploy/crd.yaml
 
-# 4. Install RBAC
+# 6. Install RBAC
 kubectl apply -f deploy/serviceaccount.yaml
 kubectl apply -f deploy/clusterrole.yaml
 kubectl apply -f deploy/clusterrolebinding.yaml
 
-# 5. Install the Mutating Webhook
+# 7. Install the Mutating Webhook
 kubectl apply -f deploy/webhook.yaml
 bash deploy/gen-webhook-cert.sh    # Generates self-signed cert + Secret + patches caBundle
 
-# 6. Deploy the Controller
+# 8. Deploy the Controller
 kubectl apply -f deploy/deployment.yaml
 ```
 
-> **Install order**: CRD -> RBAC -> Webhook (with cert) -> Deployment. The cert script `gen-webhook-cert.sh` must run after `webhook.yaml` is applied -- it creates the TLS Secret and patches the CA bundle into the MutatingWebhookConfiguration.
-
+> **Install order**: Credentials Secret -> Image -> CRD -> RBAC -> Webhook (with cert) -> Deployment. The cert script `gen-webhook-cert.sh` must run after `webhook.yaml` is applied -- it creates the TLS Secret and patches the CA bundle into the MutatingWebhookConfiguration.
 ### Step 2: Verify the Controller is Running
 
 ```bash
@@ -258,21 +214,6 @@ Check logs:
 kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
-### Redeploy After Code Changes
-
-**Helm**:
-```bash
-git pull
-docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
-docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
-docker push <swr-registry>/huawei-elb-controller:latest
-helm upgrade huawei-elb-controller ./charts/huawei-elb-controller -f my-values.yaml -n everest-system
-# Re-apply CRD/Webhook if changed
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/webhook.yaml
-```
-
-**Raw Manifests**:
 ```bash
 git pull
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
@@ -442,27 +383,9 @@ The Mutating Webhook intercepts Service CREATE requests in the `everest` namespa
 
 **Skip conditions** (not injected): The Service already has `kubernetes.io/elb.autocreate` or `kubernetes.io/elb.id` annotations (CCM-managed Services are unaffected).
 
-### Helm Values
+> ⚠️ **Important**: `region` must match your CCE cluster's region (e.g. `cn-north-4`, `sa-brazil-1`). If the `region` key is missing from the credentials Secret, the controller will fail to start.
 
-| Parameter | Default | Description |
-|---|---|---|
-| `image.repository` | `huawei-elb-controller` | Image repository |
-| `image.tag` | `latest` | Image tag |
-| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
-| `credentials.ak` | `""` | Huawei Cloud AK |
-| `credentials.sk` | `""` | Huawei Cloud SK |
-| `credentials.projectId` | `""` | Huawei Cloud Project ID |
-| `credentials.region` | `""` | Huawei Cloud region (required, e.g. `cn-north-4`) |
-| `existingSecret` | `""` | Use an existing Secret (overrides credentials) |
-| `namespace` | `everest-system` | Deployment namespace |
-| `resources.requests.cpu` | `100m` | CPU request |
-| `resources.requests.memory` | `128Mi` | Memory request |
-| `resources.limits.cpu` | `500m` | CPU limit |
-| `resources.limits.memory` | `256Mi` | Memory limit |
-
-> ⚠️ **Important**: `credentials.region` must match your CCE cluster's region (e.g. `cn-north-4`, `sa-brazil-1`). The default value is empty - deployment will fail if you don't set it.
-
-> **Note**: The Helm chart does not currently include the ELBBinding CRD or Mutating Webhook configuration. After Helm install, manually run `kubectl apply -f deploy/crd.yaml` + `kubectl apply -f deploy/webhook.yaml` + `bash deploy/gen-webhook-cert.sh`.
+> **Credentials Secret keys**: `ak`, `sk`, `project-id`, `region` (see the `kubectl create secret` command in step 3).
 
 ---
 
@@ -547,17 +470,6 @@ If the controller has been uninstalled and the finalizer cannot be cleaned up, m
 kubectl patch elbbinding <name> -n everest --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
-### Helm Release Conflict on Reinstall
-
-If `helm install` fails with `cannot reuse a name that is still in use` even after `helm uninstall`:
-
-```bash
-# Check for leftover Helm secret
-kubectl get secret -n everest-system | grep sh.helm.release
-
-# Delete the stale secret
-kubectl delete secret -n everest-system sh.helm.release.v1.huawei-elb-controller.v1
-```
 
 ### EIP Quota Exceeded
 
@@ -597,27 +509,6 @@ kubectl get elbbinding -A
 kubectl get loadbalancerconfig -A
 kubectl delete loadbalancerconfig <name>
 ```
-
-### 2. Uninstall the Controller
-
-**First, check how you installed:**
-
-```bash
-# If this shows a release, use Helm (Option A)
-helm list -n everest-system | grep huawei-elb
-# Otherwise, use Raw Manifests (Option B)
-```
-
-#### Option A: Helm
-
-```bash
-helm uninstall huawei-elb-controller -n everest-system
-
-# Remove the credentials Secret (Helm may leave it behind)
-kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev/null
-```
-
-#### Option B: Raw Manifests
 
 ```bash
 kubectl delete -f deploy/deployment.yaml

@@ -140,8 +140,6 @@ kubectl get dbengine -n everest
 
 ### 步骤 1：部署控制器
 
-#### 方式 A：使用 Helm（推荐）
-
 ```bash
 # 1. 构建镜像
 #    加 --provenance=false 避免 SWR 报 "Invalid image, fail to parse 'manifest.json'" 错误
@@ -164,48 +162,7 @@ docker push <swr-registry>/huawei-elb-controller:latest
 # nerdctl tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 # nerdctl push <swr-registry>/huawei-elb-controller:latest
 
-# 3. 创建包含华为云凭据的 values 文件
-cat > my-values.yaml << 'EOF'
-image:
-  repository: <swr-registry>/huawei-elb-controller
-  tag: latest
-  pullPolicy: Always
-
-# CCE 必需：节点默认没有 SWR 认证。
-# 使用 CCE 内置的 `default-secret`（每个命名空间都有）
-# 或创建自己的 image pull secret。
-imagePullSecrets:
-  - name: default-secret
-
-credentials:
-  ak: "<你的-AK>"
-  sk: "<你的-SK>"
-  projectId: "<你的-ProjectID>"
-  region: "<your-region>"  # 如 cn-north-4、sa-brazil-1
-
-namespace: everest-system
-EOF
-
-# 4. 通过 Helm 安装
-helm install huawei-elb-controller \
-  ./charts/huawei-elb-controller \
-  -f my-values.yaml \
-  -n everest-system
-
-# 5. 安装 ELBBinding CRD + Mutating Webhook（Helm chart 暂未包含，需手动 apply）
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/webhook.yaml
-bash deploy/gen-webhook-cert.sh
-```
-
-> ⚠️ **Helm chart 不完整**：当前 Helm chart 的 Deployment 模板**未包含 webhook 端口（9443）和证书挂载**。仅执行上述步骤后 webhook 仍无法工作（pod 没开 9443、没挂证书）。补救方式：
-> - **推荐**：Helm 安装后，用原生 `deploy/deployment.yaml` 覆盖 Deployment（注意先改第 24 行镜像地址）：`kubectl apply -f deploy/deployment.yaml`
-> - 或直接使用下方**方式 B：原生清单**（已包含完整 webhook 配置，推荐生产环境使用）
-
-#### 方式 B：使用原生清单
-
-```bash
-# 1. 创建凭据 Secret
+# 3. 创建凭据 Secret
 kubectl create secret generic huawei-cloud-credentials \
   --namespace everest-system \
   --from-literal=ak=<你的-AK> \
@@ -213,27 +170,26 @@ kubectl create secret generic huawei-cloud-credentials \
   --from-literal=project-id=<你的-ProjectID> \
   --from-literal=region=cn-north-4
 
-# 2. 构建并推送容器镜像到 SWR（同方式 A 步骤 1-2）
-#    然后修改 deploy/deployment.yaml 第 24 行镜像地址
+# 4. 修改 deploy/deployment.yaml 第 24 行镜像地址为：
+#    image: <swr-registry>/huawei-elb-controller:latest
 
-# 3. 安装 ELBBinding CRD
+# 5. 安装 ELBBinding CRD
 kubectl apply -f deploy/crd.yaml
 
-# 4. 安装 RBAC
+# 6. 安装 RBAC
 kubectl apply -f deploy/serviceaccount.yaml
 kubectl apply -f deploy/clusterrole.yaml
 kubectl apply -f deploy/clusterrolebinding.yaml
 
-# 5. 安装 Mutating Webhook
+# 7. 安装 Mutating Webhook
 kubectl apply -f deploy/webhook.yaml
 bash deploy/gen-webhook-cert.sh    # 生成自签证书 + Secret + patch caBundle
 
-# 6. 部署 Controller
+# 8. 部署 Controller
 kubectl apply -f deploy/deployment.yaml
 ```
 
-> **部署顺序**：CRD -> RBAC -> Webhook（含证书）-> Deployment。Webhook 证书脚本 `gen-webhook-cert.sh` 需在 `webhook.yaml` apply 之后运行，它会创建 TLS Secret 并把 CA bundle patch 进 MutatingWebhookConfiguration。
-
+> **部署顺序**：凭据 Secret -> 镜像 -> CRD -> RBAC -> Webhook（含证书）-> Deployment。Webhook 证书脚本 `gen-webhook-cert.sh` 需在 `webhook.yaml` apply 之后运行，它会创建 TLS Secret 并把 CA bundle patch 进 MutatingWebhookConfiguration。
 ### 步骤 2：验证控制器运行状态
 
 ```bash
@@ -258,21 +214,6 @@ kubectl get svc <service-name> -n everest -o jsonpath='{.spec.loadBalancerClass}
 kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
-### 代码更新后重新部署
-
-**Helm**：
-```bash
-git pull
-docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
-docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
-docker push <swr-registry>/huawei-elb-controller:latest
-helm upgrade huawei-elb-controller ./charts/huawei-elb-controller -f my-values.yaml -n everest-system
-# 如 CRD/Webhook 有变更，重新 apply
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/webhook.yaml
-```
-
-**原生清单**：
 ```bash
 git pull
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
@@ -436,27 +377,9 @@ Mutating Webhook 拦截 `everest` 命名空间的 Service CREATE 请求，注入
 
 **跳过条件**（不注入）：Service 已有 `kubernetes.io/elb.autocreate` 或 `kubernetes.io/elb.id` 注解（CCM 管理的 Service 不受影响）。
 
-### Helm Values
+> ⚠️ **重要**：`region` 必须与你的 CCE 集群所在 region 一致（如 `cn-north-4`、`sa-brazil-1`）。凭据 Secret 中的 `region` key 不设置会导致控制器启动失败。
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `image.repository` | `huawei-elb-controller` | 镜像仓库 |
-| `image.tag` | `latest` | 镜像标签 |
-| `image.pullPolicy` | `IfNotPresent` | 镜像拉取策略 |
-| `credentials.ak` | `""` | 华为云 AK |
-| `credentials.sk` | `""` | 华为云 SK |
-| `credentials.projectId` | `""` | 华为云 Project ID |
-| `credentials.region` | `""` | 华为云区域（必填，如 `cn-north-4`） |
-| `existingSecret` | `""` | 使用已有 Secret（覆盖 credentials） |
-| `namespace` | `everest-system` | 部署命名空间 |
-| `resources.requests.cpu` | `100m` | CPU 请求 |
-| `resources.requests.memory` | `128Mi` | 内存请求 |
-| `resources.limits.cpu` | `500m` | CPU 限制 |
-| `resources.limits.memory` | `256Mi` | 内存限制 |
-
-> ⚠️ **重要**：`credentials.region` 必须与你的 CCE 集群所在 region 一致（如 `cn-north-4`、`sa-brazil-1`）。默认值为空，不设置会导致部署失败。
-
-> **注意**：Helm chart 目前不包含 ELBBinding CRD 和 Mutating Webhook 配置。Helm 安装后需手动执行 `kubectl apply -f deploy/crd.yaml` + `kubectl apply -f deploy/webhook.yaml` + `bash deploy/gen-webhook-cert.sh`。
+> **凭据 Secret 字段**：`ak`、`sk`、`project-id`、`region`（见步骤 3 的 `kubectl create secret` 命令）。
 
 ---
 
@@ -541,17 +464,6 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 kubectl patch elbbinding <name> -n everest --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
-### Helm 重新安装时提示 release 名称冲突
-
-如果执行 `helm uninstall` 后再 `helm install` 仍报错 `cannot reuse a name that is still in use`：
-
-```bash
-# 检查是否有残留的 Helm secret
-kubectl get secret -n everest-system | grep sh.helm.release
-
-# 手动删除残留 secret
-kubectl delete secret -n everest-system sh.helm.release.v1.huawei-elb-controller.v1
-```
 
 ### EIP 配额不足
 
@@ -591,27 +503,6 @@ kubectl get elbbinding -A
 kubectl get loadbalancerconfig -A
 kubectl delete loadbalancerconfig <name>
 ```
-
-### 2. 卸载控制器
-
-**先确认安装方式：**
-
-```bash
-# 如果有输出，用 Helm（方式 A）
-helm list -n everest-system | grep huawei-elb
-# 否则用原生清单（方式 B）
-```
-
-#### 方式 A：Helm
-
-```bash
-helm uninstall huawei-elb-controller -n everest-system
-
-# 删除凭据 Secret（Helm 可能会保留它）
-kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev/null
-```
-
-#### 方式 B：原生清单
 
 ```bash
 kubectl delete -f deploy/deployment.yaml
