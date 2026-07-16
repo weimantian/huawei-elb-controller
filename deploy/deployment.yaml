@@ -22,7 +22,7 @@ spec:
       containers:
         - name: controller
           image: <swr-registry>/huawei-elb-controller:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - --metrics-bind-address=:8081
           env:

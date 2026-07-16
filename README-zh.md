@@ -266,7 +266,9 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 cd huawei-elb-controller
 git pull
 
-# 2. 构建并推送新镜像
+# 2. 构建并推送新镜像到 SWR
+#    重要：必须 push 到 SWR —— 集群从 SWR 拉镜像，不是你本地 Docker。
+#    使用相同 tag (:latest) 没问题，因为 imagePullPolicy=Always 会强制重新拉取。
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
@@ -280,6 +282,16 @@ kubectl rollout restart deploy huawei-elb-controller -n everest-system
 
 # 5. 确认新 pod 已运行
 kubectl rollout status deploy huawei-elb-controller -n everest-system
+```
+
+验证新镜像确实在运行（启动日志必须输出 **Plan B**，且 webhook server 必须在 :9443 监听）：
+
+```bash
+kubectl logs -n everest-system deployment/huawei-elb-controller | head -5
+# 预期输出包含：
+#   "Registering webhook","path":"/mutate-v1-service"
+#   "starting huawei-elb-controller (Plan B: ...)"
+#   "Serving webhook server",...,"port":9443
 ```
 
 > 更新过程无中断：已有的 ELBBinding 会保留，控制器会从中断处继续调谐。如 webhook 证书 Secret 被删除，重新运行 `bash deploy/gen-webhook-cert.sh` 即可。

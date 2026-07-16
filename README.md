@@ -266,7 +266,9 @@ When a new version is released and you already have a running controller, update
 cd huawei-elb-controller
 git pull
 
-# 2. Build and push the new image
+# 2. Build and push the new image to SWR
+#    IMPORTANT: you MUST push to SWR -- the cluster pulls from SWR, not your local Docker.
+#    Using the same tag (:latest) is fine because imagePullPolicy=Always forces a re-pull.
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
@@ -280,6 +282,16 @@ kubectl rollout restart deploy huawei-elb-controller -n everest-system
 
 # 5. Confirm the new pod is running
 kubectl rollout status deploy huawei-elb-controller -n everest-system
+```
+
+Verify the new image is actually running (the startup log must say **Plan B**, and the webhook server must be serving on :9443):
+
+```bash
+kubectl logs -n everest-system deployment/huawei-elb-controller | head -5
+# Expected output includes:
+#   "Registering webhook","path":"/mutate-v1-service"
+#   "starting huawei-elb-controller (Plan B: ...)"
+#   "Serving webhook server",...,"port":9443
 ```
 
 > The update is non-disruptive: existing ELBBindings are preserved, and the controller resumes reconciliation from where it left off. If the webhook cert Secret was removed, re-run `bash deploy/gen-webhook-cert.sh`.
