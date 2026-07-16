@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/weimantian/huawei-elb-controller/api/v1alpha1"
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
 
@@ -89,6 +90,7 @@ func newMockELBClient(handler http.Handler) (*elb.ElbClient, *httptest.Server) {
 func makeTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
+	_ = v1alpha1.AddToScheme(scheme)
 	return scheme
 }
 
@@ -1070,5 +1072,147 @@ func TestBuildUpdateOption_OnlyChargeModeChanged(t *testing.T) {
 	}
 	if opt.BandwidthChargeMode != "bandwidth" {
 		t.Errorf("expected BandwidthChargeMode=bandwidth, got %q", opt.BandwidthChargeMode)
+	}
+}
+
+// ── RED tests for ELBBinding CRD (commit 3) ──
+
+func TestServiceReconciler_PersistsELBBinding(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("elbbinding-create-svc")
+	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	r := &ServiceReconciler{
+		Client:          fakeClient,
+		NetworkDetector: detector,
+		ELBClient:       mockClient,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileCreate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileCreate returned error: %v", err)
+	}
+
+	// RED: ELBBinding should be created with the ELB ID in status
+	binding := &v1alpha1.ELBBinding{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "elbbinding-create-svc", Namespace: "default"}, binding); err != nil {
+		t.Errorf("ELBBinding not created (RED — not implemented yet): %v", err)
+	} else {
+		if binding.Spec.ServiceName != "elbbinding-create-svc" {
+			t.Errorf("expected ServiceName=elbbinding-create-svc, got %s", binding.Spec.ServiceName)
+		}
+		if binding.Spec.ServiceUID != string(svc.UID) {
+			t.Errorf("expected ServiceUID=%s, got %s", svc.UID, binding.Spec.ServiceUID)
+		}
+		if binding.Status.ELBID != "elb-mock-id" {
+			t.Errorf("expected ELBID=elb-mock-id, got %s", binding.Status.ELBID)
+		}
+		if len(binding.Status.LastKnownParams) == 0 {
+			t.Error("expected LastKnownParams to be populated")
+		}
+	}
+}
+
+func TestServiceReconciler_ELBBindingUIDGuard(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	svc := makeTestService("uid-guard-svc")
+	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
+
+	// Pre-create a stale ELBBinding with a different UID (simulating Service name reuse)
+	staleBinding := &v1alpha1.ELBBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "uid-guard-svc",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.ELBBindingSpec{
+			ServiceName: "uid-guard-svc",
+			ServiceUID:  "stale-uid-0000000000",
+		},
+		Status: v1alpha1.ELBBindingStatus{
+			ELBID: "elb-stale",
+			Phase: v1alpha1.PhaseReady,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc, staleBinding).Build()
+	r := &ServiceReconciler{
+		Client:          fakeClient,
+		NetworkDetector: detector,
+		ELBClient:       mockClient,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileCreate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileCreate returned error: %v", err)
+	}
+
+	// RED: stale ELBBinding should be replaced, ServiceUID updated to match current svc
+	binding := &v1alpha1.ELBBinding{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "uid-guard-svc", Namespace: "default"}, binding); err != nil {
+		t.Errorf("ELBBinding not found (RED): %v", err)
+	} else {
+		if binding.Spec.ServiceUID != string(svc.UID) {
+			t.Errorf("UID guard not applied: expected ServiceUID=%s, got %s", svc.UID, binding.Spec.ServiceUID)
+		}
+		if binding.Status.ELBID != "elb-mock-id" {
+			t.Errorf("expected new ELB ID after UID mismatch, got %s", binding.Status.ELBID)
+		}
+	}
+}
+
+func TestServiceReconciler_AdoptsLegacyAnnotations(t *testing.T) {
+	router := defaultRouter()
+	mockClient, server := newMockELBClient(router.handler())
+	defer server.Close()
+
+	// Legacy Service: has huawei-elb.io/elb-id in annotations but no ELBBinding.
+	svc := makeTestService("legacy-adopt-svc")
+	svc.Annotations = map[string]string{
+		huaweicloud.AnnotationELBID:                "elb-legacy-123",
+		aclStatusAnnotation:                        "on",
+		aclIDAnnotation:                            "ipgroup-legacy",
+		huaweicloud.AnnotationELBCleanupFinalizer:  "true",
+	}
+	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	r := &ServiceReconciler{
+		Client:          fakeClient,
+		NetworkDetector: detector,
+		ELBClient:       mockClient,
+	}
+
+	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
+	_, err := r.reconcileUpdate(ctx, logr.Discard(), svc)
+	if err != nil {
+		t.Fatalf("reconcileUpdate returned error: %v", err)
+	}
+
+	// RED: legacy annotations should be adopted into an ELBBinding
+	binding := &v1alpha1.ELBBinding{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "legacy-adopt-svc", Namespace: "default"}, binding); err != nil {
+		t.Errorf("ELBBinding not adopted from legacy annotations (RED): %v", err)
+		return
+	}
+	if binding.Status.ELBID != "elb-legacy-123" {
+		t.Errorf("expected adopted ELBID=elb-legacy-123, got %s", binding.Status.ELBID)
+	}
+	if binding.Status.ACLID != "ipgroup-legacy" {
+		t.Errorf("expected adopted ACLID=ipgroup-legacy, got %s", binding.Status.ACLID)
+	}
+	if binding.Status.ACLStatus != "on" {
+		t.Errorf("expected adopted ACLStatus=on, got %s", binding.Status.ACLStatus)
+	}
+	if binding.Spec.ServiceName != "legacy-adopt-svc" {
+		t.Errorf("expected ServiceName=legacy-adopt-svc, got %s", binding.Spec.ServiceName)
 	}
 }
