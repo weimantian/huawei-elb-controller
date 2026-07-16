@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -161,8 +162,19 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 					controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
 					return nil
 				}); err != nil {
-					logger.Error(err, "restoring ELB ID annotation")
-					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+				if apierrors.IsNotFound(err) {
+					// Service was deleted during the annotation-restore race window
+					// (e.g. PSMDB operator Update overwrote annotations, then StatefulSet
+					// cascade deleted the Service). The ELB is now orphaned -- delete it
+					// to prevent a leak, since reconcileDelete will never fire.
+					logger.Info("Service gone during annotation restore, deleting orphaned ELB", "elbID", existing.ID, "name", elbName)
+					if delErr := r.deleteELBStack(logger, existing.ID); delErr != nil && !huaweicloud.IsNotFoundError(delErr) {
+						logger.Error(delErr, "deleting orphaned ELB after Service disappeared", "elbID", existing.ID)
+					}
+					return ctrl.Result{}, nil
+				}
+				logger.Error(err, "restoring ELB ID annotation")
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 				}
 				return ctrl.Result{Requeue: true}, nil
 			}
@@ -529,13 +541,26 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 
 	// Delete ACL IP group if present.
 	if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
-		if ipGroupID := svc.Annotations[aclIDAnnotation]; ipGroupID != "" {
+		ipGroupID := svc.Annotations[aclIDAnnotation]
+		if ipGroupID == "" {
+			// Annotation was overwritten (e.g. by OpenEverest LBC template sync or PSMDB
+			// operator Update). Fall back to name-based lookup so the IP group doesn't leak.
+			ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
+			foundID, findErr := huaweicloud.FindIPGroupByName(r.ELBClient, ipGroupName)
+			if findErr != nil {
+				logger.Error(findErr, "looking up ACL IP group by name (annotation was lost)", "name", ipGroupName)
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+			}
+			ipGroupID = foundID
+		}
+		if ipGroupID != "" {
 			if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
 				if !huaweicloud.IsNotFoundError(err) {
 					logger.Error(err, "deleting ACL IP group, will retry", "ipGroupID", ipGroupID)
 					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 				}
 			}
+			logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
 		}
 		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
 			controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
@@ -626,6 +651,8 @@ func (r *ServiceReconciler) deleteELBStack(logger logr.Logger, elbID string) err
 		if err := huaweicloud.DeleteEIPByID(r.Creds, eipID); err != nil {
 			logger.Error(err, "deleting EIP, manual cleanup needed", "eipID", eipID)
 			// Don't fail: ELB is already deleted, EIP is just orphaned.
+		} else {
+			logger.Info("EIP deleted", "eipID", eipID, "elbID", elbID)
 		}
 	}
 
