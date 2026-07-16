@@ -131,11 +131,39 @@ func (r *ServiceReconciler) ensureBinding(ctx context.Context, svc *corev1.Servi
 		if r.Scheme != nil {
 			_ = controllerutil.SetOwnerReference(svc, binding, r.Scheme)
 		}
+		// Finalizer on ELBBinding (not Service) so CCE CCM overwriting Service
+		// metadata can never cause an ELB leak. Service deletion cascades to
+		// ELBBinding via OwnerReference; the finalizer blocks deletion until
+		// the controller has cleaned up the ELB and IP group.
+		controllerutil.AddFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer)
 		if err := r.Create(ctx, binding); err != nil {
 			return nil, err
 		}
+	} else if !controllerutil.ContainsFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		// Self-heal finalizer on existing bindings (migration from old version
+		// that wrote finalizers to Service instead of ELBBinding).
+		_ = r.patchBindingFinalizer(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace},
+			huaweicloud.AnnotationELBCleanupFinalizer, "")
 	}
 	return binding, nil
+}
+
+// patchBindingFinalizer adds (if add != "") or removes (if remove != "") a finalizer
+// on an ELBBinding with conflict retry.
+func (r *ServiceReconciler) patchBindingFinalizer(ctx context.Context, key types.NamespacedName, add, remove string) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &v1alpha1.ELBBinding{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		if add != "" {
+			controllerutil.AddFinalizer(latest, add)
+		}
+		if remove != "" {
+			controllerutil.RemoveFinalizer(latest, remove)
+		}
+		return r.Update(ctx, latest)
+	})
 }
 
 // patchBindingStatus patches the status subresource of an ELBBinding with conflict retry.
@@ -218,7 +246,15 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	svc := &corev1.Service{}
 	if err := r.Get(ctx, req.NamespacedName, svc); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			// Service is gone. If an ELBBinding with our finalizer still exists,
+			// it means the Service was deleted without our finalizer on it (e.g.
+			// CCE CCM overwrote Service metadata and dropped our finalizer).
+			// The cascading ELBBinding deletion is blocked by our finalizer.
+			// Clean up ELB + IP group, then remove the finalizer.
+			return r.reconcileOrphanedBinding(ctx, logger, req.NamespacedName)
+		}
+		return ctrl.Result{}, err
 	}
 
 	if !isLoadBalancerService(svc) {
@@ -293,21 +329,8 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 			b.Status.ELBID = existing.ID
 			return nil
 		})
-		// Still need finalizer on Service (actual cleanup trigger).
-		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-			controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
-			return nil
-		}); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Info("Service gone during reverse-lookup, deleting orphaned ELB", "elbID", existing.ID, "name", elbName)
-				if delErr := r.deleteELBStack(logger, existing.ID); delErr != nil && !huaweicloud.IsNotFoundError(delErr) {
-					logger.Error(delErr, "deleting orphaned ELB after Service disappeared", "elbID", existing.ID)
-				}
-				return ctrl.Result{}, nil
-			}
-			logger.Error(err, "adding cleanup finalizer during reverse-lookup")
-			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-		}
+		// Finalizer is on ELBBinding (added by ensureBinding), not Service.
+		// No Service patch needed - CCE CCM cannot interfere with our cleanup.
 		return ctrl.Result{Requeue: true}, nil
 	}
 	// Create the ELB.
@@ -370,19 +393,8 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		}
 	}
 
-	// Persist cleanup finalizer on the Service (must stay on Service to
-	// ensure cleanup fires even if the controller is down during deletion).
-	// Persist cleanup finalizer on the Service (must stay on Service to
-	// ensure cleanup fires even if the controller is down during deletion).
-	// State (elbID, params) is stored ONLY in ELBBinding status.
-	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-		controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
-		return nil
-	}); err != nil {
-		logger.Error(err, "patching Service finalizer")
-		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-	}
-
+	// Finalizer is on ELBBinding (added by ensureBinding above), not Service.
+	// No Service patch needed - CCE CCM cannot interfere with our cleanup.
 	// Get node backends for member creation (NodePort mode, multi-AZ aware).
 	backends, err := r.getNodeBackends(ctx, svc)
 	if err != nil {
@@ -401,7 +413,7 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}
 
 	// ACL handling (IP groups for source ranges).
-	aclID, aclStatus, aclType, aclFinalizer, err := r.ensureACL(ctx, logger, info.ID, "" /* no existing ACL on create */, svc)
+	aclID, aclStatus, aclType, _, err := r.ensureACL(ctx, logger, info.ID, "" /* no existing ACL on create */, svc)
 	if err != nil {
 		logger.Error(err, "ensuring ACL, will retry")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
@@ -415,17 +427,8 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}); err != nil {
 		logger.Error(err, "patching ELBBinding ACL status")
 	}
-	// Manage ACL finalizer on Service.
-	if aclFinalizer {
-		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
-			return nil
-		}); err != nil {
-			logger.Error(err, "adding ACL finalizer")
-			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-		}
-	}
-
+	// ACL finalizer is no longer needed on Service - the single ELBBinding
+	// finalizer covers both ELB and ACL IP group cleanup.
 	// Write service.status.loadBalancer.ingress.
 	ingressIP := info.VipAddress
 	if info.PublicIP != "" {
@@ -528,17 +531,9 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		}
 	}
 
-	// Ensure cleanup finalizer is present on Service. OpenEverest may rebuild
-	// the Service (syncing LBC params) and drop finalizers we added during create.
-	// Without elb-cleanup, deletion would silently leak the ELB.
-	if !controllerutil.ContainsFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer) {
-		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-			controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
-			return nil
-		}); err != nil {
-			logger.Info("could not re-add elb-cleanup finalizer, will retry", "error", err.Error())
-		}
-	}
+	// Finalizer self-healing is handled by ensureBinding (adds finalizer to
+	// ELBBinding, not Service). CCE CCM can overwrite Service metadata without
+	// affecting our cleanup path.
 
 	// 1. Sync listener/pool stack for port changes.
 	if err := r.syncListenerStacks(ctx, logger, elbID, svc); err != nil {
@@ -589,7 +584,7 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 	if existingACLID == "" {
 		existingACLID = svc.Annotations[aclIDAnnotation]
 	}
-	aclID, aclStatus, aclType, aclFinalizer, err := r.ensureACL(ctx, logger, elbID, existingACLID, svc)
+	aclID, aclStatus, aclType, _, err := r.ensureACL(ctx, logger, elbID, existingACLID, svc)
 	if err != nil {
 		logger.Error(err, "ensuring ACL")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
@@ -608,16 +603,8 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		logger.Error(err, "patching ELBBinding status")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
-	// Manage ACL finalizer on Service.
-	_ = r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-		if aclFinalizer {
-			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
-		} else {
-			controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
-		}
-		return nil
-	})
-
+	// ACL finalizer is no longer managed on Service - the single ELBBinding
+	// finalizer covers both ELB and ACL IP group cleanup.
 	// Ensure status has the ELB IP (fixes status lost during create-time RBAC failure).
 	if len(svc.Status.LoadBalancer.Ingress) == 0 {
 		info, err := huaweicloud.ShowELB(r.ELBClient, elbID)
@@ -756,28 +743,50 @@ func (r *ServiceReconciler) syncAllPoolMembers(ctx context.Context, logger logr.
 
 // reconcileDelete deletes the ELB and ACL IP group, then removes finalizers.
 func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Logger, svc *corev1.Service) (ctrl.Result, error) {
-	// Resolve ELB ID from ELBBinding first, falling back to annotation.
-	var elbID string
 	bindingKey := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
-	binding, err := r.getBinding(ctx, svc)
-	if err != nil {
-		logger.Error(err, "getting ELBBinding for deletion")
-		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	binding, _ := r.getBinding(ctx, svc)
+	return r.cleanupBindingResources(ctx, logger, bindingKey, binding, svc)
+}
+
+// reconcileOrphanedBinding handles cleanup when the Service is gone but an
+// ELBBinding with our finalizer still exists (Service was deleted without our
+// finalizer on it, e.g. CCE CCM overwrote Service metadata). The cascading
+// ELBBinding deletion is blocked by our finalizer; we clean up ELB + IP group
+// then remove the finalizer so the ELBBinding can be garbage-collected.
+func (r *ServiceReconciler) reconcileOrphanedBinding(ctx context.Context, logger logr.Logger, key types.NamespacedName) (ctrl.Result, error) {
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, key, binding); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !controllerutil.ContainsFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	logger.Info("Cleaning up orphaned ELBBinding (Service gone, finalizer on ELBBinding)",
+		"binding", key, "elbID", binding.Status.ELBID)
+	return r.cleanupBindingResources(ctx, logger, key, binding, nil)
+}
+
+// cleanupBindingResources deletes the ELB stack, ACL IP group, and removes the
+// ELBBinding finalizer. svc may be nil if the Service is already gone.
+func (r *ServiceReconciler) cleanupBindingResources(
+	ctx context.Context, logger logr.Logger, bindingKey types.NamespacedName,
+	binding *v1alpha1.ELBBinding, svc *corev1.Service,
+) (ctrl.Result, error) {
+	// Resolve ELB ID from ELBBinding status first, then Service annotation.
+	var elbID string
 	if binding != nil && binding.Status.ELBID != "" {
 		elbID = binding.Status.ELBID
 	}
-	if elbID == "" {
+	if elbID == "" && svc != nil {
 		elbID = svc.Annotations[huaweicloud.AnnotationELBID]
 	}
 	// Name-based reverse lookup fallback (handles v1 status bug or lost annotations).
-	// Same strategy as ACL IP group deletion below.
-	if elbID == "" {
+	if elbID == "" && svc != nil {
 		lbcParams := getLBCParams(svc)
 		elbName := huaweicloud.BuildELBName(lbcParams, svc.Namespace, svc.Name, string(svc.UID))
 		found, findErr := huaweicloud.FindELBByName(r.ELBClient, elbName)
 		if findErr != nil {
-			logger.Error(findErr, "looking up ELB by name for deletion (status and annotation both empty)", "name", elbName)
+			logger.Error(findErr, "looking up ELB by name for deletion", "name", elbName)
 			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 		}
 		if found != nil {
@@ -786,73 +795,59 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 		}
 	}
 
-	// Delete ELB if we own it.
-	if controllerutil.ContainsFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer) {
-		if elbID != "" {
-			if err := r.deleteELBStack(logger, elbID); err != nil {
-				if !huaweicloud.IsNotFoundError(err) {
-					logger.Error(err, "deleting ELB, will retry", "elbID", elbID)
-					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-				}
-				logger.Info("ELB already deleted", "elbID", elbID)
-			}
-		}
-		// Clear service status.
-		_ = r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), nil)
-		// Remove ELB cleanup finalizer.
-		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-			controllerutil.RemoveFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
-			return nil
-		}); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Delete ACL IP group if present.
-	if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
-		ipGroupID := ""
-		if binding != nil {
-			ipGroupID = binding.Status.ACLID
-		}
-		if ipGroupID == "" {
-			ipGroupID = svc.Annotations[aclIDAnnotation]
-		}
-		if ipGroupID == "" {
-			// Annotation was overwritten (e.g. by OpenEverest LBC template sync or PSMDB
-			// operator Update). Fall back to name-based lookup so the IP group doesn't leak.
-			ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
-			foundID, findErr := huaweicloud.FindIPGroupByName(r.ELBClient, ipGroupName)
-			if findErr != nil {
-				logger.Error(findErr, "looking up ACL IP group by name (annotation was lost)", "name", ipGroupName)
+	// Delete ELB.
+	if elbID != "" {
+		if err := r.deleteELBStack(logger, elbID); err != nil {
+			if !huaweicloud.IsNotFoundError(err) {
+				logger.Error(err, "deleting ELB, will retry", "elbID", elbID)
 				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 			}
-			ipGroupID = foundID
-		}
-		if ipGroupID != "" {
-			if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
-				if !huaweicloud.IsNotFoundError(err) {
-					logger.Error(err, "deleting ACL IP group, will retry", "ipGroupID", ipGroupID)
-					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-				}
-			}
-			logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
-		}
-		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-			controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
-			return nil
-		}); err != nil {
-			return ctrl.Result{}, err
+			logger.Info("ELB already deleted", "elbID", elbID)
 		}
 	}
 
-	// Delete the ELBBinding if it exists.
+	// Delete ACL IP group.
+	ipGroupID := ""
 	if binding != nil {
-		if err := r.Delete(ctx, binding); err != nil {
-			logger.Error(err, "deleting ELBBinding", "binding", bindingKey)
-			// Non-fatal: Service finalizers are already removed, binding will be
-			// cleaned up on next reconcile (no matching Service -> no-op).
-		} else {
-			logger.Info("ELBBinding deleted", "binding", bindingKey)
+		ipGroupID = binding.Status.ACLID
+	}
+	if ipGroupID == "" && svc != nil {
+		ipGroupID = svc.Annotations[aclIDAnnotation]
+	}
+	if ipGroupID == "" && svc != nil {
+		ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
+		foundID, findErr := huaweicloud.FindIPGroupByName(r.ELBClient, ipGroupName)
+		if findErr != nil {
+			logger.Error(findErr, "looking up ACL IP group by name", "name", ipGroupName)
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
+		ipGroupID = foundID
+	}
+	if ipGroupID != "" {
+		if err := huaweicloud.DeleteIPGroup(r.ELBClient, ipGroupID); err != nil {
+			if !huaweicloud.IsNotFoundError(err) {
+				logger.Error(err, "deleting ACL IP group, will retry", "ipGroupID", ipGroupID)
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+			}
+		}
+		logger.Info("ACL IP group deleted", "ipGroupID", ipGroupID)
+	}
+
+	// Clear Service status (best effort - Service may already be gone).
+	if svc != nil {
+		_ = r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), nil)
+	}
+
+	// Remove finalizer from ELBBinding (not Service). This allows the cascading
+	// deletion to complete if the Service is already gone, or the next reconcile
+	// to finish Service deletion if the Service still has a deletionTimestamp.
+	if binding != nil && controllerutil.ContainsFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		if err := r.patchBindingFinalizer(ctx, bindingKey,
+			"", huaweicloud.AnnotationELBCleanupFinalizer); err != nil {
+			if !apierrors.IsNotFound(err) {
+				logger.Info("could not remove ELBBinding finalizer, will retry", "error", err.Error())
+				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+			}
 		}
 	}
 
@@ -1175,8 +1170,9 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return false
 			}
-			return controllerutil.ContainsFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer) ||
-				controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer)
+			// Finalizer is on ELBBinding, not Service. Process all OpenEverest
+			// LoadBalancer Service deletes so the ELBBinding finalizer cleanup fires.
+			return shouldReconcileService(svc)
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
 			svc, ok := e.Object.(*corev1.Service)

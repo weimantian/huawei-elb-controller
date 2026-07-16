@@ -228,13 +228,13 @@ func TestServiceReconciler_CreatePath_DirectAPI(t *testing.T) {
 	if binding.Status.ELBID != "elb-mock-id" {
 		t.Errorf("expected ELBID=elb-mock-id, got %s", binding.Status.ELBID)
 	}
-	// Verify finalizer is on the Service
-	persisted := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "direct-api-svc", Namespace: "default"}, persisted); err != nil {
-		t.Fatalf("failed to get persisted service: %v", err)
+	// Verify finalizer is on the ELBBinding (not Service - CCE CCM can overwrite Service).
+	persistedBinding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "direct-api-svc", Namespace: "default"}, persistedBinding); err != nil {
+		t.Fatalf("failed to get persisted ELBBinding: %v", err)
 	}
-	if !controllerutil.ContainsFinalizer(persisted, huaweicloud.AnnotationELBCleanupFinalizer) {
-		t.Error("expected elb-cleanup finalizer to be persisted")
+	if !controllerutil.ContainsFinalizer(persistedBinding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		t.Error("expected elb-cleanup finalizer to be on ELBBinding")
 	}
 	// Verify last-known params in ELBBinding
 	lastKnown := binding.Status.LastKnownParams
@@ -348,8 +348,7 @@ func TestServiceReconciler_CreatePath_ACLWithSourceRanges(t *testing.T) {
 }
 
 // TestServiceReconciler_CreatePath_ACLFinalizerPersisted is a regression test for C-NEW-2.
-// Verifies that aclCleanupFinalizer is actually persisted to the API server, not just
-// set on the in-memory object.
+// Verifies that the ELBBinding finalizer covers ACL cleanup (single finalizer design).
 func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
 	router := defaultRouter()
 	mockClient, server := newMockELBClient(router.handler())
@@ -372,17 +371,18 @@ func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
 
-	// Read back from API server to verify finalizer persistence
-	persisted := &corev1.Service{}
-	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "acl-finalizer-svc", Namespace: "default"}, persisted); err != nil {
-		t.Fatalf("failed to get persisted service: %v", err)
+	// ELBBinding has the single finalizer (covers both ELB + ACL cleanup).
+	persistedBinding := &v1alpha1.ELBBinding{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "acl-finalizer-svc", Namespace: "default"}, persistedBinding); err != nil {
+		t.Fatalf("failed to get persisted ELBBinding: %v", err)
 	}
-
-	if !controllerutil.ContainsFinalizer(persisted, aclCleanupFinalizer) {
-		t.Errorf("expected acl-cleanup finalizer to be persisted, got finalizers=%v", persisted.Finalizers)
+	if !controllerutil.ContainsFinalizer(persistedBinding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		t.Errorf("expected elb-cleanup finalizer on ELBBinding, got finalizers=%v", persistedBinding.Finalizers)
 	}
-	// ACL state is now persisted in ELBBinding status, not on Service annotations.
-	// Finalizer is the only thing that remains on Service.
+	// ACL state is persisted in ELBBinding status.
+	if persistedBinding.Status.ACLID == "" {
+		t.Error("expected ACLID in ELBBinding status")
+	}
 }
 
 func TestServiceReconciler_CreatePath_DetectorError(t *testing.T) {
@@ -597,12 +597,19 @@ func TestServiceReconciler_DeletePath_RemovesELBAndFinalizer(t *testing.T) {
 	svc := makeTestService("delete-svc")
 	now := metav1.Now()
 	svc.DeletionTimestamp = &now
+	svc.Finalizers = []string{"service.kubernetes.io/load-balancer-cleanup"} // CCM finalizer (not ours)
 	svc.Annotations = map[string]string{
 		huaweicloud.AnnotationELBID: "elb-to-delete",
 	}
-	controllerutil.AddFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer)
+	// Finalizer is on ELBBinding, not Service.
+	binding := &v1alpha1.ELBBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "delete-svc", Namespace: "default"},
+		Spec:   v1alpha1.ELBBindingSpec{ServiceName: "delete-svc", ServiceUID: string(svc.UID)},
+		Status: v1alpha1.ELBBindingStatus{ELBID: "elb-to-delete"},
+	}
+	controllerutil.AddFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc, binding).Build()
 	r := &ServiceReconciler{
 		Client:    fakeClient,
 		ELBClient: mockClient,
@@ -617,14 +624,13 @@ func TestServiceReconciler_DeletePath_RemovesELBAndFinalizer(t *testing.T) {
 		t.Errorf("expected zero result after delete, got %v", result)
 	}
 
-	// After all finalizers removed, the fake client (like a real API server) deletes the object.
-	persisted := &corev1.Service{}
-	err = fakeClient.Get(ctx, types.NamespacedName{Name: "delete-svc", Namespace: "default"}, persisted)
-	if err == nil {
-		t.Fatalf("expected service to be deleted after finalizers removed, but it still exists with finalizers=%v", persisted.Finalizers)
+	// ELBBinding finalizer should be removed (allows cascading deletion).
+	persistedBinding := &v1alpha1.ELBBinding{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "delete-svc", Namespace: "default"}, persistedBinding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected NotFound error, got: %v", err)
+	if controllerutil.ContainsFinalizer(persistedBinding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		t.Error("expected ELBBinding finalizer to be removed")
 	}
 }
 
@@ -636,14 +642,20 @@ func TestServiceReconciler_DeletePath_ACLFinalizerCleanup(t *testing.T) {
 	svc := makeTestService("delete-acl-svc")
 	now := metav1.Now()
 	svc.DeletionTimestamp = &now
+	svc.Finalizers = []string{"service.kubernetes.io/load-balancer-cleanup"} // CCM finalizer (not ours)
 	svc.Annotations = map[string]string{
 		huaweicloud.AnnotationELBID: "elb-to-delete",
 		aclIDAnnotation:              "ipgroup-to-delete",
 	}
-	controllerutil.AddFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer)
-	controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
+	// Finalizer + ACL state on ELBBinding, not Service.
+	binding := &v1alpha1.ELBBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "delete-acl-svc", Namespace: "default"},
+		Spec:   v1alpha1.ELBBindingSpec{ServiceName: "delete-acl-svc", ServiceUID: string(svc.UID)},
+		Status: v1alpha1.ELBBindingStatus{ELBID: "elb-to-delete", ACLID: "ipgroup-to-delete"},
+	}
+	controllerutil.AddFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc, binding).Build()
 	r := &ServiceReconciler{
 		Client:    fakeClient,
 		ELBClient: mockClient,
@@ -655,14 +667,13 @@ func TestServiceReconciler_DeletePath_ACLFinalizerCleanup(t *testing.T) {
 		t.Fatalf("reconcileDelete returned error: %v", err)
 	}
 
-	// After all finalizers removed, the fake client deletes the object.
-	persisted := &corev1.Service{}
-	err = fakeClient.Get(ctx, types.NamespacedName{Name: "delete-acl-svc", Namespace: "default"}, persisted)
-	if err == nil {
-		t.Fatalf("expected service to be deleted after finalizers removed, but it still exists with finalizers=%v", persisted.Finalizers)
+	// ELBBinding finalizer should be removed.
+	persistedBinding := &v1alpha1.ELBBinding{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "delete-acl-svc", Namespace: "default"}, persistedBinding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected NotFound error, got: %v", err)
+	if controllerutil.ContainsFinalizer(persistedBinding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		t.Error("expected ELBBinding finalizer to be removed")
 	}
 }
 
@@ -1051,13 +1062,9 @@ func TestServiceReconciler_CreatePath_EarlyAnnotationWrite(t *testing.T) {
 	if binding.Status.ELBID != "elb-mock-id" {
 		t.Errorf("expected elb-id=elb-mock-id persisted in ELBBinding before listener creation, got %q", binding.Status.ELBID)
 	}
-	// Finalizer is on the Service
-	persisted := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "early-annotation-svc", Namespace: "default"}, persisted); err != nil {
-		t.Fatalf("failed to get persisted service: %v", err)
-	}
-	if !controllerutil.ContainsFinalizer(persisted, huaweicloud.AnnotationELBCleanupFinalizer) {
-		t.Error("expected elb-cleanup finalizer to be persisted before listener creation")
+	// Finalizer is on ELBBinding (not Service).
+	if !controllerutil.ContainsFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		t.Error("expected elb-cleanup finalizer on ELBBinding before listener creation")
 	}
 }
 
