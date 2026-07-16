@@ -257,7 +257,33 @@ kubectl get svc <service-name> -n everest -o jsonpath='{.spec.loadBalancerClass}
 kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
+### 步骤 3：更新已运行的控制器
+
+新版本发布后，如集群中已有控制器在运行，可直接原地更新，无需卸载。
+
 ```bash
+# 1. 拉取最新代码
+cd huawei-elb-controller
+git pull
+
+# 2. 构建并推送新镜像
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+
+# 3. 应用更新后的清单（CRD/RBAC/Webhook 均为幂等）
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/webhook.yaml
+
+# 4. 重启滚动更新以拉取新镜像
+kubectl rollout restart deploy huawei-elb-controller -n everest-system
+
+# 5. 确认新 pod 已运行
+kubectl rollout status deploy huawei-elb-controller -n everest-system
+```
+
+> 更新过程无中断：已有的 ELBBinding 会保留，控制器会从中断处继续调谐。如 webhook 证书 Secret 被删除，重新运行 `bash deploy/gen-webhook-cert.sh` 即可。
+
 git pull
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
@@ -267,7 +293,7 @@ kubectl apply -f deploy/webhook.yaml
 kubectl rollout restart deploy huawei-elb-controller -n everest-system
 ```
 
-### 步骤 3：创建数据库集群（自动模式，推荐）
+### 步骤 4：创建数据库集群（自动模式，推荐）
 
 自动模式无需创建 LoadBalancerConfig。直接在 OpenEverest 中创建数据库集群：
 
@@ -285,7 +311,7 @@ OpenEverest 创建 LoadBalancer Service 后，Controller 自动：
 
 > **默认参数**：公网 ELB、10Mbit/s 带宽、按流量计费、5_bgp EIP 类型、TCP 健康检查（10s/10s/3次重试）。
 
-### 步骤 4：获取连接 IP
+### 步骤 5：获取连接 IP
 
 ```bash
 # 从 Service status 获取外部 IP

@@ -257,7 +257,33 @@ Check logs:
 kubectl logs -n everest-system deployment/huawei-elb-controller
 ```
 
+### Step 3: Update an Existing Controller
+
+When a new version is released and you already have a running controller, update it in place -- no uninstall needed.
+
 ```bash
+# 1. Pull the latest code
+cd huawei-elb-controller
+git pull
+
+# 2. Build and push the new image
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+
+# 3. Apply any updated manifests (CRD/RBAC/Webhook are idempotent)
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/webhook.yaml
+
+# 4. Rollout restart to pull the new image
+kubectl rollout restart deploy huawei-elb-controller -n everest-system
+
+# 5. Confirm the new pod is running
+kubectl rollout status deploy huawei-elb-controller -n everest-system
+```
+
+> The update is non-disruptive: existing ELBBindings are preserved, and the controller resumes reconciliation from where it left off. If the webhook cert Secret was removed, re-run `bash deploy/gen-webhook-cert.sh`.
+
 git pull
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
@@ -267,7 +293,7 @@ kubectl apply -f deploy/webhook.yaml
 kubectl rollout restart deploy huawei-elb-controller -n everest-system
 ```
 
-### Step 3: Create a Database (Auto Mode)
+### Step 4: Create a Database (Auto Mode)
 
 The easiest path: create a database cluster without a LoadBalancerConfig.
 
@@ -291,7 +317,7 @@ The controller will:
 
 > **Default parameters**: public ELB, 10 Mbit/s bandwidth, traffic billing, 5_bgp EIP, TCP health check (10s/10s/3 retries).
 
-### Step 4: Get the Connection IP
+### Step 5: Get the Connection IP
 
 ```bash
 # From the Service status
