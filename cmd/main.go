@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/weimantian/huawei-elb-controller/api/v1alpha1"
 	"github.com/weimantian/huawei-elb-controller/internal/controller"
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
@@ -63,6 +64,12 @@ func main() {
 	})
 	if err != nil {
 		logger.Error(err, "failed to start manager")
+		os.Exit(1)
+	}
+
+	// 4b. Register ELBBinding CRD scheme before reconcilers start.
+	if err := v1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		logger.Error(err, "failed to register ELBBinding scheme")
 		os.Exit(1)
 	}
 
