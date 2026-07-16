@@ -425,10 +425,30 @@ func (r *ServiceReconciler) createListenerStack(
 // reconcileUpdate handles changes to an existing ELB: port changes, node changes,
 // param changes (bandwidth), and ACL changes.
 func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Logger, svc *corev1.Service) (ctrl.Result, error) {
-	elbID := svc.Annotations[huaweicloud.AnnotationELBID]
+	// Prefer ELBBinding for ELB ID, falling back to annotation for backward compat.
+	elbID := ""
+	bindingKey := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+	binding, err := r.getBinding(ctx, svc)
+	if err != nil {
+		logger.Error(err, "getting ELBBinding")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+	if binding != nil && binding.Status.ELBID != "" {
+		elbID = binding.Status.ELBID
+	}
+	if elbID == "" {
+		elbID = svc.Annotations[huaweicloud.AnnotationELBID]
+	}
 	if elbID == "" {
 		logger.Info("ELB ID missing, falling back to create")
 		return r.reconcileCreate(ctx, logger, svc)
+	}
+
+	// Ensure ELBBinding exists for future use.
+	if binding == nil {
+		if _, err := r.ensureBinding(ctx, svc); err != nil {
+			logger.Error(err, "ensuring ELBBinding")
+		}
 	}
 
 	// 1. Sync listener/pool stack for port changes.
@@ -445,17 +465,22 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 
 	// 3. Handle LBC param changes (bandwidth etc.).
 	currentParams := getLBCParams(svc)
-	lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]
 	lastKnownParams := make(map[string]string)
-	if lastKnownJSON != "" {
-		_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
+	if binding != nil && len(binding.Status.LastKnownParams) > 0 {
+		for k, v := range binding.Status.LastKnownParams {
+			lastKnownParams[k] = v
+		}
+	} else {
+		// Fallback to annotation
+		lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]
+		if lastKnownJSON != "" {
+			_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
+		}
 	}
 	delete(lastKnownParams, sourceRangesKey)
 
 	if !paramsEqual(currentParams, lastKnownParams) {
 		opt := buildUpdateOption(currentParams, lastKnownParams)
-		// Call UpdateELB if either bandwidth size or charge mode changed.
-		// BandwidthSize=0 with non-empty ChargeMode means only charge mode changed.
 		if opt.BandwidthSize > 0 || opt.BandwidthChargeMode != "" {
 			if err := huaweicloud.UpdateELB(r.ELBClient, elbID, opt, r.Creds); err != nil {
 				logger.Error(err, "updating ELB params", "elbID", elbID)
@@ -471,9 +496,20 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
-	// 5. Persist last-known-params.
+	// 5. Persist last-known-params to both ELBBinding and Service annotation.
 	compositeParams := buildCompositeParams(currentParams, filterValidCIDRs(logger, svc.Spec.LoadBalancerSourceRanges))
 	paramsJSON, _ := json.Marshal(compositeParams)
+
+	// Update ELBBinding status.
+	_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+		b.Status.LastKnownParams = compositeParams
+		b.Status.ACLID = svc.Annotations[aclIDAnnotation]
+		b.Status.ACLStatus = svc.Annotations[aclStatusAnnotation]
+		b.Status.ACLType = svc.Annotations[aclTypeAnnotation]
+		return nil
+	})
+
+	// Persist Service annotations (backward compat).
 	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
 		if latest.Annotations == nil {
 			latest.Annotations = make(map[string]string)
@@ -496,6 +532,7 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		logger.Error(err, "patching last-known params")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
+
 	// Ensure status has the ELB IP (fixes status lost during create-time RBAC failure).
 	if len(svc.Status.LoadBalancer.Ingress) == 0 {
 		info, err := huaweicloud.ShowELB(r.ELBClient, elbID)
@@ -509,6 +546,12 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 			if err := r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), []corev1.LoadBalancerIngress{{IP: ingressIP}}); err != nil {
 				logger.Error(err, "updating Service status", "elbID", elbID)
 			}
+
+			// Also persist ingress IP to ELBBinding.
+			_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+				b.Status.IngressIP = ingressIP
+				return nil
+			})
 		}
 	}
 
