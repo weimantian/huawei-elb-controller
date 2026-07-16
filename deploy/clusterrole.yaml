@@ -27,3 +27,10 @@ rules:
   - apiGroups: [""]
     resources: ["services/status"]
     verbs: ["get", "update", "patch"]
+  # Manage ELBBinding CRs for ELB state persistence
+  - apiGroups: ["huawei-elb.io"]
+    resources: ["elbbindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["huawei-elb.io"]
+    resources: ["elbbindings/status"]
+    verbs: ["get", "update", "patch"]
