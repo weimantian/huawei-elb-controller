@@ -640,6 +640,19 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		}
 	}
 
+
+	// Mark binding as Ready (idempotent). Covers the case where binding was
+	// created via reverse-lookup recovery (which only writes ELBID) and phase
+	// was left empty. Also ensures ingress IP is persisted.
+	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+		b.Status.Phase = v1alpha1.PhaseReady
+		if b.Status.IngressIP == "" && len(svc.Status.LoadBalancer.Ingress) > 0 {
+			b.Status.IngressIP = svc.Status.LoadBalancer.Ingress[0].IP
+		}
+		return nil
+	}); err != nil {
+		logger.Info("could not set Phase=Ready, will retry", "error", err.Error())
+	}
 	return ctrl.Result{RequeueAfter: serviceRequeue}, nil
 }
 
