@@ -1102,6 +1102,14 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return false
 			}
+			// Only reconcile on spec changes (generation bump). Annotation-only
+			// updates (e.g. our own writes, operator annotation syncs) do not
+			// change generation and should not trigger reconcilation.
+			// Service type changes (e.g. ClusterIP→LoadBalancer) are caught
+			// by shouldReconcileService on both old and new.
+			if svcNew.Generation == svcOld.Generation {
+				return false
+			}
 			return shouldReconcileService(svcOld) || shouldReconcileService(svcNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
@@ -1168,6 +1176,7 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithEventFilter(svcPredicate).
 		Watches(&corev1.Node{}, nodeHandler).
 		Watches(&corev1.Endpoints{}, epHandler).
+		Owns(&v1alpha1.ELBBinding{}).
 		Complete(r)
 }
 
