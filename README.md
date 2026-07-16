@@ -247,9 +247,21 @@ huawei-elb-controller-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
 
 Verify the webhook is active:
 ```bash
-# The injected loadBalancerClass should be huawei-elb.io/direct-api
-kubectl get svc <service-name> -n everest -o jsonpath='{.spec.loadBalancerClass}'
-# Expected: huawei-elb.io/direct-api
+# 1. Check the MutatingWebhookConfiguration exists and has a CA bundle
+kubectl get mutatingwebhookconfiguration huawei-elb-controller-webhook
+# Expected: NAME                            WEBHOOKS   AGE
+#         huawei-elb-controller-webhook   1          <age>
+
+# 2. Check the webhook TLS Secret exists
+kubectl get secret huawei-elb-controller-webhook-tls -n everest-system
+# Expected: NAME                                TYPE     DATA   AGE
+#         huawei-elb-controller-webhook-tls   Opaque   3      <age>
+
+# 3. Check the controller startup log shows the webhook server is serving on :9443
+kubectl logs -n everest-system deployment/huawei-elb-controller | grep -E "Registering webhook|Serving webhook"
+# Expected:
+#   ..."Registering webhook","path":"/mutate-v1-service"
+#   ..."Serving webhook server",...,"port":9443
 ```
 
 Check logs:

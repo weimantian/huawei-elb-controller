@@ -247,9 +247,21 @@ huawei-elb-controller-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
 
 验证 Webhook 生效：
 ```bash
-# Webhook 注入的 loadBalancerClass 应为 huawei-elb.io/direct-api
-kubectl get svc <service-name> -n everest -o jsonpath='{.spec.loadBalancerClass}'
-# 预期输出：huawei-elb.io/direct-api
+# 1. 检查 MutatingWebhookConfiguration 存在且有 CA bundle
+kubectl get mutatingwebhookconfiguration huawei-elb-controller-webhook
+# 预期输出：NAME                            WEBHOOKS   AGE
+#              huawei-elb-controller-webhook   1          <age>
+
+# 2. 检查 webhook TLS Secret 存在
+kubectl get secret huawei-elb-controller-webhook-tls -n everest-system
+# 预期输出：NAME                                TYPE     DATA   AGE
+#              huawei-elb-controller-webhook-tls   Opaque   3      <age>
+
+# 3. 检查控制器启动日志显示 webhook server 在 :9443 监听
+kubectl logs -n everest-system deployment/huawei-elb-controller | grep -E "Registering webhook|Serving webhook"
+# 预期输出：
+#   ..."Registering webhook","path":"/mutate-v1-service"
+#   ..."Serving webhook server",...,"port":9443
 ```
 
 查看日志：
