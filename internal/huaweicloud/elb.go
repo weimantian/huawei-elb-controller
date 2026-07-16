@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	eipv2 "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2"
 	eipv2model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2/model"
@@ -99,6 +100,25 @@ func ShowELB(client *elb.ElbClient, id string) (*ELBInfo, error) {
 	return loadBalancerToInfo(resp.Loadbalancer), nil
 }
 
+// WaitForELBActive polls the ELB until its provisioning status becomes ACTIVE
+// or the timeout is reached. Returns (true, nil) if ACTIVE, (false, nil) if
+// timeout, or (false, err) on lookup error.
+func WaitForELBActive(client *elb.ElbClient, elbID string, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	const interval = 3 * time.Second
+	for time.Now().Before(deadline) {
+		info, err := ShowELB(client, elbID)
+		if err != nil {
+			return false, err
+		}
+		if info.ProvisioningStatus == "ACTIVE" {
+			return true, nil
+		}
+		time.Sleep(interval)
+	}
+	return false, nil
+}
+
 // FindELBByName lists ELBs filtered by name and returns the first match.
 // Returns (nil, nil) if no ELB with the given name exists.
 func FindELBByName(client *elb.ElbClient, name string) (*ELBInfo, error) {
@@ -131,6 +151,24 @@ func DeleteELB(client *elb.ElbClient, id string) error {
 	return nil
 }
 
+// DeleteEIPByID deletes an EIP by its ID using the EIP v2 API.
+// This is used to clean up the EIP after ELB deletion, since DeleteELB does not
+// automatically delete the associated EIP (it only unbinds it).
+func DeleteEIPByID(creds *Credentials, eipID string) error {
+	eipClient, err := NewEIPClient(creds)
+	if err != nil {
+		return fmt.Errorf("creating EIP client: %w", err)
+	}
+
+	req := eipv2model.DeletePublicipRequest{
+		PublicipId: eipID,
+	}
+	if _, err := eipClient.DeletePublicip(&req); err != nil {
+		return fmt.Errorf("deleting EIP %q: %w", eipID, err)
+	}
+	return nil
+}
+
 // UpdateELB updates an existing Huawei Cloud ELB.
 func UpdateELB(client *elb.ElbClient, elbID string, opt UpdateELBOption, creds *Credentials) error {
 	if opt.Name != "" {
@@ -150,7 +188,9 @@ func UpdateELB(client *elb.ElbClient, elbID string, opt UpdateELBOption, creds *
 		}
 	}
 
-	if opt.BandwidthSize > 0 {
+	// Update bandwidth when size > 0 (resize) or charge mode changed (size may be 0
+	// if only charge mode changed). The EIP API handles size=0 by keeping current size.
+	if opt.BandwidthSize > 0 || opt.BandwidthChargeMode != "" {
 		if err := updateELBBandwidth(elbID, opt.BandwidthSize, opt.BandwidthChargeMode, creds, client); err != nil {
 			return fmt.Errorf("updating ELB %q bandwidth: %w", elbID, err)
 		}
@@ -271,8 +311,11 @@ func updateELBBandwidth(elbID string, size int32, chargeMode string, creds *Cred
 		return fmt.Errorf("getting bandwidth ID: %w", err)
 	}
 
-	bandwidthOpt := &eipv2model.UpdateBandwidthOption{
-		Size: &size,
+	bandwidthOpt := &eipv2model.UpdateBandwidthOption{}
+	// Only set Size when > 0; size=0 means only charge mode is changing.
+	// Passing Size=0 to the EIP API would attempt to resize to 0 (invalid).
+	if size > 0 {
+		bandwidthOpt.Size = &size
 	}
 	if chargeMode != "" {
 		chargeModeEnum := eipResolveChargeMode(chargeMode)
@@ -330,8 +373,6 @@ func eipResolveChargeMode(mode string) eipv2model.UpdateBandwidthOptionChargeMod
 	return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().TRAFFIC
 }
 
-// AnnotationELBID is the Kubernetes annotation for CCE ELB integration.
-const AnnotationELBID = "kubernetes.io/elb.id"
 
 // ELBNamePrefix is prepended to the LoadBalancerConfig name to form the ELB name.
 const ELBNamePrefix = "elb-"

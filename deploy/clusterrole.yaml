@@ -11,11 +11,26 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Read endpoints for Local-traffic member filtering (externalTrafficPolicy: Local)
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
   # Events for status reporting (optional but good practice)
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # Read and patch Services for autocreate injection (Plan 2 Service Reconciler)
+  # Read and patch Services for direct ELB API management (Plan B Service Reconciler)
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # Update Service status (loadBalancer.ingress) for direct ELB API mode
+  - apiGroups: [""]
+    resources: ["services/status"]
+    verbs: ["get", "update", "patch"]
+  # Manage ELBBinding CRs for ELB state persistence
+  - apiGroups: ["huawei-elb.io"]
+    resources: ["elbbindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["huawei-elb.io"]
+    resources: ["elbbindings/status"]
+    verbs: ["get", "update", "patch"]

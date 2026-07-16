@@ -13,9 +13,10 @@ corev1 "k8s.io/api/core/v1"
 
 // DetectedParams holds the cluster's VPC/subnet/AZ detected from nodes.
 type DetectedParams struct {
-	VPCID    string
-	SubnetID string
-	AZs      []string
+	VPCID     string
+	SubnetID  string            // VIP subnet (first node's subnet, used for ELB VIP)
+	AZs       []string
+	SubnetMap map[string]string  // virsubnetID -> neutron subnetID (all nodes' subnets)
 }
 const detectorCacheTTL = 1 * time.Hour
 
@@ -56,16 +57,31 @@ return d.detected.VPCID, d.detected.SubnetID, d.detected.AZs, nil
 
 	node := nodeList.Items[0]
 
-	virsubnetID := node.Labels["node.kubernetes.io/subnetid"]
-	if virsubnetID == "" {
+	// Collect all unique virsubnet IDs from nodes (multi-AZ clusters have
+	// different subnets per AZ). Each member must use its own subnet.
+	virsubnetSet := make(map[string]bool)
+	for _, n := range nodeList.Items {
+		if vs := n.Labels["node.kubernetes.io/subnetid"]; vs != "" {
+			virsubnetSet[vs] = true
+		}
+	}
+
+	subnetMap := make(map[string]string, len(virsubnetSet))
+	for vs := range virsubnetSet {
+		neutronID, err := GetNeutronSubnetID(d.Credentials, vs)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("converting virsubnet %s to neutron subnet: %w", vs, err)
+		}
+		subnetMap[vs] = neutronID
+	}
+
+	// VIP subnet: use the first node's subnet (ELB VIP only needs one subnet).
+	firstVirsubnet := node.Labels["node.kubernetes.io/subnetid"]
+	if firstVirsubnet == "" {
 		return "", "", nil, fmt.Errorf(
 			"node %s has no node.kubernetes.io/subnetid label", node.Name)
 	}
-
-	subnetID, err = GetNeutronSubnetID(d.Credentials, virsubnetID)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("converting virsubnet to neutron subnet: %w", err)
-	}
+	subnetID = subnetMap[firstVirsubnet]
 
 	azSet := make(map[string]bool)
 	for _, n := range nodeList.Items {
@@ -93,10 +109,37 @@ return d.detected.VPCID, d.detected.SubnetID, d.detected.AZs, nil
 	}
 
 d.detected = &DetectedParams{
-VPCID:    vpcID,
-SubnetID: subnetID,
-AZs:      azs,
+	VPCID:     vpcID,
+	SubnetID:  subnetID,
+	AZs:       azs,
+	SubnetMap: subnetMap,
 }
 d.detectedAt = time.Now()
 	return vpcID, subnetID, azs, nil
+}
+
+// GetNeutronSubnet returns the neutron subnet ID for a given virsubnet ID,
+// using the cached subnet map from the last Detect() call. If the virsubnet
+// is not in the cache, it queries the API and caches the result.
+func (d *NetworkDetector) GetNeutronSubnet(virsubnetID string) (string, error) {
+	d.detectMu.Lock()
+	defer d.detectMu.Unlock()
+
+	if d.detected != nil && time.Since(d.detectedAt) < detectorCacheTTL {
+		if id, ok := d.detected.SubnetMap[virsubnetID]; ok {
+			return id, nil
+		}
+	}
+
+	// Cache miss or expired: query API directly.
+	neutronID, err := GetNeutronSubnetID(d.Credentials, virsubnetID)
+	if err != nil {
+		return "", err
+	}
+
+	// Update cache map if we have a valid cache.
+	if d.detected != nil && d.detected.SubnetMap != nil {
+		d.detected.SubnetMap[virsubnetID] = neutronID
+	}
+	return neutronID, nil
 }

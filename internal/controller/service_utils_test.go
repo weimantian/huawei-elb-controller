@@ -27,7 +27,7 @@ func TestIsLoadBalancerService(t *testing.T) {
 	}
 }
 
-func TestHasELBID(t *testing.T) {
+func TestHasLegacyELBID(t *testing.T) {
 	withID := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -35,12 +35,12 @@ func TestHasELBID(t *testing.T) {
 			},
 		},
 	}
-	if !hasELBID(withID) {
-		t.Error("expected true when annotation is present")
+	if !hasLegacyELBID(withID) {
+		t.Error("expected true when legacy kubernetes.io/elb.id annotation is present")
 	}
 
 	withoutID := &corev1.Service{}
-	if hasELBID(withoutID) {
+	if hasLegacyELBID(withoutID) {
 		t.Error("expected false when annotations are nil")
 	}
 
@@ -51,12 +51,24 @@ func TestHasELBID(t *testing.T) {
 			},
 		},
 	}
-	if hasELBID(other) {
-		t.Error("expected false when annotation is absent")
+	if hasLegacyELBID(other) {
+		t.Error("expected false when legacy annotation is absent")
+	}
+
+	// Managed ELB ID (huawei-elb.io/elb-id) should NOT trigger legacy check
+	managed := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"huawei-elb.io/elb-id": "elb-12345",
+			},
+		},
+	}
+	if hasLegacyELBID(managed) {
+		t.Error("expected false for managed huawei-elb.io/elb-id annotation")
 	}
 }
 
-func TestHasAutocreate(t *testing.T) {
+func TestHasLegacyAutocreate(t *testing.T) {
 	withAuto := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -64,13 +76,43 @@ func TestHasAutocreate(t *testing.T) {
 			},
 		},
 	}
-	if !hasAutocreate(withAuto) {
-		t.Error("expected true when autocreate annotation is present")
+	if !hasLegacyAutocreate(withAuto) {
+		t.Error("expected true when legacy autocreate annotation is present")
 	}
 
 	withoutAuto := &corev1.Service{}
-	if hasAutocreate(withoutAuto) {
+	if hasLegacyAutocreate(withoutAuto) {
 		t.Error("expected false when annotations are nil")
+	}
+}
+
+func TestHasManagedELBID(t *testing.T) {
+	withManaged := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"huawei-elb.io/elb-id": "elb-12345",
+			},
+		},
+	}
+	if !hasManagedELBID(withManaged) {
+		t.Error("expected true when managed huawei-elb.io/elb-id annotation is present")
+	}
+
+	nilSvc := &corev1.Service{}
+	if hasManagedELBID(nilSvc) {
+		t.Error("expected false when annotations are nil")
+	}
+
+	// Legacy kubernetes.io/elb.id should NOT trigger managed check
+	legacy := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"kubernetes.io/elb.id": "elb-12345",
+			},
+		},
+	}
+	if hasManagedELBID(legacy) {
+		t.Error("expected false for legacy kubernetes.io/elb.id annotation")
 	}
 }
 
@@ -233,7 +275,7 @@ func TestShouldReconcileService(t *testing.T) {
 		t.Error("expected false for ClusterIP type")
 	}
 
-	withELBID := &corev1.Service{
+	withLegacyELBID := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "percona-xtradb-cluster-operator",
@@ -246,8 +288,26 @@ func TestShouldReconcileService(t *testing.T) {
 			Type: corev1.ServiceTypeLoadBalancer,
 		},
 	}
-	if shouldReconcileService(withELBID) {
-		t.Error("expected false when ELB ID already present")
+	if shouldReconcileService(withLegacyELBID) {
+		t.Error("expected false when legacy ELB ID already present")
+	}
+
+	// Managed ELB ID (huawei-elb.io/elb-id) should still be reconciled (update path)
+	withManagedELBID := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "percona-xtradb-cluster-operator",
+			},
+			Annotations: map[string]string{
+				"huawei-elb.io/elb-id": "elb-existing",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeLoadBalancer,
+		},
+	}
+	if !shouldReconcileService(withManagedELBID) {
+		t.Error("expected true for managed ELB ID (update path)")
 	}
 
 	foreignService := &corev1.Service{
