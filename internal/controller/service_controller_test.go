@@ -206,7 +206,7 @@ func TestServiceReconciler_CreatePath_DirectAPI(t *testing.T) {
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1", "az2"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		NetworkDetector: detector,
 		ELBClient:       mockClient,
 	}
@@ -258,7 +258,7 @@ func TestServiceReconciler_CreatePath_InternalELB(t *testing.T) {
 	detector := newTestDetector("vpc-x", "subnet-y", []string{"az-a"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		NetworkDetector: detector,
 		ELBClient:       mockClient,
 	}
@@ -291,7 +291,7 @@ func TestServiceReconciler_CreatePath_WithLBCParams(t *testing.T) {
 	detector := newTestDetector("vpc-x", "subnet-y", []string{"az-a"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		NetworkDetector: detector,
 		ELBClient:       mockClient,
 	}
@@ -321,7 +321,7 @@ func TestServiceReconciler_CreatePath_ACLWithSourceRanges(t *testing.T) {
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		NetworkDetector: detector,
 		ELBClient:       mockClient,
 	}
@@ -359,7 +359,7 @@ func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
 	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
 	r := &ServiceReconciler{
 		Client:          fakeClient,
 		NetworkDetector: detector,
@@ -391,7 +391,7 @@ func TestServiceReconciler_CreatePath_DetectorError(t *testing.T) {
 	detector := huaweicloud.NewNetworkDetector(nil)
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		NetworkDetector: detector,
 	}
 
@@ -420,7 +420,7 @@ func TestServiceReconciler_Skips_NonLoadBalancer(t *testing.T) {
 	}
 
 	r := &ServiceReconciler{
-		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -442,7 +442,7 @@ func TestServiceReconciler_Skips_LegacyELBID(t *testing.T) {
 	}
 
 	r := &ServiceReconciler{
-		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -464,7 +464,7 @@ func TestServiceReconciler_Skips_LegacyAutocreate(t *testing.T) {
 	}
 
 	r := &ServiceReconciler{
-		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -491,7 +491,7 @@ func TestServiceReconciler_Skips_NonOpenEverest(t *testing.T) {
 	}
 
 	r := &ServiceReconciler{
-		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -513,7 +513,7 @@ func TestServiceReconciler_Skips_ForeignCloudAnnotations(t *testing.T) {
 	}
 
 	r := &ServiceReconciler{
-		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 	}
 
 	ctx := ctrllog.IntoContext(context.Background(), logr.Discard())
@@ -543,7 +543,7 @@ func TestServiceReconciler_UpdatePath_WithManagedELBID(t *testing.T) {
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		ELBClient:       mockClient,
 		NetworkDetector: detector,
 	}
@@ -569,7 +569,7 @@ func TestServiceReconciler_UpdatePath_FallsBackToCreateWhenELBIDMissing(t *testi
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		ELBClient:       mockClient,
 		NetworkDetector: detector,
 	}
@@ -602,7 +602,7 @@ func TestServiceReconciler_DeletePath_RemovesELBAndFinalizer(t *testing.T) {
 	}
 	controllerutil.AddFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
 	r := &ServiceReconciler{
 		Client:    fakeClient,
 		ELBClient: mockClient,
@@ -643,7 +643,7 @@ func TestServiceReconciler_DeletePath_ACLFinalizerCleanup(t *testing.T) {
 	controllerutil.AddFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer)
 	controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
 	r := &ServiceReconciler{
 		Client:    fakeClient,
 		ELBClient: mockClient,
@@ -889,7 +889,7 @@ func TestServiceReconciler_SyncAllPoolMembers_NodeListErrorPreservesMembers(t *t
 	// to verify the skip logic: when backends is empty due to no ready nodes, we
 	// still skip to be safe.
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		ELBClient:       mockClient,
 		NetworkDetector: detector,
 	}
@@ -1026,7 +1026,7 @@ func TestServiceReconciler_CreatePath_EarlyAnnotationWrite(t *testing.T) {
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
 	r := &ServiceReconciler{
-		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build(),
+		Client:          fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build(),
 		NetworkDetector: detector,
 		ELBClient:       mockClient,
 	}
@@ -1093,7 +1093,7 @@ func TestServiceReconciler_PersistsELBBinding(t *testing.T) {
 	svc := makeTestService("elbbinding-create-svc")
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
 	r := &ServiceReconciler{
 		Client:          fakeClient,
 		NetworkDetector: detector,
@@ -1150,7 +1150,7 @@ func TestServiceReconciler_ELBBindingUIDGuard(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc, staleBinding).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc, staleBinding).Build()
 	r := &ServiceReconciler{
 		Client:          fakeClient,
 		NetworkDetector: detector,
@@ -1194,7 +1194,7 @@ func TestServiceReconciler_AdoptsLegacyAnnotations(t *testing.T) {
 	}
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 
-	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithObjects(svc).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(makeTestScheme()).WithStatusSubresource(&v1alpha1.ELBBinding{}).WithObjects(svc).Build()
 	r := &ServiceReconciler{
 		Client:          fakeClient,
 		NetworkDetector: detector,

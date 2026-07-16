@@ -151,7 +151,7 @@ func (r *ServiceReconciler) patchBindingStatus(
 		if err := mutate(latest); err != nil {
 			return err
 		}
-		return r.Patch(ctx, latest, client.MergeFrom(original))
+		return r.Status().Patch(ctx, latest, client.MergeFrom(original))
 	})
 }
 
