@@ -46,12 +46,53 @@ The controller directly calls the Huawei Cloud ELB v3 API to create the full ELB
 
 ```
 OpenEverest creates a LoadBalancer Service (in the everest namespace)
-  -> Mutating Webhook intercepts the CREATE request
-  -> Injects spec.loadBalancerClass: huawei-elb.io/direct-api
-  -> CCE CCM sees the non-matching class and completely skips the Service (0 events)
+        |
+        v
+  K8s API Server receives the CREATE request
+        |
+        v
+  API Server calls our webhook (https://huawei-elb-controller-webhook:443/mutate)
+        |
+        v
+  Webhook checks:
+    1. Is it a CREATE operation?       No  -> allow (no mutation)
+    2. Is it type: LoadBalancer?       No  -> allow (no mutation)
+    3. Already has loadBalancerClass?  Yes -> allow (no mutation)
+    4. Has CCM annotations            Yes -> allow (CCM-managed, don't touch)
+       (elb.autocreate or elb.id)?
+        | All checks passed
+        v
+  Inject spec.loadBalancerClass = "huawei-elb.io/direct-api"
+        |
+        v
+  Return patch to API Server
+        |
+        v
+  API Server writes the mutated Service to etcd
+        |
+        v
+  CCM sees non-matching loadBalancerClass -> completely skips   OK
+  Controller creates ELB + writes status                       OK
 ```
 
 > The webhook skips Services that already have `kubernetes.io/elb.autocreate` or `kubernetes.io/elb.id` annotations (CCM-managed Services are unaffected).
+
+### Webhook certificate mechanism
+
+The webhook is called over HTTPS, so the API Server must verify the webhook server's certificate. The `gen-webhook-cert.sh` script handles the full certificate chain in one step:
+
+```
+gen-webhook-cert.sh does three things:
+  1. Generates a self-signed CA + server certificate
+     (CN = huawei-elb-controller-webhook)
+  2. Creates Secret huawei-elb-controller-webhook-tls in everest-system
+     -> mounted into the controller pod at /tmp/k8s-webhook-server/serving-certs
+     -> serves HTTPS on :9443
+  3. Patches the CA certificate into MutatingWebhookConfiguration.caBundle
+     -> API Server uses this CA to verify the webhook server's certificate
+```
+
+> **Install order matters**: `webhook.yaml` must be applied first (creates the MutatingWebhookConfiguration object). Then `gen-webhook-cert.sh` patches that object's `caBundle`. If the cert Secret is missing, the controller pod won't start (volume mount fails). If `caBundle` is empty, the API Server rejects the webhook call (cert verification fails) and Service creation will hang.
 
 ### ELB creation (auto mode)
 

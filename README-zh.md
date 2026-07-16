@@ -45,13 +45,54 @@
 ### Webhook 注入（Service 创建时）
 
 ```
-OpenEverest 创建 LoadBalancer Service (everest namespace)
-  -> Mutating Webhook 拦截 CREATE 请求
-  -> 注入 spec.loadBalancerClass: huawei-elb.io/direct-api
-  -> CCE CCM 看到不匹配的 class，完全跳过该 Service（0 events）
+OpenEverest 创建 LoadBalancer Service（everest 命名空间）
+        |
+        v
+  K8s API Server 收到 CREATE 请求
+        |
+        v
+  API Server 调用我们的 webhook（https://huawei-elb-controller-webhook:443/mutate）
+        |
+        v
+  Webhook 检查：
+    1. 是 CREATE 操作吗？        不是 -> 放行（不修改）
+    2. 是 LoadBalancer 类型吗？  不是 -> 放行（不修改）
+    3. 已有 loadBalancerClass？  有   -> 放行（不修改）
+    4. 有 CCM 注解               有   -> 放行（CCM 管的，别碰）
+       (elb.autocreate 或 elb.id)？
+        | 全部通过
+        v
+  注入 spec.loadBalancerClass = "huawei-elb.io/direct-api"
+        |
+        v
+  返回 patch 给 API Server
+        |
+        v
+  API Server 把修改后的 Service 写入 etcd
+        |
+        v
+  CCM 看到不匹配的 loadBalancerClass -> 完全跳过   OK
+  Controller 创建 ELB + 写入 status                  OK
 ```
 
 > Webhook 跳过已有 `kubernetes.io/elb.autocreate` 或 `kubernetes.io/elb.id` 注解的 Service（即 CCM 管理的 Service 不受影响）。
+
+### Webhook 证书机制
+
+Webhook 通过 HTTPS 调用，API Server 必须验证 webhook server 的证书。`gen-webhook-cert.sh` 脚本一步完成整个证书链配置：
+
+```
+gen-webhook-cert.sh 做三件事：
+  1. 生成自签 CA + server 证书
+     （CN = huawei-elb-controller-webhook）
+  2. 在 everest-system 创建 Secret huawei-elb-controller-webhook-tls
+     -> 挂载到 controller pod 的 /tmp/k8s-webhook-server/serving-certs
+     -> 在 :9443 提供 HTTPS 服务
+  3. 把 CA 证书 patch 进 MutatingWebhookConfiguration.caBundle
+     -> API Server 用此 CA 验证 webhook server 的证书
+```
+
+> **部署顺序很重要**：必须先 apply `webhook.yaml`（创建 MutatingWebhookConfiguration 对象），再运行 `gen-webhook-cert.sh`（patch caBundle）。如果证书 Secret 缺失，controller pod 无法启动（volume 挂载失败）；如果 caBundle 为空，API Server 拒绝 webhook 调用（证书验证失败），Service 创建会卡住。
 
 ### ELB 创建（自动模式）
 
