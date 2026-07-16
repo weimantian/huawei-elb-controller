@@ -154,6 +154,37 @@ func (r *ServiceReconciler) patchBindingStatus(
 		return r.Patch(ctx, latest, client.MergeFrom(original))
 	})
 }
+
+// adoptLegacyAnnotations populates the ELBBinding status from legacy Service annotations
+// for zero-downtime migration of pre-existing ELB Services.
+func (r *ServiceReconciler) adoptLegacyAnnotations(ctx context.Context, logger logr.Logger, key types.NamespacedName, svc *corev1.Service) error {
+	return r.patchBindingStatus(ctx, key, func(b *v1alpha1.ELBBinding) error {
+		if elbID := svc.Annotations[huaweicloud.AnnotationELBID]; elbID != "" {
+			b.Status.ELBID = elbID
+		}
+		if aclID := svc.Annotations[aclIDAnnotation]; aclID != "" {
+			b.Status.ACLID = aclID
+		}
+		if aclStatus := svc.Annotations[aclStatusAnnotation]; aclStatus != "" {
+			b.Status.ACLStatus = aclStatus
+		}
+		if aclType := svc.Annotations[aclTypeAnnotation]; aclType != "" {
+			b.Status.ACLType = aclType
+		}
+		if lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]; lastKnownJSON != "" {
+			lastKnownParams := make(map[string]string)
+			_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
+			b.Status.LastKnownParams = lastKnownParams
+		}
+		if len(svc.Status.LoadBalancer.Ingress) > 0 {
+			b.Status.IngressIP = svc.Status.LoadBalancer.Ingress[0].IP
+		}
+		if b.Status.Phase == "" {
+			b.Status.Phase = v1alpha1.PhaseReady
+		}
+		return nil
+	})
+}
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -444,10 +475,19 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		return r.reconcileCreate(ctx, logger, svc)
 	}
 
-	// Ensure ELBBinding exists for future use.
+	// Ensure ELBBinding exists for future use. Adopt legacy annotations if needed.
 	if binding == nil {
-		if _, err := r.ensureBinding(ctx, svc); err != nil {
+		created, err := r.ensureBinding(ctx, svc)
+		if err != nil {
 			logger.Error(err, "ensuring ELBBinding")
+		} else if created != nil {
+			// Adopt legacy annotation values into the new ELBBinding.
+			binding = created
+			if err := r.adoptLegacyAnnotations(ctx, logger, bindingKey, svc); err != nil {
+				logger.Error(err, "adopting legacy annotations to ELBBinding")
+			} else {
+				logger.Info("adopted legacy annotations into ELBBinding", "elbID", elbID)
+			}
 		}
 	}
 
@@ -503,9 +543,15 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 	// Update ELBBinding status.
 	_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
 		b.Status.LastKnownParams = compositeParams
-		b.Status.ACLID = svc.Annotations[aclIDAnnotation]
-		b.Status.ACLStatus = svc.Annotations[aclStatusAnnotation]
-		b.Status.ACLType = svc.Annotations[aclTypeAnnotation]
+		if v := svc.Annotations[aclIDAnnotation]; v != "" {
+			b.Status.ACLID = v
+		}
+		if v := svc.Annotations[aclStatusAnnotation]; v != "" {
+			b.Status.ACLStatus = v
+		}
+		if v := svc.Annotations[aclTypeAnnotation]; v != "" {
+			b.Status.ACLType = v
+		}
 		return nil
 	})
 
@@ -859,7 +905,7 @@ func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, e
 		}
 		delete(svc.Annotations, aclIDAnnotation)
 		delete(svc.Annotations, aclTypeAnnotation)
-		svc.Annotations[aclStatusAnnotation] = "off"
+		delete(svc.Annotations, aclStatusAnnotation)
 		controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
 		return nil
 	}
