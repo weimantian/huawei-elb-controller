@@ -284,15 +284,6 @@ kubectl rollout status deploy huawei-elb-controller -n everest-system
 
 > The update is non-disruptive: existing ELBBindings are preserved, and the controller resumes reconciliation from where it left off. If the webhook cert Secret was removed, re-run `bash deploy/gen-webhook-cert.sh`.
 
-git pull
-docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
-docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
-docker push <swr-registry>/huawei-elb-controller:latest
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/webhook.yaml
-kubectl rollout restart deploy huawei-elb-controller -n everest-system
-```
-
 ### Step 4: Create a Database (Auto Mode)
 
 The easiest path: create a database cluster without a LoadBalancerConfig.

@@ -284,15 +284,6 @@ kubectl rollout status deploy huawei-elb-controller -n everest-system
 
 > 更新过程无中断：已有的 ELBBinding 会保留，控制器会从中断处继续调谐。如 webhook 证书 Secret 被删除，重新运行 `bash deploy/gen-webhook-cert.sh` 即可。
 
-git pull
-docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
-docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
-docker push <swr-registry>/huawei-elb-controller:latest
-kubectl apply -f deploy/crd.yaml
-kubectl apply -f deploy/webhook.yaml
-kubectl rollout restart deploy huawei-elb-controller -n everest-system
-```
-
 ### 步骤 4：创建数据库集群（自动模式，推荐）
 
 自动模式无需创建 LoadBalancerConfig。直接在 OpenEverest 中创建数据库集群：
