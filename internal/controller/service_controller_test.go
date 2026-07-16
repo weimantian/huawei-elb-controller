@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -221,27 +220,28 @@ func TestServiceReconciler_CreatePath_DirectAPI(t *testing.T) {
 		t.Errorf("expected requeue after %v, got %v", serviceRequeue, result.RequeueAfter)
 	}
 
-	// Verify the ELB ID is persisted in the fake client (patchWithRetry writes to API server, not in-memory)
+	// Verify the ELB ID is persisted in the ELBBinding status, not on the Service
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "direct-api-svc", Namespace: "default"}, binding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
+	}
+	if binding.Status.ELBID != "elb-mock-id" {
+		t.Errorf("expected ELBID=elb-mock-id, got %s", binding.Status.ELBID)
+	}
+	// Verify finalizer is on the Service
 	persisted := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: "direct-api-svc", Namespace: "default"}, persisted); err != nil {
 		t.Fatalf("failed to get persisted service: %v", err)
 	}
-	if persisted.Annotations[huaweicloud.AnnotationELBID] != "elb-mock-id" {
-		t.Errorf("expected persisted elb-id=elb-mock-id, got %s", persisted.Annotations[huaweicloud.AnnotationELBID])
-	}
 	if !controllerutil.ContainsFinalizer(persisted, huaweicloud.AnnotationELBCleanupFinalizer) {
 		t.Error("expected elb-cleanup finalizer to be persisted")
 	}
-	lastKnownJSON := persisted.Annotations[lastKnownParamsAnnotation]
-	if lastKnownJSON == "" {
-		t.Error("expected last-known-params annotation to be set")
-	} else {
-		var lastKnown map[string]string
-		if err := json.Unmarshal([]byte(lastKnownJSON), &lastKnown); err == nil {
-			if lastKnown[sourceRangesKey] == "" {
-				t.Error("expected source-ranges key in last-known params")
-			}
-		}
+	// Verify last-known params in ELBBinding
+	lastKnown := binding.Status.LastKnownParams
+	if len(lastKnown) == 0 {
+		t.Error("expected last-known-params in ELBBinding status")
+	} else if lastKnown[sourceRangesKey] == "" {
+		t.Error("expected source-ranges key in last-known params")
 	}
 }
 
@@ -269,12 +269,12 @@ func TestServiceReconciler_CreatePath_InternalELB(t *testing.T) {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
 
-	persisted := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "internal-svc", Namespace: "default"}, persisted); err != nil {
-		t.Fatalf("failed to get persisted service: %v", err)
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "internal-svc", Namespace: "default"}, binding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
 	}
-	if persisted.Annotations[huaweicloud.AnnotationELBID] != "elb-internal-id" {
-		t.Errorf("expected elb-id=elb-internal-id, got %s", persisted.Annotations[huaweicloud.AnnotationELBID])
+	if binding.Status.ELBID != "elb-internal-id" {
+		t.Errorf("expected ELBID=elb-internal-id, got %s", binding.Status.ELBID)
 	}
 }
 
@@ -302,12 +302,12 @@ func TestServiceReconciler_CreatePath_WithLBCParams(t *testing.T) {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
 
-	persisted := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "lbc-params-svc", Namespace: "default"}, persisted); err != nil {
-		t.Fatalf("failed to get persisted service: %v", err)
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "lbc-params-svc", Namespace: "default"}, binding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
 	}
-	if persisted.Annotations[huaweicloud.AnnotationELBID] == "" {
-		t.Error("expected ELB ID to be set")
+	if binding.Status.ELBID == "" {
+		t.Error("expected ELB ID to be set in ELBBinding status")
 	}
 }
 
@@ -332,14 +332,18 @@ func TestServiceReconciler_CreatePath_ACLWithSourceRanges(t *testing.T) {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
 
-	if svc.Annotations[aclStatusAnnotation] != "on" {
-		t.Errorf("expected acl-status=on, got %s", svc.Annotations[aclStatusAnnotation])
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "acl-svc", Namespace: "default"}, binding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
 	}
-	if svc.Annotations[aclTypeAnnotation] != "white" {
-		t.Errorf("expected acl-type=white, got %s", svc.Annotations[aclTypeAnnotation])
+	if binding.Status.ACLStatus != "on" {
+		t.Errorf("expected ACLStatus=on, got %s", binding.Status.ACLStatus)
 	}
-	if svc.Annotations[aclIDAnnotation] != "ipgroup-mock-id" {
-		t.Errorf("expected acl-id=ipgroup-mock-id, got %s", svc.Annotations[aclIDAnnotation])
+	if binding.Status.ACLType != "white" {
+		t.Errorf("expected ACLType=white, got %s", binding.Status.ACLType)
+	}
+	if binding.Status.ACLID != "ipgroup-mock-id" {
+		t.Errorf("expected ACLID=ipgroup-mock-id, got %s", binding.Status.ACLID)
 	}
 }
 
@@ -377,9 +381,8 @@ func TestServiceReconciler_CreatePath_ACLFinalizerPersisted(t *testing.T) {
 	if !controllerutil.ContainsFinalizer(persisted, aclCleanupFinalizer) {
 		t.Errorf("expected acl-cleanup finalizer to be persisted, got finalizers=%v", persisted.Finalizers)
 	}
-	if persisted.Annotations[aclIDAnnotation] != "ipgroup-mock-id" {
-		t.Errorf("expected persisted acl-id=ipgroup-mock-id, got %s", persisted.Annotations[aclIDAnnotation])
-	}
+	// ACL state is now persisted in ELBBinding status, not on Service annotations.
+	// Finalizer is the only thing that remains on Service.
 }
 
 func TestServiceReconciler_CreatePath_DetectorError(t *testing.T) {
@@ -576,13 +579,13 @@ func TestServiceReconciler_UpdatePath_FallsBackToCreateWhenELBIDMissing(t *testi
 	if err != nil {
 		t.Fatalf("reconcileUpdate returned error: %v", err)
 	}
-	// After fallback to create, ELB ID should be persisted
-	persisted := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "fallback-create-svc", Namespace: "default"}, persisted); err != nil {
-		t.Fatalf("failed to get persisted service: %v", err)
+	// After fallback to create, ELB ID should be persisted in ELBBinding
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "fallback-create-svc", Namespace: "default"}, binding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
 	}
-	if persisted.Annotations[huaweicloud.AnnotationELBID] == "" {
-		t.Error("expected ELB ID to be set after fallback to create")
+	if binding.Status.ELBID == "" {
+		t.Error("expected ELB ID to be set in ELBBinding status after fallback to create")
 	}
 }
 
@@ -1038,15 +1041,20 @@ func TestServiceReconciler_CreatePath_EarlyAnnotationWrite(t *testing.T) {
 		t.Errorf("expected requeue after %v, got %v", serviceRetryRequeue, result.RequeueAfter)
 	}
 
-	// CRITICAL: elbID annotation MUST be persisted even though listener creation failed.
+	// CRITICAL: elbID MUST be persisted in ELBBinding even though listener creation failed.
 	// This ensures the next reconcile routes to reconcileUpdate (not reconcileCreate),
 	// which can complete provisioning via syncListenerStacks.
+	binding := &v1alpha1.ELBBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "early-annotation-svc", Namespace: "default"}, binding); err != nil {
+		t.Fatalf("failed to get ELBBinding: %v", err)
+	}
+	if binding.Status.ELBID != "elb-mock-id" {
+		t.Errorf("expected elb-id=elb-mock-id persisted in ELBBinding before listener creation, got %q", binding.Status.ELBID)
+	}
+	// Finalizer is on the Service
 	persisted := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: "early-annotation-svc", Namespace: "default"}, persisted); err != nil {
 		t.Fatalf("failed to get persisted service: %v", err)
-	}
-	if persisted.Annotations[huaweicloud.AnnotationELBID] != "elb-mock-id" {
-		t.Errorf("expected elb-id=elb-mock-id persisted before listener creation, got %q", persisted.Annotations[huaweicloud.AnnotationELBID])
 	}
 	if !controllerutil.ContainsFinalizer(persisted, huaweicloud.AnnotationELBCleanupFinalizer) {
 		t.Error("expected elb-cleanup finalizer to be persisted before listener creation")
@@ -1175,7 +1183,9 @@ func TestServiceReconciler_AdoptsLegacyAnnotations(t *testing.T) {
 	defer server.Close()
 
 	// Legacy Service: has huawei-elb.io/elb-id in annotations but no ELBBinding.
+	// Source ranges must be set so ensureACL preserves the adopted ACL values.
 	svc := makeTestService("legacy-adopt-svc")
+	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
 	svc.Annotations = map[string]string{
 		huaweicloud.AnnotationELBID:                "elb-legacy-123",
 		aclStatusAnnotation:                        "on",

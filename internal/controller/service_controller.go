@@ -157,24 +157,32 @@ func (r *ServiceReconciler) patchBindingStatus(
 
 // adoptLegacyAnnotations populates the ELBBinding status from legacy Service annotations
 // for zero-downtime migration of pre-existing ELB Services.
+// After adoption, strips legacy annotations from the Service so state is stored
+// exclusively in the ELBBinding CRD.
 func (r *ServiceReconciler) adoptLegacyAnnotations(ctx context.Context, logger logr.Logger, key types.NamespacedName, svc *corev1.Service) error {
-	return r.patchBindingStatus(ctx, key, func(b *v1alpha1.ELBBinding) error {
+	var annotationsToStrip []string
+	if err := r.patchBindingStatus(ctx, key, func(b *v1alpha1.ELBBinding) error {
 		if elbID := svc.Annotations[huaweicloud.AnnotationELBID]; elbID != "" {
 			b.Status.ELBID = elbID
+			annotationsToStrip = append(annotationsToStrip, huaweicloud.AnnotationELBID)
 		}
 		if aclID := svc.Annotations[aclIDAnnotation]; aclID != "" {
 			b.Status.ACLID = aclID
+			annotationsToStrip = append(annotationsToStrip, aclIDAnnotation)
 		}
 		if aclStatus := svc.Annotations[aclStatusAnnotation]; aclStatus != "" {
 			b.Status.ACLStatus = aclStatus
+			annotationsToStrip = append(annotationsToStrip, aclStatusAnnotation)
 		}
 		if aclType := svc.Annotations[aclTypeAnnotation]; aclType != "" {
 			b.Status.ACLType = aclType
+			annotationsToStrip = append(annotationsToStrip, aclTypeAnnotation)
 		}
 		if lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]; lastKnownJSON != "" {
 			lastKnownParams := make(map[string]string)
 			_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
 			b.Status.LastKnownParams = lastKnownParams
+			annotationsToStrip = append(annotationsToStrip, lastKnownParamsAnnotation)
 		}
 		if len(svc.Status.LoadBalancer.Ingress) > 0 {
 			b.Status.IngressIP = svc.Status.LoadBalancer.Ingress[0].IP
@@ -183,7 +191,27 @@ func (r *ServiceReconciler) adoptLegacyAnnotations(ctx context.Context, logger l
 			b.Status.Phase = v1alpha1.PhaseReady
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	// Strip legacy annotations from Service after successful migration.
+	if len(annotationsToStrip) > 0 {
+		if err := r.patchWithRetry(ctx, key, func(latest *corev1.Service) error {
+			if latest.Annotations == nil {
+				return nil
+			}
+			for _, ann := range annotationsToStrip {
+				delete(latest.Annotations, ann)
+			}
+			return nil
+		}); err != nil {
+			logger.Error(err, "stripping legacy annotations after ELBBinding adoption")
+			// Non-fatal: annotations will be cleaned on the next update reconcile.
+		} else {
+			logger.Info("stripped legacy annotations from Service after ELBBinding migration")
+		}
+	}
+	return nil
 }
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -249,27 +277,29 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 	if existing != nil {
-		logger.Info("Found existing ELB by name, restoring annotation and routing to update", "elbID", existing.ID, "name", elbName)
+		logger.Info("Found existing ELB by name, restoring ELBBinding and routing to update", "elbID", existing.ID, "name", elbName)
+		// Write ELB ID to ELBBinding status (not Service annotation).
+		bindingKey := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+		if _, err := r.ensureBinding(ctx, svc); err != nil {
+			logger.Error(err, "ensuring ELBBinding during reverse-lookup")
+		}
+		_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+			b.Status.ELBID = existing.ID
+			return nil
+		})
+		// Still need finalizer on Service (actual cleanup trigger).
 		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-			if latest.Annotations == nil {
-				latest.Annotations = make(map[string]string)
-			}
-			latest.Annotations[huaweicloud.AnnotationELBID] = existing.ID
 			controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
 			return nil
 		}); err != nil {
 			if apierrors.IsNotFound(err) {
-				// Service was deleted during the annotation-restore race window
-				// (e.g. PSMDB operator Update overwrote annotations, then StatefulSet
-				// cascade deleted the Service). The ELB is now orphaned -- delete it
-				// to prevent a leak, since reconcileDelete will never fire.
-				logger.Info("Service gone during annotation restore, deleting orphaned ELB", "elbID", existing.ID, "name", elbName)
+				logger.Info("Service gone during reverse-lookup, deleting orphaned ELB", "elbID", existing.ID, "name", elbName)
 				if delErr := r.deleteELBStack(logger, existing.ID); delErr != nil && !huaweicloud.IsNotFoundError(delErr) {
 					logger.Error(delErr, "deleting orphaned ELB after Service disappeared", "elbID", existing.ID)
 				}
 				return ctrl.Result{}, nil
 			}
-			logger.Error(err, "restoring ELB ID annotation")
+			logger.Error(err, "adding cleanup finalizer during reverse-lookup")
 			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -322,17 +352,14 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 
 	// Persist cleanup finalizer on the Service (must stay on Service to
 	// ensure cleanup fires even if the controller is down during deletion).
-	paramsJSON, _ := json.Marshal(compositeParams)
+	// Persist cleanup finalizer on the Service (must stay on Service to
+	// ensure cleanup fires even if the controller is down during deletion).
+	// State (elbID, params) is stored ONLY in ELBBinding status.
 	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-		if latest.Annotations == nil {
-			latest.Annotations = make(map[string]string)
-		}
-		latest.Annotations[huaweicloud.AnnotationELBID] = info.ID
-		latest.Annotations[lastKnownParamsAnnotation] = string(paramsJSON)
 		controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
 		return nil
 	}); err != nil {
-		logger.Error(err, "patching Service with ELB ID and finalizer")
+		logger.Error(err, "patching Service finalizer")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
@@ -354,39 +381,29 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}
 
 	// ACL handling (IP groups for source ranges).
-	if err := r.ensureACL(ctx, logger, info.ID, svc); err != nil {
+	aclID, aclStatus, aclType, aclFinalizer, err := r.ensureACL(ctx, logger, info.ID, "" /* no existing ACL on create */, svc)
+	if err != nil {
 		logger.Error(err, "ensuring ACL, will retry")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
-	// Persist ACL annotations (ensureACL modifies svc.Annotations in-memory).
-	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-		if latest.Annotations == nil {
-			latest.Annotations = make(map[string]string)
-		}
-		for _, key := range []string{aclIDAnnotation, aclStatusAnnotation, aclTypeAnnotation} {
-			if v, ok := svc.Annotations[key]; ok {
-				latest.Annotations[key] = v
-			} else {
-				delete(latest.Annotations, key)
-			}
-		}
-		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
-			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
-		}
-		return nil
-	}); err != nil {
-		logger.Error(err, "patching ACL annotations")
-		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-	}
-
-	// Also persist ACL state to ELBBinding status.
+	// Persist ACL state to ELBBinding status.
 	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
-		b.Status.ACLID = svc.Annotations[aclIDAnnotation]
-		b.Status.ACLStatus = svc.Annotations[aclStatusAnnotation]
-		b.Status.ACLType = svc.Annotations[aclTypeAnnotation]
+		b.Status.ACLID = aclID
+		b.Status.ACLStatus = aclStatus
+		b.Status.ACLType = aclType
 		return nil
 	}); err != nil {
 		logger.Error(err, "patching ELBBinding ACL status")
+	}
+	// Manage ACL finalizer on Service.
+	if aclFinalizer {
+		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
+			return nil
+		}); err != nil {
+			logger.Error(err, "adding ACL finalizer")
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
 	}
 
 	// Write service.status.loadBalancer.ingress.
@@ -531,53 +548,43 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 	}
 
 	// 4. Handle ACL changes (source ranges).
-	if err := r.ensureACL(ctx, logger, elbID, svc); err != nil {
+	existingACLID := ""
+	if binding != nil {
+		existingACLID = binding.Status.ACLID
+	}
+	// Fallback: after legacy adoption, the in-memory binding may not reflect
+	// the API server state yet, so check Service annotations as well.
+	if existingACLID == "" {
+		existingACLID = svc.Annotations[aclIDAnnotation]
+	}
+	aclID, aclStatus, aclType, aclFinalizer, err := r.ensureACL(ctx, logger, elbID, existingACLID, svc)
+	if err != nil {
 		logger.Error(err, "ensuring ACL")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
-	// 5. Persist last-known-params to both ELBBinding and Service annotation.
+	// 5. Persist last-known-params and ACL state to ELBBinding status.
 	compositeParams := buildCompositeParams(currentParams, filterValidCIDRs(logger, svc.Spec.LoadBalancerSourceRanges))
-	paramsJSON, _ := json.Marshal(compositeParams)
 
-	// Update ELBBinding status.
-	_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
 		b.Status.LastKnownParams = compositeParams
-		if v := svc.Annotations[aclIDAnnotation]; v != "" {
-			b.Status.ACLID = v
-		}
-		if v := svc.Annotations[aclStatusAnnotation]; v != "" {
-			b.Status.ACLStatus = v
-		}
-		if v := svc.Annotations[aclTypeAnnotation]; v != "" {
-			b.Status.ACLType = v
-		}
+		b.Status.ACLID = aclID
+		b.Status.ACLStatus = aclStatus
+		b.Status.ACLType = aclType
 		return nil
-	})
-
-	// Persist Service annotations (backward compat).
-	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-		if latest.Annotations == nil {
-			latest.Annotations = make(map[string]string)
-		}
-		latest.Annotations[lastKnownParamsAnnotation] = string(paramsJSON)
-		for _, key := range []string{aclIDAnnotation, aclStatusAnnotation, aclTypeAnnotation} {
-			if v, ok := svc.Annotations[key]; ok {
-				latest.Annotations[key] = v
-			} else {
-				delete(latest.Annotations, key)
-			}
-		}
-		if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
+	}); err != nil {
+		logger.Error(err, "patching ELBBinding status")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+	// Manage ACL finalizer on Service.
+	_ = r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+		if aclFinalizer {
 			controllerutil.AddFinalizer(latest, aclCleanupFinalizer)
 		} else {
 			controllerutil.RemoveFinalizer(latest, aclCleanupFinalizer)
 		}
 		return nil
-	}); err != nil {
-		logger.Error(err, "patching last-known params")
-		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-	}
+	})
 
 	// Ensure status has the ELB IP (fixes status lost during create-time RBAC failure).
 	if len(svc.Status.LoadBalancer.Ingress) == 0 {
@@ -879,73 +886,58 @@ func (r *ServiceReconciler) deleteELBStack(logger logr.Logger, elbID string) err
 }
 
 // ensureACL creates/updates/deletes the ACL IP group based on loadBalancerSourceRanges.
-func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, elbID string, svc *corev1.Service) error {
+// On success returns the ACL state values; the caller persists them to ELBBinding status.
+// existingACLID is read from ELBBinding status (not Service annotations).
+func (r *ServiceReconciler) ensureACL(ctx context.Context, logger logr.Logger, elbID, existingACLID string, svc *corev1.Service) (aclID, aclStatus, aclType string, wantFinalizer bool, err error) {
 	sourceRanges := svc.Spec.LoadBalancerSourceRanges
 	filteredCIDRs := filterValidCIDRs(logger, sourceRanges)
 
-	if svc.Annotations == nil {
-		svc.Annotations = make(map[string]string)
-	}
-
-
 	if len(filteredCIDRs) == 0 {
 		// No source ranges: unbind ACL from listeners, then delete IP group if exists.
-		if oldID := svc.Annotations[aclIDAnnotation]; oldID != "" {
+		if existingACLID != "" {
 			// Unbind IP group from all listeners before deleting it.
 			if elbID != "" {
 				if err := r.unbindACLFromAllListeners(logger, elbID); err != nil {
-					return err
+					return "", "", "", false, err
 				}
 			}
-			if err := huaweicloud.DeleteIPGroup(r.ELBClient, oldID); err != nil {
+			if err := huaweicloud.DeleteIPGroup(r.ELBClient, existingACLID); err != nil {
 				if !huaweicloud.IsNotFoundError(err) {
-					return err
+					return "", "", "", false, err
 				}
 			}
 		}
-		delete(svc.Annotations, aclIDAnnotation)
-		delete(svc.Annotations, aclTypeAnnotation)
-		delete(svc.Annotations, aclStatusAnnotation)
-		controllerutil.RemoveFinalizer(svc, aclCleanupFinalizer)
-		return nil
+		return "", "", "", false, nil
 	}
 
 	// Has source ranges: create or update IP group.
+	ipGroupID := existingACLID
 	ipGroupName := "acl-" + svc.Namespace + "-" + svc.Name
-	ipGroupID := svc.Annotations[aclIDAnnotation]
 	if ipGroupID == "" {
 		var findErr error
 		ipGroupID, findErr = huaweicloud.FindIPGroupByName(r.ELBClient, ipGroupName)
 		if findErr != nil {
-			return findErr
+			return "", "", "", false, findErr
 		}
 	}
 	if ipGroupID != "" {
 		if err := huaweicloud.UpdateIPGroup(r.ELBClient, ipGroupID, ipGroupName, filteredCIDRs); err != nil {
-			return err
+			return "", "", "", false, err
 		}
-		svc.Annotations[aclIDAnnotation] = ipGroupID
-		svc.Annotations[aclStatusAnnotation] = "on"
-		svc.Annotations[aclTypeAnnotation] = "white"
-		controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 	} else {
-		newID, err := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
-		if err != nil {
-			return err
+		newID, createErr := huaweicloud.CreateIPGroup(r.ELBClient, ipGroupName, "ACL for "+svc.Name, filteredCIDRs)
+		if createErr != nil {
+			return "", "", "", false, createErr
 		}
-		svc.Annotations[aclIDAnnotation] = newID
 		ipGroupID = newID
-		svc.Annotations[aclStatusAnnotation] = "on"
-		svc.Annotations[aclTypeAnnotation] = "white"
-		controllerutil.AddFinalizer(svc, aclCleanupFinalizer)
 	}
 	// Bind IP group to all listeners on the ELB.
 	if elbID != "" {
 		if err := r.bindACLToAllListeners(logger, elbID, ipGroupID); err != nil {
-			return err
+			return "", "", "", false, err
 		}
 	}
-	return nil
+	return ipGroupID, "on", "white", true, nil
 }
 
 // bindACLToAllListeners binds the IP group to all listeners on the specified ELB.
