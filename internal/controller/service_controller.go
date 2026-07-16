@@ -225,7 +225,7 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}
 
 	// Get node backends for member creation (NodePort mode, multi-AZ aware).
-	backends, err := r.getNodeBackends(ctx)
+	backends, err := r.getNodeBackends(ctx, svc)
 	if err != nil {
 		logger.Error(err, "getting node backends")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
@@ -433,7 +433,7 @@ func (r *ServiceReconciler) syncListenerStacks(ctx context.Context, logger logr.
 		existingPorts[l.ProtocolPort] = l
 	}
 
-	backends, err := r.getNodeBackends(ctx)
+	backends, err := r.getNodeBackends(ctx, svc)
 	if err != nil {
 		// Skip listener sync if we can't list nodes; avoid creating listeners with no members.
 		logger.Info("Skipping listener sync: failed to list nodes", "error", err)
@@ -470,7 +470,7 @@ func (r *ServiceReconciler) syncAllPoolMembers(ctx context.Context, logger logr.
 		return fmt.Errorf("listing pools: %w", err)
 	}
 
-	backends, err := r.getNodeBackends(ctx)
+	backends, err := r.getNodeBackends(ctx, svc)
 	if err != nil {
 		// CRITICAL: Skip member sync on API failure to avoid clearing all members
 		// with an empty list. Transient API failures must not cause service disruption.
@@ -508,7 +508,7 @@ func (r *ServiceReconciler) syncAllPoolMembers(ctx context.Context, logger logr.
 		if err := huaweicloud.SyncMembers(r.ELBClient, pool.ID, desired); err != nil {
 			return fmt.Errorf("syncing members for pool %s: %w", pool.ID, err)
 		}
-		logger.Info("Pool members synced", "pool", pool.ID, "memberCount", len(desired))
+		logger.Info("Pool members synced", "pool", pool.ID, "memberCount", len(desired), "externalTrafficPolicy", svc.Spec.ExternalTrafficPolicy)
 	}
 
 	return nil
@@ -767,30 +767,93 @@ type NodeBackend struct {
 	VirsubnetID string // from node.kubernetes.io/subnetid label
 }
 
-// getNodeBackends returns all ready nodes' internal IPs and their virsubnet IDs.
+// getNodeBackends returns ready nodes' internal IPs and their virsubnet IDs.
 // Returns an error if the Kubernetes API call fails, so callers can skip member
 // sync rather than accidentally clearing all members with an empty list.
-func (r *ServiceReconciler) getNodeBackends(ctx context.Context) ([]NodeBackend, error) {
+//
+// When the Service uses externalTrafficPolicy: Local, only nodes hosting a
+// Ready/NotReady endpoint pod for that Service are returned -- otherwise ELB
+// health checks fail on nodes whose NodePort does not forward to a local pod
+// (under Local policy, kube-proxy does not proxy NodePort traffic to other
+// nodes). When the policy is Cluster (default), all ready nodes are returned.
+func (r *ServiceReconciler) getNodeBackends(ctx context.Context, svc *corev1.Service) ([]NodeBackend, error) {
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
-	var backends []NodeBackend
+	allBackends := make([]NodeBackend, 0, len(nodeList.Items))
+	nodeByIP := make(map[string]corev1.Node, len(nodeList.Items))
 	for _, node := range nodeList.Items {
 		if !isNodeReady(&node) {
 			continue
 		}
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
-				backends = append(backends, NodeBackend{
+				allBackends = append(allBackends, NodeBackend{
 					IP:          addr.Address,
 					VirsubnetID: node.Labels["node.kubernetes.io/subnetid"],
 				})
+				nodeByIP[addr.Address] = node
 				break
 			}
 		}
 	}
-	return backends, nil
+
+	// externalTrafficPolicy: Cluster (default) -> all ready nodes are members.
+	if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
+		return allBackends, nil
+	}
+
+	// externalTrafficPolicy: Local -> only nodes hosting an endpoint pod for
+	// this Service. Query the Endpoints object (same name/namespace as the
+	// Service) and keep only backends whose node name is in the endpoint set.
+	allowList, err := r.localEndpointNodeSet(ctx, svc)
+	if err != nil {
+		return nil, fmt.Errorf("listing endpoints for local-traffic Service %s/%s: %w", svc.Namespace, svc.Name, err)
+	}
+	if len(allowList) == 0 {
+		// No endpoints yet (e.g. during startup or after scale-down). Return
+		// empty so caller registers zero members rather than stale ones.
+		return nil, nil
+	}
+	filtered := make([]NodeBackend, 0, len(allBackends))
+	for _, be := range allBackends {
+		node, ok := nodeByIP[be.IP]
+		if !ok {
+			continue
+		}
+		if allowList[node.Name] {
+			filtered = append(filtered, be)
+		}
+	}
+	return filtered, nil
+}
+
+// localEndpointNodeSet returns the set of node names that host at least one
+// endpoint (Ready or NotReady) for the given Service. Used to filter ELB
+// members when externalTrafficPolicy: Local is set.
+func (r *ServiceReconciler) localEndpointNodeSet(ctx context.Context, svc *corev1.Service) (map[string]bool, error) {
+	eps := &corev1.Endpoints{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(svc), eps); err != nil {
+		return nil, err
+	}
+	nodes := make(map[string]bool)
+	for _, subset := range eps.Subsets {
+		for _, addr := range subset.Addresses {
+			if addr.NodeName != nil && *addr.NodeName != "" {
+				nodes[*addr.NodeName] = true
+			}
+		}
+		// Include NotReady addresses so members are registered during pod
+		// startup before the endpoint flips to ready -- ELB health check will
+		// mark the member healthy once the pod is ready.
+		for _, addr := range subset.NotReadyAddresses {
+			if addr.NodeName != nil && *addr.NodeName != "" {
+				nodes[*addr.NodeName] = true
+			}
+		}
+	}
+	return nodes, nil
 }
 
 func isNodeReady(node *corev1.Node) bool {
@@ -860,10 +923,32 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return requests
 	})
 
+	// Endpoint event handler: map endpoint changes to the owning Service so that
+	// member sync runs when pods are scheduled/descheduled under Local policy.
+	// Without this, a pod moving to a new node would not trigger member re-sync
+	// until the next periodic reconcile.
+	epHandler := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		svc := &corev1.Service{}
+		if err := mgr.GetClient().Get(ctx, client.ObjectKeyFromObject(obj), svc); err != nil {
+			return nil
+		}
+		if !shouldReconcileService(svc) || !hasManagedELBID(svc) {
+			return nil
+		}
+		// Only Local-policy Services care about endpoint changes for member sync.
+		if svc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{
+			Namespace: svc.Namespace, Name: svc.Name,
+		}}}
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}).
 		WithEventFilter(svcPredicate).
 		Watches(&corev1.Node{}, nodeHandler).
+		Watches(&corev1.Endpoints{}, epHandler).
 		Complete(r)
 }
 

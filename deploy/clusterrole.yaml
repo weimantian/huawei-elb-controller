@@ -11,6 +11,10 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Read endpoints for Local-traffic member filtering (externalTrafficPolicy: Local)
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
   # Events for status reporting (optional but good practice)
   - apiGroups: [""]
     resources: ["events"]

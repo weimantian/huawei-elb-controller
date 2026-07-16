@@ -900,6 +900,114 @@ func TestServiceReconciler_SyncAllPoolMembers_NodeListErrorPreservesMembers(t *t
 	// The mock server records no DELETE requests to /members.
 }
 
+// TestServiceReconciler_GetNodeBackends_LocalTrafficPolicy filters to endpoint nodes.
+// When externalTrafficPolicy: Local is set, only nodes hosting an endpoint pod for
+// the Service should be returned as ELB members -- otherwise ELB health checks fail
+// on nodes whose NodePort does not forward to a local pod.
+func TestServiceReconciler_GetNodeBackends_LocalTrafficPolicy(t *testing.T) {
+	svc := makeTestService("local-svc")
+	svc.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyLocal
+
+	nodeA := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	nodeB := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	nodeC := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-c"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.3"}},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	// Endpoints: only node-a and node-b host pods for this Service.
+	nodeAName := "node-a"
+	nodeBName := "node-b"
+	eps := &corev1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: "local-svc", Namespace: "default"},
+		Subsets: []corev1.EndpointSubset{
+			{
+				Addresses: []corev1.EndpointAddress{{NodeName: &nodeAName}},
+				NotReadyAddresses: []corev1.EndpointAddress{{NodeName: &nodeBName}},
+			},
+		},
+	}
+
+	r := &ServiceReconciler{
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).
+			WithObjects(svc, nodeA, nodeB, nodeC, eps).Build(),
+	}
+
+	backends, err := r.getNodeBackends(context.Background(), svc)
+	if err != nil {
+		t.Fatalf("getNodeBackends returned error: %v", err)
+	}
+	if len(backends) != 2 {
+		t.Fatalf("expected 2 backends (node-a + node-b), got %d: %v", len(backends), backends)
+	}
+	seen := map[string]bool{}
+	for _, b := range backends {
+		seen[b.IP] = true
+	}
+	if !seen["10.0.0.1"] || !seen["10.0.0.2"] {
+		t.Errorf("expected 10.0.0.1 and 10.0.0.2, got %v", seen)
+	}
+	if seen["10.0.0.3"] {
+		t.Errorf("node-c (10.0.0.3) should NOT be in backends -- it has no endpoint pod")
+	}
+}
+
+// TestServiceReconciler_GetNodeBackends_ClusterTrafficPolicy returns all nodes.
+// Default externalTrafficPolicy (Cluster) must return all ready nodes, unchanged
+// from pre-Local-filtering behavior.
+func TestServiceReconciler_GetNodeBackends_ClusterTrafficPolicy(t *testing.T) {
+	svc := makeTestService("cluster-svc")
+	// externalTrafficPolicy not set -> defaults to Cluster
+
+	nodeA := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	nodeB := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	// Endpoints exist but should be ignored under Cluster policy.
+	nodeAName := "node-a"
+	eps := &corev1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-svc", Namespace: "default"},
+		Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{NodeName: &nodeAName}}}},
+	}
+
+	r := &ServiceReconciler{
+		Client: fake.NewClientBuilder().WithScheme(makeTestScheme()).
+			WithObjects(svc, nodeA, nodeB, eps).Build(),
+	}
+
+	backends, err := r.getNodeBackends(context.Background(), svc)
+	if err != nil {
+		t.Fatalf("getNodeBackends returned error: %v", err)
+	}
+	if len(backends) != 2 {
+		t.Fatalf("expected 2 backends (all nodes), got %d: %v", len(backends), backends)
+	}
+}
+
 // TestServiceReconciler_CreatePath_EarlyAnnotationWrite is a regression test for
 // P1 #2+#3: verifies that elbID annotation and finalizer are written BEFORE
 // listener/pool creation, so a crash mid-provisioning doesn't orphan the ELB.
