@@ -21,7 +21,7 @@ spec:
       serviceAccountName: huawei-elb-controller
       containers:
         - name: controller
-          image: swr.cn-north-4.myhuaweicloud.com/weimantian/huawei-elb-controller:planb-crd-v8
+          image: <swr-registry>/huawei-elb-controller:latest
           imagePullPolicy: IfNotPresent
           args:
             - --metrics-bind-address=:8081
