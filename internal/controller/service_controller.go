@@ -245,7 +245,13 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger.Info("Reconciling Service", "name", svc.Name, "namespace", svc.Namespace)
 
+	// Route: check ELBBinding first (Plan B state store), then fall back to
+	// legacy annotation for backward compatibility.
 	if hasManagedELBID(svc) {
+		return r.reconcileUpdate(ctx, logger, svc)
+	}
+	binding, _ := r.getBinding(ctx, svc)
+	if binding != nil && binding.Status.ELBID != "" {
 		return r.reconcileUpdate(ctx, logger, svc)
 	}
 	return r.reconcileCreate(ctx, logger, svc)
@@ -724,6 +730,21 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 	}
 	if elbID == "" {
 		elbID = svc.Annotations[huaweicloud.AnnotationELBID]
+	}
+	// Name-based reverse lookup fallback (handles v1 status bug or lost annotations).
+	// Same strategy as ACL IP group deletion below.
+	if elbID == "" {
+		lbcParams := getLBCParams(svc)
+		elbName := huaweicloud.BuildELBName(lbcParams, svc.Namespace, svc.Name, string(svc.UID))
+		found, findErr := huaweicloud.FindELBByName(r.ELBClient, elbName)
+		if findErr != nil {
+			logger.Error(findErr, "looking up ELB by name for deletion (status and annotation both empty)", "name", elbName)
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+		}
+		if found != nil {
+			elbID = found.ID
+			logger.Info("Recovered ELB ID via name lookup for deletion", "elbID", elbID, "name", elbName)
+		}
 	}
 
 	// Delete ELB if we own it.
