@@ -1115,10 +1115,16 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return false
 			}
+			// Deletion: deletionTimestamp is set as a metadata update (no generation
+			// bump). Must let it through so reconcileDelete fires immediately,
+			// not 5 minutes later on the periodic requeue.
+			if !svcNew.DeletionTimestamp.IsZero() {
+				return shouldReconcileService(svcNew)
+			}
 			// Only reconcile on spec changes (generation bump). Annotation-only
 			// updates (e.g. our own writes, operator annotation syncs) do not
 			// change generation and should not trigger reconcilation.
-			// Service type changes (e.g. ClusterIP→LoadBalancer) are caught
+			// Service type changes (e.g. ClusterIP->LoadBalancer) are caught
 			// by shouldReconcileService on both old and new.
 			if svcNew.Generation == svcOld.Generation {
 				return false
