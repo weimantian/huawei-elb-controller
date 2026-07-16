@@ -338,7 +338,8 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	// reconcileUpdate, which can complete provisioning via syncListenerStacks.
 	// Without this, a crash after ELB creation but before binding write would
 	// orphan the ELB (leak) and create a duplicate on retry.
-	if _, err := r.ensureBinding(ctx, svc); err != nil {
+	binding, err := r.ensureBinding(ctx, svc)
+	if err != nil {
 		logger.Error(err, "ensuring ELBBinding")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
@@ -346,14 +347,27 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	bindingKey := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
 	compositeParams := buildCompositeParams(lbcParams, filterValidCIDRs(logger, svc.Spec.LoadBalancerSourceRanges))
 
-	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
-		b.Status.ELBID = info.ID
-		b.Status.LastKnownParams = compositeParams
-		b.Status.Phase = v1alpha1.PhaseProvisioning
-		return nil
-	}); err != nil {
-		logger.Error(err, "patching ELBBinding status with ELB ID")
-		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	// Persist ELB ID to ELBBinding status. Use the binding object returned by
+	// ensureBinding (which has the correct ResourceVersion from Create) to
+	// avoid cache-sync delays that cause r.Get to return NotFound inside
+	// patchBindingStatus. Fall back to patchBindingStatus (which retries
+	// Get + Patch) if direct Update conflicts. If both fail, do NOT return -
+	// the binding already exists and status will be recovered on the next
+	// reconcile via reverse-lookup. Finalizer and listener creation must
+	// proceed to prevent ELB leak (missing finalizer) and provisioning delay.
+	binding.Status.ELBID = info.ID
+	binding.Status.LastKnownParams = compositeParams
+	binding.Status.Phase = v1alpha1.PhaseProvisioning
+	if updateErr := r.Status().Update(ctx, binding); updateErr != nil {
+		if patchErr := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+			b.Status.ELBID = info.ID
+			b.Status.LastKnownParams = compositeParams
+			b.Status.Phase = v1alpha1.PhaseProvisioning
+			return nil
+		}); patchErr != nil {
+			logger.Info("could not patch ELBBinding status now, will recover on next reconcile",
+				"updateError", updateErr.Error(), "patchError", patchErr.Error())
+		}
 	}
 
 	// Persist cleanup finalizer on the Service (must stay on Service to
@@ -511,6 +525,18 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 			} else {
 				logger.Info("adopted legacy annotations into ELBBinding", "elbID", elbID)
 			}
+		}
+	}
+
+	// Ensure cleanup finalizer is present on Service. OpenEverest may rebuild
+	// the Service (syncing LBC params) and drop finalizers we added during create.
+	// Without elb-cleanup, deletion would silently leak the ELB.
+	if !controllerutil.ContainsFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer) {
+		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+			controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
+			return nil
+		}); err != nil {
+			logger.Info("could not re-add elb-cleanup finalizer, will retry", "error", err.Error())
 		}
 	}
 
