@@ -531,9 +531,16 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		}
 	}
 
-	// Finalizer self-healing is handled by ensureBinding (adds finalizer to
-	// ELBBinding, not Service). CCE CCM can overwrite Service metadata without
-	// affecting our cleanup path.
+	// Finalizer self-healing: ensure ELBBinding has our finalizer. This covers
+	// bindings created by older controller versions (v1-v5) that wrote the
+	// finalizer to Service instead of ELBBinding. Without this, a Service deletion
+	// would cascade-delete the binding (no finalizer to block) and leak the ELB.
+	if binding != nil && !controllerutil.ContainsFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer) {
+		if err := r.patchBindingFinalizer(ctx, bindingKey,
+			huaweicloud.AnnotationELBCleanupFinalizer, ""); err != nil {
+			logger.Info("could not self-heal ELBBinding finalizer, will retry", "error", err.Error())
+		}
+	}
 
 	// 1. Sync listener/pool stack for port changes.
 	if err := r.syncListenerStacks(ctx, logger, elbID, svc); err != nil {
