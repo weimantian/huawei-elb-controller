@@ -30,12 +30,18 @@ const (
 // BuildELBName generates the ELB name following EKS/GKE naming conventions:
 // k8s-{ns_8}-{name_8}-{uid_10}
 // Total length ~32 chars, well within Huawei Cloud's 64-char limit.
-// If the user specified huawei-elb.io/name, that takes precedence.
+// If the user specified huawei-elb.io/name, that takes precedence but still
+// gets a UID suffix appended to ensure global uniqueness and enable name-based
+// reverse-lookup recovery when annotations are overwritten.
 func BuildELBName(lbcParams map[string]string, namespace, name, uid string) string {
+	uidSuffix := shortStr(uid, 10)
 	if v, ok := lbcParams[LBCNameAnnotation]; ok && v != "" {
-		return truncateStr(v, 64)
+		// Append UID suffix to custom names too, ensuring global uniqueness so
+		// the reverse-lookup recovery path in reconcileCreate works uniformly.
+		// Truncate the custom name to leave room for "-{uidSuffix}" (≤11 chars).
+		return truncateStr(v, 64-len(uidSuffix)-1) + "-" + uidSuffix
 	}
-	return truncateStr(fmt.Sprintf("k8s-%s-%s-%s", shortStr(namespace, 8), shortStr(name, 8), shortStr(uid, 10)), 64)
+	return truncateStr(fmt.Sprintf("k8s-%s-%s-%s", shortStr(namespace, 8), shortStr(name, 8), uidSuffix), 64)
 }
 
 // IsInternalELB returns true if the params indicate an internal (private) ELB.

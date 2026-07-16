@@ -1,11 +1,11 @@
 package huaweicloud_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
-
 func TestBuildELBName_DefaultPattern(t *testing.T) {
 	name := huaweicloud.BuildELBName(nil, "default", "my-svc", "abc123def456")
 	// Should be k8s-{ns_8}-{name_8}-{uid_10}
@@ -19,9 +19,11 @@ func TestBuildELBName_CustomName(t *testing.T) {
 	params := map[string]string{
 		huaweicloud.LBCNameAnnotation: "my-custom-elb",
 	}
-	name := huaweicloud.BuildELBName(params, "default", "svc", "uid")
-	if name != "my-custom-elb" {
-		t.Errorf("expected custom name %q, got %q", "my-custom-elb", name)
+	name := huaweicloud.BuildELBName(params, "default", "svc", "abc123def456")
+	// Custom name should get a UID suffix appended for uniqueness
+	expected := "my-custom-elb-abc123def4"
+	if name != expected {
+		t.Errorf("expected %q, got %q", expected, name)
 	}
 }
 
@@ -33,6 +35,11 @@ func TestBuildELBName_TruncatesLongCustomName(t *testing.T) {
 	name := huaweicloud.BuildELBName(params, "ns", "svc", "uid")
 	if len([]rune(name)) > 64 {
 		t.Errorf("expected name <= 64 chars, got %d chars: %q", len([]rune(name)), name)
+	}
+	// UID suffix must always be present even after truncation
+	uidSuffix := "uid"
+	if !strings.HasSuffix(name, "-"+uidSuffix) {
+		t.Errorf("expected name to end with UID suffix %q, got %q", "-"+uidSuffix, name)
 	}
 }
 

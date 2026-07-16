@@ -140,45 +140,40 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	// If found, restore the annotation + finalizer and return; the next reconcile
 	// will route to reconcileUpdate and complete provisioning.
 	//
-	// Only do this for default-named ELBs (k8s-{ns}-{name}-{uid}). The UID suffix
-	// guarantees global uniqueness, so a match means THIS Service lost its annotation.
-	// For custom-named ELBs (huawei-elb.io/name), multiple Services sharing one LBC
-	// would have the same name -- recovering would make them share one ELB, violating
-	// the "LBC is a parameter template, each Service gets its own ELB" design.
-	if _, hasCustomName := lbcParams[huaweicloud.LBCNameAnnotation]; !hasCustomName {
-		elbName := huaweicloud.BuildELBName(lbcParams, svc.Namespace, svc.Name, string(svc.UID))
-		existing, findErr := huaweicloud.FindELBByName(r.ELBClient, elbName)
-			if findErr != nil {
-				logger.Error(findErr, "checking for existing ELB by name before create")
-				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	// All ELB names include a UID suffix (both default and custom-named), so the
+	// name is globally unique -- a match always means THIS Service lost its annotation.
+	elbName := huaweicloud.BuildELBName(lbcParams, svc.Namespace, svc.Name, string(svc.UID))
+	existing, findErr := huaweicloud.FindELBByName(r.ELBClient, elbName)
+	if findErr != nil {
+		logger.Error(findErr, "checking for existing ELB by name before create")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+	if existing != nil {
+		logger.Info("Found existing ELB by name, restoring annotation and routing to update", "elbID", existing.ID, "name", elbName)
+		if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
+			if latest.Annotations == nil {
+				latest.Annotations = make(map[string]string)
 			}
-			if existing != nil {
-				logger.Info("Found existing ELB by name, restoring annotation and routing to update", "elbID", existing.ID, "name", elbName)
-				if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
-					if latest.Annotations == nil {
-						latest.Annotations = make(map[string]string)
-					}
-					latest.Annotations[huaweicloud.AnnotationELBID] = existing.ID
-					controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
-					return nil
-				}); err != nil {
-				if apierrors.IsNotFound(err) {
-					// Service was deleted during the annotation-restore race window
-					// (e.g. PSMDB operator Update overwrote annotations, then StatefulSet
-					// cascade deleted the Service). The ELB is now orphaned -- delete it
-					// to prevent a leak, since reconcileDelete will never fire.
-					logger.Info("Service gone during annotation restore, deleting orphaned ELB", "elbID", existing.ID, "name", elbName)
-					if delErr := r.deleteELBStack(logger, existing.ID); delErr != nil && !huaweicloud.IsNotFoundError(delErr) {
-						logger.Error(delErr, "deleting orphaned ELB after Service disappeared", "elbID", existing.ID)
-					}
-					return ctrl.Result{}, nil
+			latest.Annotations[huaweicloud.AnnotationELBID] = existing.ID
+			controllerutil.AddFinalizer(latest, huaweicloud.AnnotationELBCleanupFinalizer)
+			return nil
+		}); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Service was deleted during the annotation-restore race window
+				// (e.g. PSMDB operator Update overwrote annotations, then StatefulSet
+				// cascade deleted the Service). The ELB is now orphaned -- delete it
+				// to prevent a leak, since reconcileDelete will never fire.
+				logger.Info("Service gone during annotation restore, deleting orphaned ELB", "elbID", existing.ID, "name", elbName)
+				if delErr := r.deleteELBStack(logger, existing.ID); delErr != nil && !huaweicloud.IsNotFoundError(delErr) {
+					logger.Error(delErr, "deleting orphaned ELB after Service disappeared", "elbID", existing.ID)
 				}
-				logger.Error(err, "restoring ELB ID annotation")
-				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
-				}
-				return ctrl.Result{Requeue: true}, nil
+				return ctrl.Result{}, nil
 			}
+			logger.Error(err, "restoring ELB ID annotation")
+			return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 		}
+		return ctrl.Result{Requeue: true}, nil
+	}
 	// Create the ELB.
 	opt := huaweicloud.BuildCreateELBOption(lbcParams, vpcID, subnetID, azs, svc.Namespace, svc.Name, string(svc.UID))
 	logger.Info("Creating ELB via direct API", "name", opt.Name, "public", opt.IsPublic)
