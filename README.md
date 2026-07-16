@@ -6,7 +6,15 @@
 
 ## Overview
 
-`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [OpenEverest](https://openeverest.io/documentation/current/) database clusters. It watches `LoadBalancer` Services created by OpenEverest, auto-detects VPC/subnet/AZ, and **directly calls the Huawei Cloud ELB API** to create the full ELB resource stack (ELB + Listener + Pool + Members + HealthCheck) -- without relying on CCM autocreate. This permanently eliminates `kubernetes.io/elb.*` annotation conflicts between the PSMDB operator and the CCE webhook.
+`huawei-elb-controller` is a Kubernetes controller that automatically creates and manages **Huawei Cloud ELB** (Elastic Load Balancer) instances for [OpenEverest](https://openeverest.io/documentation/current/) database clusters.
+
+The controller uses the **ELBBinding architecture**, built on three core components that work together:
+
+1. **ELBBinding CRD** -- Each LoadBalancer Service gets a corresponding `ELBBinding` custom resource that serves as the **single source of truth** for ELB state (ELB ID, ingress IP, ACL, parameter snapshot). The CRD is linked to the Service via an OwnerReference and exists independently of Service metadata.
+2. **Mutating Webhook** -- Intercepts Service CREATE requests in the `everest` namespace and injects `spec.loadBalancerClass: huawei-elb.io/direct-api`. CCE CCM sees the non-matching class and **completely skips** the Service from the source (0 events, no status clearing, no elb.id writes), permanently eliminating the Service status race between the controller and CCM.
+3. **Finalizer isolation** -- The cleanup finalizer lives on the `ELBBinding`, not the Service. Even if CCM overwrites the entire Service metadata, the finalizer survives and ELB resources are never leaked.
+
+The controller directly calls the Huawei Cloud ELB v3 API to create the full ELB resource stack (ELB + Listener + Pool + Members + HealthCheck + ACL), without relying on CCM autocreate and without writing any `kubernetes.io/elb.*` annotations.
 
 **Two usage modes**:
 
@@ -17,29 +25,43 @@
 
 ## Features
 
+- **ELBBinding CRD state isolation** -- ELB state stored in an independent CRD, immune to Service metadata overwrites
+- **Mutating Webhook blocks CCM at the source** -- Auto-injects `loadBalancerClass`; CCE CCM skips the Service entirely from creation, zero interference and zero noise
+- **Finalizer isolation** -- Cleanup finalizer on the ELBBinding, not the Service; survives CCM overwriting Service metadata
 - **Direct API management** -- Controller creates/updates/deletes ELB and sub-resources via Huawei Cloud ELB v3 API, no CCM dependency
-- **Zero-config auto mode** - no LBC needed; just create a database and the controller auto-creates an ELB (like EKS/GKE)
-- **Manual mode with LBC parameter template** - LBC stores ELB parameters (bandwidth, EIP type, etc.); each Service gets its own independent ELB with zero port conflicts
-- **Auto-detection of VPC/subnet/AZ** - automatically detects network topology from cluster nodes
-- **Node-aware** - watches node changes and syncs ELB backend members (NodePort mode)
-- **ACL auto-handling** - `loadBalancerSourceRanges` -> IP groups created and bound to all ELB listeners
-- **Hot parameter updates** - modifying LBC or Service annotations triggers live ELB parameter updates via API
-- **Finalizer cleanup** - Service deletion triggers automatic cleanup of ELB, IP groups, and EIP, preventing orphaned resources
-- **No annotation conflicts** - writes zero `kubernetes.io/elb.*` annotations, permanently resolving PSMDB operator conflicts
-- **Duplicate ELB prevention** - when OpenEverest overwrites the `elb-id` annotation, the controller recovers the association via name-based reverse lookup, avoiding duplicate orphan ELBs
+- **Zero-config auto mode** -- no LBC needed; just create a database and the controller auto-creates an ELB (like EKS/GKE)
+- **Manual mode with LBC parameter template** -- LBC stores ELB parameters (bandwidth, EIP type, etc.); each Service gets its own independent ELB with zero port conflicts
+- **Auto-detection of VPC/subnet/AZ** -- automatically detects network topology from cluster nodes
+- **Node-aware** -- watches node/endpoint changes and syncs ELB backend members
+- **ACL auto-handling** -- `loadBalancerSourceRanges` -> IP groups created and bound to all ELB listeners
+- **Hot parameter updates** -- modifying LBC or Service annotations triggers live ELB parameter updates via API
+- **Orphan resource cleanup** -- When a Service is deleted, the cascading ELBBinding deletion is blocked by the finalizer; the controller detects the orphaned binding, cleans up ELB + EIP + IP groups, then removes the finalizer
+- **Duplicate ELB prevention** -- when OpenEverest overwrites the `elb-id` annotation, the controller recovers the association via ELBBinding Status or name-based reverse lookup, avoiding duplicate orphan ELBs
 
 ---
 
 ## How It Works
 
-### Auto mode
+### Webhook injection (on Service creation)
+
+```
+OpenEverest creates a LoadBalancer Service (in the everest namespace)
+  -> Mutating Webhook intercepts the CREATE request
+  -> Injects spec.loadBalancerClass: huawei-elb.io/direct-api
+  -> CCE CCM sees the non-matching class and completely skips the Service (0 events)
+```
+
+> The webhook skips Services that already have `kubernetes.io/elb.autocreate` or `kubernetes.io/elb.id` annotations (CCM-managed Services are unaffected).
+
+### ELB creation (auto mode)
 
 ```
 Create DBC (LBC = "No configuration")
-  -> OpenEverest creates LoadBalancer Service
-  -> Service Reconciler auto-detects VPC/subnet/AZ
-  -> Directly calls ELB API: create ELB + Listener + Pool + Members + HealthCheck
-  -> Writes huawei-elb.io/elb-id annotation + finalizer + updates status
+  -> OpenEverest creates a LoadBalancer Service (webhook injects loadBalancerClass)
+  -> Controller creates an ELBBinding CRD (OwnerReference -> Service + cleanup finalizer)
+  -> Controller auto-detects VPC/subnet/AZ
+  -> Directly calls ELB API: create ELB + Listener + Pool + Members + HealthCheck + ACL
+  -> Writes ELBBinding Status (elbID, ingressIP, phase=Ready) + Service annotations + updates Service status
   -> Service gets EXTERNAL-IP ✅
 ```
 
@@ -49,23 +71,25 @@ Create DBC (LBC = "No configuration")
 Create LBC with huawei-elb.io/* annotations
   -> Create DBC referencing the LBC
   -> OpenEverest syncs annotations to Service
-  -> Service Reconciler reads params, detects VPC/subnet/AZ
-  -> Directly calls ELB API: create independent ELB ✅
+  -> Controller reads params, detects VPC/subnet/AZ
+  -> Creates ELBBinding + directly calls ELB API: create independent ELB ✅
+```
+
+### Service deletion
+
+```
+Delete DBC -> OpenEverest deletes Service
+  -> Cascading ELBBinding deletion blocked by finalizer (Service gone, binding remains)
+  -> Controller detects orphaned ELBBinding
+  -> Cleans up ELB -> EIP -> ACL IP group
+  -> Removes ELBBinding finalizer -> ELBBinding deleted ✅
 ```
 
 ### Parameter updates
 
 ```
-For manual mode:
-User modifies LBC annotations (e.g., bandwidth 10M -> 20M)
-  -> OpenEverest syncs to Service
-  -> Service Reconciler detects change
-  -> Calls Huawei Cloud ELB API to update bandwidth ✅
-
-For auto mode:
-  Annotate the Service directly
-  -> Service Reconciler detects change
-  -> Calls Huawei Cloud ELB API to update ✅
+Manual mode: modify LBC annotations -> OpenEverest syncs to Service -> Controller calls API to update bandwidth
+Auto mode: annotate the Service directly -> Controller calls API to update ✅
 ```
 
 ---
@@ -78,7 +102,7 @@ A running Kubernetes cluster with:
 - **Huawei Cloud CCE** (or self-managed cluster on Huawei Cloud ECS)
 - **StorageClass** configured (for database persistent volumes)
 
-> The controller does **not depend on CCM** for ELB creation -- it calls the Huawei Cloud API directly. CCE's pre-installed CCM does not interfere.
+> The controller does **not depend on CCM** for ELB creation -- it calls the Huawei Cloud API directly. The Mutating Webhook makes CCM skip the controller-managed Services from the source, so the two coexist with zero conflict.
 
 OpenEverest is certified on the following platforms:
 
@@ -167,33 +191,48 @@ helm install huawei-elb-controller \
   ./charts/huawei-elb-controller \
   -f my-values.yaml \
   -n everest-system
+
+# 5. Install ELBBinding CRD + Mutating Webhook (not yet in Helm chart, apply manually)
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/webhook.yaml
+bash deploy/gen-webhook-cert.sh
 ```
+
+> ⚠️ **Helm chart is incomplete**: The Helm chart's Deployment template **does not include the webhook port (9443) or certificate mount**. After the steps above, the webhook still won't work (pod has no 9443 port, no cert mounted). Remediation options:
+> - **Recommended**: After Helm install, overwrite the Deployment with the raw `deploy/deployment.yaml` (update the image on line 24 first): `kubectl apply -f deploy/deployment.yaml`
+> - Or use **Option B: Raw Manifests** below (includes full webhook config, recommended for production)
 
 #### Option B: Using Raw Manifests
 
-1. Create the credentials Secret:
-
 ```bash
+# 1. Create the credentials Secret
 kubectl create secret generic huawei-cloud-credentials \
   --namespace everest-system \
   --from-literal=ak=<your-AK> \
   --from-literal=sk=<your-SK> \
   --from-literal=project-id=<your-ProjectID> \
   --from-literal=region=cn-north-4
-```
 
-2. Build and push the container image to SWR (same as Option A).
+# 2. Build and push the container image to SWR (same as Option A steps 1-2)
+#    Then update the image in deploy/deployment.yaml (line 24)
 
-Then update the image in `deploy/deployment.yaml` (line 21): `image: <swr-registry>/huawei-elb-controller:latest`
+# 3. Install the ELBBinding CRD
+kubectl apply -f deploy/crd.yaml
 
-3. Apply the manifests:
-
-```bash
+# 4. Install RBAC
 kubectl apply -f deploy/serviceaccount.yaml
 kubectl apply -f deploy/clusterrole.yaml
 kubectl apply -f deploy/clusterrolebinding.yaml
+
+# 5. Install the Mutating Webhook
+kubectl apply -f deploy/webhook.yaml
+bash deploy/gen-webhook-cert.sh    # Generates self-signed cert + Secret + patches caBundle
+
+# 6. Deploy the Controller
 kubectl apply -f deploy/deployment.yaml
 ```
+
+> **Install order**: CRD -> RBAC -> Webhook (with cert) -> Deployment. The cert script `gen-webhook-cert.sh` must run after `webhook.yaml` is applied -- it creates the TLS Secret and patches the CA bundle into the MutatingWebhookConfiguration.
 
 ### Step 2: Verify the Controller is Running
 
@@ -207,16 +246,16 @@ NAME                                     READY   STATUS    RESTARTS   AGE
 huawei-elb-controller-xxxxxxxxxx-xxxxx   1/1     Running   0          1m
 ```
 
+Verify the webhook is active:
+```bash
+# The injected loadBalancerClass should be huawei-elb.io/direct-api
+kubectl get svc <service-name> -n everest -o jsonpath='{.spec.loadBalancerClass}'
+# Expected: huawei-elb.io/direct-api
+```
+
 Check logs:
 ```bash
 kubectl logs -n everest-system deployment/huawei-elb-controller
-```
-
-Expected:
-```
-INFO    starting huawei-elb-controller    {"region": "cn-north-4"}
-INFO    Starting Controller               {"controller": "service"}
-INFO    Starting workers                  {"controller": "service", "worker count": 1}
 ```
 
 ### Redeploy After Code Changes
@@ -228,6 +267,9 @@ docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-cont
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
 helm upgrade huawei-elb-controller ./charts/huawei-elb-controller -f my-values.yaml -n everest-system
+# Re-apply CRD/Webhook if changed
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/webhook.yaml
 ```
 
 **Raw Manifests**:
@@ -236,6 +278,8 @@ git pull
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
+kubectl apply -f deploy/crd.yaml
+kubectl apply -f deploy/webhook.yaml
 kubectl rollout restart deploy huawei-elb-controller -n everest-system
 ```
 
@@ -254,19 +298,23 @@ spec:
 ```
 
 The controller will:
-1. Detect the new LoadBalancer Service created by OpenEverest
-2. Auto-detect VPC, subnet, and availability zones from cluster nodes
-3. Call the Huawei Cloud ELB API to create ELB + Listener + Pool + Members + HealthCheck
-4. Write the `huawei-elb.io/elb-id` annotation and cleanup finalizer
-5. Update the Service status with the ELB IP
+1. Webhook injects `loadBalancerClass` (CCM skips)
+2. Create an ELBBinding CRD (OwnerReference + finalizer)
+3. Auto-detect VPC, subnet, and availability zones from cluster nodes
+4. Call the Huawei Cloud ELB API to create ELB + Listener + Pool + Members + HealthCheck + ACL
+5. Write ELBBinding Status (source of truth) + Service annotations (compatibility) + update Service status
+6. Service gets EXTERNAL-IP ✅
 
 > **Default parameters**: public ELB, 10 Mbit/s bandwidth, traffic billing, 5_bgp EIP, TCP health check (10s/10s/3 retries).
 
 ### Step 4: Get the Connection IP
 
 ```bash
-# Get the external IP from the Service
+# From the Service status
 kubectl get svc <service-name> -n everest -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+
+# Or from the ELBBinding Status (source of truth)
+kubectl get elbbinding <service-name> -n everest -o jsonpath='{.status.ingressIP}'
 ```
 
 For database connection details (passwords, client installation, engine-specific commands), see the [OpenEverest documentation](https://openeverest.io/documentation/current/). Quick reference:
@@ -301,7 +349,7 @@ spec:
 EOF
 ```
 
-Then reference the LBC when creating the DBC (`loadBalancerConfigName: my-elb-config`). The Service Reconciler reads the LBC parameters and calls the API to create an independent ELB.
+Then reference the LBC when creating the DBC (`loadBalancerConfigName: my-elb-config`). The controller reads the LBC parameters and calls the API to create an independent ELB.
 
 > **Important**: LBCs are parameter templates, not instance references. Multiple DBCs referencing the same LBC each get their own independent ELB -- zero port conflicts, fully aligned with EKS/GKE behavior.
 
@@ -311,7 +359,7 @@ Then reference the LBC when creating the DBC (`loadBalancerConfigName: my-elb-co
 
 ### Auto Mode Defaults
 
-When no LBC is used (auto mode), the Service Reconciler applies these defaults:
+When no LBC is used (auto mode), the controller applies these defaults:
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -340,17 +388,59 @@ Create an LBC as a parameter template with `huawei-elb.io/*` annotations:
 
 > **Note**: `eip-type` is immutable after ELB creation (Huawei Cloud API restriction). To change it, delete and recreate the ELB.
 
+### ELBBinding CRD
+
+Each LoadBalancer Service has a corresponding `ELBBinding` resource (same name, same namespace), which is the **single source of truth** for ELB state:
+
+```bash
+kubectl get elbbinding -n everest
+# NAME                    SERVICE                 ELB-ID                                PHASE    AGE
+# mongodb-rs0-0           mongodb-rs0-0           b331e0b2-eae6-4ebe-81b0-9e0e8010f8e3  Ready    5m
+```
+
+**Spec fields**:
+
+| Field | Description |
+|---|---|
+| `serviceName` | Associated Service name (same name, same namespace, immutable) |
+| `serviceUID` | Service UID, guards against Service name reuse (immutable) |
+
+**Status fields** (source of truth):
+
+| Field | Description |
+|---|---|
+| `elbID` | Huawei Cloud ELB instance ID |
+| `ingressIP` | ELB external IP (public EIP or internal VIP) |
+| `phase` | `Provisioning` / `Ready` / `Deleting` |
+| `aclID` | ACL IP group ID (if source ranges are set) |
+| `aclStatus` | `"on"` / `"off"` |
+| `aclType` | `"white"` (allow-list mode) |
+| `lastKnownParams` | Last synced parameter snapshot (JSON), used for change detection |
+| `observedGeneration` | Observed generation |
+
 ### Controller-Written Annotations
+
+> The following annotations are written to the Service (for compatibility/visibility), but the **authoritative state lives in ELBBinding Status**. Even if Service annotations are overwritten by OpenEverest, the controller self-heals from ELBBinding Status.
 
 | Annotation | Description |
 |---|---|
-| `huawei-elb.io/elb-id` | ELB instance ID -- written by controller after ELB creation |
-| `huawei-elb.io/elb-cleanup` | Cleanup finalizer -- triggers ELB cleanup on Service deletion |
-| `huawei-elb.io/last-known-params` | Last synced parameter snapshot (JSON) -- used for change detection |
+| `huawei-elb.io/elb-id` | ELB instance ID |
+| `huawei-elb.io/last-known-params` | Last synced parameter snapshot (JSON) |
 | `huawei-elb.io/acl-id` | ACL IP group ID (if source ranges are set) |
 | `huawei-elb.io/acl-status` | `"on"` / `"off"` |
 | `huawei-elb.io/acl-type` | `"white"` (allow-list mode) |
-| `huawei-elb.io/acl-cleanup` | ACL cleanup finalizer |
+
+> **Finalizer**: `huawei-elb.io/elb-cleanup` is written to the **ELBBinding** (not the Service), ensuring it survives CCM overwriting Service metadata.
+
+### Webhook Injection
+
+The Mutating Webhook intercepts Service CREATE requests in the `everest` namespace and injects:
+
+| Field | Value | Description |
+|---|---|---|
+| `spec.loadBalancerClass` | `huawei-elb.io/direct-api` | CCM sees the non-matching class and skips the Service entirely |
+
+**Skip conditions** (not injected): The Service already has `kubernetes.io/elb.autocreate` or `kubernetes.io/elb.id` annotations (CCM-managed Services are unaffected).
 
 ### Helm Values
 
@@ -372,6 +462,8 @@ Create an LBC as a parameter template with `huawei-elb.io/*` annotations:
 
 > ⚠️ **Important**: `credentials.region` must match your CCE cluster's region (e.g. `cn-north-4`, `sa-brazil-1`). The default value is empty - deployment will fail if you don't set it.
 
+> **Note**: The Helm chart does not currently include the ELBBinding CRD or Mutating Webhook configuration. After Helm install, manually run `kubectl apply -f deploy/crd.yaml` + `kubectl apply -f deploy/webhook.yaml` + `bash deploy/gen-webhook-cert.sh`.
+
 ---
 
 ## Troubleshooting
@@ -385,6 +477,7 @@ kubectl describe pod -n everest-system -l app.kubernetes.io/name=huawei-elb-cont
 Common causes:
 - **Image not found** -> ensure the image is imported into the cluster
 - **Secret missing** -> check credentials Secret exists in `everest-system`
+- **Webhook cert Secret missing** -> check `huawei-elb-controller-webhook-tls` Secret exists; if not, re-run `bash deploy/gen-webhook-cert.sh`
 - **RBAC insufficient** -> check ClusterRole and ClusterRoleBinding
 
 ### ELB Creation Failed
@@ -392,6 +485,9 @@ Common causes:
 ```bash
 # Check controller logs for details
 kubectl logs -n everest-system deployment/huawei-elb-controller
+
+# Check ELBBinding status
+kubectl get elbbinding <service-name> -n everest -o yaml
 ```
 
 Common errors:
@@ -402,23 +498,43 @@ Common errors:
 ### Service Has No External IP
 
 ```bash
-# 1. Check that the ELB ID annotation is set
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.annotations.huawei-elb\.io/elb-id}'
+# 1. Check that the webhook injected loadBalancerClass (should return huawei-elb.io/direct-api)
+kubectl get svc <service-name> -n everest -o jsonpath='{.spec.loadBalancerClass}'
 
-# 2. Check controller logs for ELB creation progress
+# 2. Check that the ELBBinding was created and phase=Ready
+kubectl get elbbinding <service-name> -n everest
+
+# 3. Check controller logs for ELB creation progress
 kubectl logs -n everest-system deployment/huawei-elb-controller
 
-# 3. Check Service events
+# 4. Check Service events
 kubectl describe svc <service-name> -n everest
 ```
 
-### ELB Not Deleted When Service Is Deleted
+> If `loadBalancerClass` is empty, the webhook is not active. Check that the MutatingWebhookConfiguration exists, the CA bundle is patched, and the webhook pod is Running.
 
-The controller uses a finalizer mechanism to ensure ELB cleanup. If a Service is stuck in deletion:
+### CCM Interference (Sign of Webhook Not Active)
+
+Under normal operation, the webhook injects `loadBalancerClass` and CCM **completely skips** the Service -- no `GetLoadBalancerFailed` events should appear. If you see the following, the **webhook is misconfigured**:
+
+```bash
+# Check for CCM interference events (should be 0 normally)
+kubectl get events -n everest --field-selector reason=GetLoadBalancerFailed
+```
+
+Troubleshooting steps:
+1. `kubectl get mutatingwebhookconfiguration huawei-elb-controller-webhook` -- confirm the webhook config exists
+2. `kubectl get secret huawei-elb-controller-webhook-tls -n everest-system` -- confirm the cert Secret exists
+3. `kubectl get pod -n everest-system -l app.kubernetes.io/name=huawei-elb-controller` -- confirm pod is Running with port 9443 ready
+4. Re-run `bash deploy/gen-webhook-cert.sh` to fix certificates
+
+### ELBBinding Stuck in Deletion
+
+The controller uses a finalizer on the ELBBinding to ensure ELB cleanup. If an ELBBinding is stuck in `Terminating`:
 
 ```bash
 # Check if the cleanup finalizer is present
-kubectl get svc <service-name> -n everest -o jsonpath='{.metadata.finalizers}'
+kubectl get elbbinding <name> -n everest -o jsonpath='{.metadata.finalizers}'
 
 # Check controller logs for deletion progress
 kubectl logs -n everest-system deployment/huawei-elb-controller
@@ -426,9 +542,9 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 
 If the controller has been uninstalled and the finalizer cannot be cleaned up, manually delete the ELB and remove the finalizer:
 ```bash
-# 1. Manually delete the ELB in the Huawei Cloud console
-# 2. Remove the finalizer
-kubectl patch svc <service-name> -n everest --type=merge -p '{"metadata":{"finalizers":[]}}'
+# 1. Manually delete the ELB in the Huawei Cloud console (and associated EIP, IP groups)
+# 2. Remove the ELBBinding finalizer
+kubectl patch elbbinding <name> -n everest --type=merge -p '{"metadata":{"finalizers":[]}}'
 ```
 
 ### Helm Release Conflict on Reinstall
@@ -443,13 +559,28 @@ kubectl get secret -n everest-system | grep sh.helm.release
 kubectl delete secret -n everest-system sh.helm.release.v1.huawei-elb-controller.v1
 ```
 
+### EIP Quota Exceeded
+
+Huawei Cloud accounts have a limited EIP quota (default ~5-6). If the quota is full when creating a public ELB, creation will fail:
+
+```
+creating ELB: ... Quota exceeded for resources: publicip ...
+```
+
+**Solutions**:
+1. Release unused EIPs in the Huawei Cloud console (Network -> VPC -> Elastic Public IP)
+2. Or use an internal ELB (set `huawei-elb.io/public: "false"`) to avoid consuming EIP quota
+3. After freeing quota, the controller will retry creation automatically
+
+> **Tip**: Deleting a DBC triggers the controller to delete the ELB and associated EIP, freeing quota. However, manually created ELBs/EIPs must be cleaned up in the console.
+
 ---
 
 ## Uninstall
 
 ### 1. Delete all Database Clusters First
 
-**Order matters.** Delete the database cluster (DBC) first -- the Service will be deleted, and the controller will automatically delete the Huawei Cloud ELB via its finalizer. If you uninstall the controller first, the ELB becomes an orphaned resource and **continues to incur charges**.
+**Order matters.** Delete the database cluster (DBC) first -- the Service will be deleted, and the controller will automatically delete the Huawei Cloud ELB via the ELBBinding finalizer. If you uninstall the controller first, the ELB becomes an orphaned resource and **continues to incur charges**.
 
 ```bash
 # List all database clusters
@@ -457,6 +588,10 @@ kubectl get dbc -A
 
 # Delete each one (Service deletion triggers controller ELB cleanup)
 kubectl delete dbc <name> -n <namespace>
+
+# Confirm all ELBBindings are cleaned up
+kubectl get elbbinding -A
+# Expected: no resources
 
 # Delete any remaining LBCs
 kubectl get loadbalancerconfig -A
@@ -486,17 +621,20 @@ kubectl delete secret -n everest-system huawei-elb-controller-credentials 2>/dev
 
 ```bash
 kubectl delete -f deploy/deployment.yaml
+kubectl delete -f deploy/webhook.yaml
 kubectl delete -f deploy/clusterrolebinding.yaml
 kubectl delete -f deploy/clusterrole.yaml
 kubectl delete -f deploy/serviceaccount.yaml
 kubectl delete secret -n everest-system huawei-cloud-credentials
+kubectl delete secret -n everest-system huawei-elb-controller-webhook-tls
 ```
 
-### 3. (Optional) Remove the CRD
+### 3. (Optional) Remove the CRDs
 
-This permanently removes the `LoadBalancerConfig` custom resource definition. Skip this step if you plan to reinstall.
+This permanently removes the `ELBBinding` and `LoadBalancerConfig` custom resource definitions. Skip this step if you plan to reinstall.
 
 ```bash
+kubectl delete crd elbbindings.huawei-elb.io
 kubectl delete crd loadbalancerconfigs.everest.percona.com
 ```
 
@@ -514,9 +652,11 @@ On Amazon EKS and Google GKE, creating a `type: LoadBalancer` Service automatica
 | LBC role | Parameter template | **Parameter template** ✅ |
 | Multiple Services per LBC | Independent LBs | **Independent ELBs** ✅ |
 | ELB creation method | Cloud CCM | **Controller direct API** |
+| CCM conflict isolation | N/A | **Webhook source-level blocking** ✅ |
+| State storage | Service status | **ELBBinding CRD (isolated)** ✅ |
 | ELB parameter updates | ✅ (CCM API) | ✅ (Controller API) |
-| ELB lifecycle management | CCM | **Controller (finalizer)** |
-| Backend member sync | watch nodes/endpoints | **watch nodes (NodePort mode)** |
+| ELB lifecycle management | CCM | **Controller (ELBBinding finalizer)** |
+| Backend member sync | watch nodes/endpoints | **watch nodes/endpoints** |
 | ELB naming | `k8s-<ns>-<svc>-<uid>` | **`k8s-{ns_8}-{name_8}-{uid_10}`** ✅ |
 
 ---
