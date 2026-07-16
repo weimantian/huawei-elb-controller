@@ -658,17 +658,31 @@ func (r *ServiceReconciler) syncAllPoolMembers(ctx context.Context, logger logr.
 
 // reconcileDelete deletes the ELB and ACL IP group, then removes finalizers.
 func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Logger, svc *corev1.Service) (ctrl.Result, error) {
+	// Resolve ELB ID from ELBBinding first, falling back to annotation.
+	var elbID string
+	bindingKey := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+	binding, err := r.getBinding(ctx, svc)
+	if err != nil {
+		logger.Error(err, "getting ELBBinding for deletion")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+	if binding != nil && binding.Status.ELBID != "" {
+		elbID = binding.Status.ELBID
+	}
+	if elbID == "" {
+		elbID = svc.Annotations[huaweicloud.AnnotationELBID]
+	}
+
 	// Delete ELB if we own it.
 	if controllerutil.ContainsFinalizer(svc, huaweicloud.AnnotationELBCleanupFinalizer) {
-		elbID := svc.Annotations[huaweicloud.AnnotationELBID]
 		if elbID != "" {
-		if err := r.deleteELBStack(logger, elbID); err != nil {
-			if !huaweicloud.IsNotFoundError(err) {
-				logger.Error(err, "deleting ELB, will retry", "elbID", elbID)
-				return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+			if err := r.deleteELBStack(logger, elbID); err != nil {
+				if !huaweicloud.IsNotFoundError(err) {
+					logger.Error(err, "deleting ELB, will retry", "elbID", elbID)
+					return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+				}
+				logger.Info("ELB already deleted", "elbID", elbID)
 			}
-			logger.Info("ELB already deleted", "elbID", elbID)
-		}
 		}
 		// Clear service status.
 		_ = r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), nil)
@@ -683,7 +697,13 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 
 	// Delete ACL IP group if present.
 	if controllerutil.ContainsFinalizer(svc, aclCleanupFinalizer) {
-		ipGroupID := svc.Annotations[aclIDAnnotation]
+		ipGroupID := ""
+		if binding != nil {
+			ipGroupID = binding.Status.ACLID
+		}
+		if ipGroupID == "" {
+			ipGroupID = svc.Annotations[aclIDAnnotation]
+		}
 		if ipGroupID == "" {
 			// Annotation was overwritten (e.g. by OpenEverest LBC template sync or PSMDB
 			// operator Update). Fall back to name-based lookup so the IP group doesn't leak.
@@ -709,6 +729,17 @@ func (r *ServiceReconciler) reconcileDelete(ctx context.Context, logger logr.Log
 			return nil
 		}); err != nil {
 			return ctrl.Result{}, err
+		}
+	}
+
+	// Delete the ELBBinding if it exists.
+	if binding != nil {
+		if err := r.Delete(ctx, binding); err != nil {
+			logger.Error(err, "deleting ELBBinding", "binding", bindingKey)
+			// Non-fatal: Service finalizers are already removed, binding will be
+			// cleaned up on next reconcile (no matching Service -> no-op).
+		} else {
+			logger.Info("ELBBinding deleted", "binding", bindingKey)
 		}
 	}
 
