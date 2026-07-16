@@ -18,10 +18,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/weimantian/huawei-elb-controller/api/v1alpha1"
 	"github.com/weimantian/huawei-elb-controller/internal/controller"
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
+	elbwebhook "github.com/weimantian/huawei-elb-controller/internal/webhook"
 )
 
 func main() {
@@ -61,6 +64,7 @@ func main() {
 	mgr, err := ctrl.NewManager(kubeConfig, ctrl.Options{
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: ":8082",
+		WebhookServer:          webhook.NewServer(webhook.Options{CertDir: "/tmp/k8s-webhook-server/serving-certs"}),
 	})
 	if err != nil {
 		logger.Error(err, "failed to start manager")
@@ -98,6 +102,11 @@ func main() {
 		logger.Error(err, "failed to setup LBC Reconciler")
 		os.Exit(1)
 	}
+
+	// 6b. Register the Service mutating webhook. This injects
+	// spec.loadBalancerClass on LoadBalancer Services at CREATE time so
+	// CCE CCM completely skips them (no status race, no elb.id lock-in).
+	mgr.GetWebhookServer().Register("/mutate-v1-service", &admission.Webhook{Handler: &elbwebhook.ServiceMutator{}})
 
 	// 6b. Register health/readiness checks so /healthz and /readyz
 	// are served by the health probe server on :8082.
