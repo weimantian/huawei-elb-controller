@@ -184,7 +184,9 @@ kubectl get dbengine -n everest
 ```bash
 # 1. Build the image
 #    Use --provenance=false to avoid SWR's "Invalid image, fail to parse 'manifest.json'" error
-git clone -b feat/elb-binding-crd https://github.com/weimantian/huawei-elb-controller.git
+git clone https://github.com/weimantian/huawei-elb-controller.git
+#    If GitHub is unreachable (e.g. from mainland China), use a mirror:
+#    git clone https://ghfast.top/https://github.com/weimantian/huawei-elb-controller.git
 cd huawei-elb-controller
 
 # Docker:
