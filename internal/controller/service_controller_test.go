@@ -216,8 +216,8 @@ func TestServiceReconciler_CreatePath_DirectAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcileCreate returned error: %v", err)
 	}
-	if result.RequeueAfter != serviceRequeue {
-		t.Errorf("expected requeue after %v, got %v", serviceRequeue, result.RequeueAfter)
+	if !result.Requeue {
+		t.Errorf("expected immediate requeue, got %v", result)
 	}
 
 	// Verify the ELB ID is persisted in the ELBBinding status, not on the Service

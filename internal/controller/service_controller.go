@@ -451,6 +451,12 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}
 
 	logger.Info("ELB fully provisioned", "elbID", info.ID, "ingressIP", ingressIP)
+	// Requeue immediately (not after 5min) so reconcileUpdate runs right away.
+	// CCE CCM overwrites Service status (clears .status.loadBalancer.ingress)
+	// because there is no kubernetes.io/elb.id annotation. reconcileUpdate will
+	// detect the empty status, re-read the ELB IP, and rewrite it before CCM
+	// has a chance to interfere again.
+	return ctrl.Result{Requeue: true}, nil
 	return ctrl.Result{RequeueAfter: serviceRequeue}, nil
 }
 
