@@ -265,6 +265,8 @@ When a new version is released and you already have a running controller, update
 # 1. Pull the latest code
 cd huawei-elb-controller
 git pull
+#    Note: git pull resets deploy/deployment.yaml image to the placeholder.
+#    You must restore your real SWR address in step 3 below.
 
 # 2. Build and push the new image to SWR
 #    IMPORTANT: you MUST push to SWR -- the cluster pulls from SWR, not your local Docker.
@@ -273,7 +275,11 @@ docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-cont
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
 
-# 3. Apply any updated manifests (CRD/RBAC/Webhook are idempotent)
+# 3. Restore your SWR image address in deployment.yaml, then apply
+#    git pull resets line 24 to:  image: <swr-registry>/huawei-elb-controller:latest
+#    Change it back to your real address, e.g.:  image: swr.cn-north-4.myhuaweicloud.com/<your-namespace>/huawei-elb-controller:latest
+sed -i 's|<swr-registry>|swr.cn-north-4.myhuaweicloud.com/<your-namespace>|' deploy/deployment.yaml
+kubectl apply -f deploy/deployment.yaml
 kubectl apply -f deploy/crd.yaml
 kubectl apply -f deploy/webhook.yaml
 

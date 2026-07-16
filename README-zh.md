@@ -265,15 +265,21 @@ kubectl logs -n everest-system deployment/huawei-elb-controller
 # 1. 拉取最新代码
 cd huawei-elb-controller
 git pull
+#    注意：git pull 会把 deploy/deployment.yaml 的镜像地址重置为占位符。
+#    必须在下面的步骤 3 中恢复你的真实 SWR 地址。
 
 # 2. 构建并推送新镜像到 SWR
-#    重要：必须 push 到 SWR —— 集群从 SWR 拉镜像，不是你本地 Docker。
+#    重要：必须 push 到 SWR -- 集群从 SWR 拉镜像，不是你本地 Docker。
 #    使用相同 tag (:latest) 没问题，因为 imagePullPolicy=Always 会强制重新拉取。
 docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
 docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
 docker push <swr-registry>/huawei-elb-controller:latest
 
-# 3. 应用更新后的清单（CRD/RBAC/Webhook 均为幂等）
+# 3. 恢复 deployment.yaml 中的 SWR 镜像地址，然后 apply
+#    git pull 会把第 24 行重置为：  image: <swr-registry>/huawei-elb-controller:latest
+#    改回你的真实地址，例如：  image: swr.cn-north-4.myhuaweicloud.com/<你的命名空间>/huawei-elb-controller:latest
+sed -i 's|<swr-registry>|swr.cn-north-4.myhuaweicloud.com/<你的命名空间>|' deploy/deployment.yaml
+kubectl apply -f deploy/deployment.yaml
 kubectl apply -f deploy/crd.yaml
 kubectl apply -f deploy/webhook.yaml
 
