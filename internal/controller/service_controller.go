@@ -12,6 +12,8 @@ import (
 	elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/weimantian/huawei-elb-controller/api/v1alpha1"
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
 
@@ -31,6 +34,7 @@ type ServiceReconciler struct {
 	ELBClient       *elb.ElbClient
 	NetworkDetector *huaweicloud.NetworkDetector
 	Creds           *huaweicloud.Credentials
+	Scheme          *runtime.Scheme
 }
 
 // patchWithRetry applies a patch with conflict retry. The modifyFn is called
@@ -85,6 +89,71 @@ const (
 	lbAlgorithmRR  = "ROUND_ROBIN"
 )
 
+// getBinding returns the ELBBinding for the given Service, or nil if it does not exist.
+func (r *ServiceReconciler) getBinding(ctx context.Context, svc *corev1.Service) (*v1alpha1.ELBBinding, error) {
+	binding := &v1alpha1.ELBBinding{}
+	key := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+	if err := r.Get(ctx, key, binding); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return binding, nil
+}
+
+// ensureBinding returns an ELBBinding for the Service, creating one if necessary.
+// If an existing binding has a mismatched ServiceUID (stale from name reuse), it is deleted first.
+func (r *ServiceReconciler) ensureBinding(ctx context.Context, svc *corev1.Service) (*v1alpha1.ELBBinding, error) {
+	binding, err := r.getBinding(ctx, svc)
+	if err != nil {
+		return nil, err
+	}
+	if binding != nil {
+		if binding.Spec.ServiceUID != string(svc.UID) {
+			if err := r.Delete(ctx, binding); err != nil {
+				return nil, err
+			}
+			binding = nil
+		}
+	}
+	if binding == nil {
+		binding = &v1alpha1.ELBBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      svc.Name,
+				Namespace: svc.Namespace,
+			},
+			Spec: v1alpha1.ELBBindingSpec{
+				ServiceName: svc.Name,
+				ServiceUID:  string(svc.UID),
+			},
+		}
+		if r.Scheme != nil {
+			_ = controllerutil.SetOwnerReference(svc, binding, r.Scheme)
+		}
+		if err := r.Create(ctx, binding); err != nil {
+			return nil, err
+		}
+	}
+	return binding, nil
+}
+
+// patchBindingStatus patches the status subresource of an ELBBinding with conflict retry.
+func (r *ServiceReconciler) patchBindingStatus(
+	ctx context.Context, key types.NamespacedName, mutate func(*v1alpha1.ELBBinding) error,
+) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &v1alpha1.ELBBinding{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		original := latest.DeepCopy()
+		if err := mutate(latest); err != nil {
+			return err
+		}
+		return r.Patch(ctx, latest, client.MergeFrom(original))
+	})
+}
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -196,16 +265,33 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 			return ctrl.Result{RequeueAfter: elbActiveWaitRequeue}, nil
 		}
 	}
-
-	// CRITICAL: Write elbID annotation + finalizer immediately after ELB creation.
-	// This ensures that if subsequent steps (listener/pool/AACL/status) fail or the
-	// process crashes, the next reconcile will find the elbID and route to
+	// CRITICAL: Ensure ELBBinding exists immediately after ELB creation.
+	// This ensures that if subsequent steps (listener/pool/ACL/status) fail or the
+	// process crashes, the next reconcile will find the binding and route to
 	// reconcileUpdate, which can complete provisioning via syncListenerStacks.
-	// Without this, a crash after ELB creation but before annotation write would
+	// Without this, a crash after ELB creation but before binding write would
 	// orphan the ELB (leak) and create a duplicate on retry.
-	compositeParams := buildCompositeParams(lbcParams, filterValidCIDRs(logger, svc.Spec.LoadBalancerSourceRanges))
-	paramsJSON, _ := json.Marshal(compositeParams)
+	if _, err := r.ensureBinding(ctx, svc); err != nil {
+		logger.Error(err, "ensuring ELBBinding")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
 
+	bindingKey := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+	compositeParams := buildCompositeParams(lbcParams, filterValidCIDRs(logger, svc.Spec.LoadBalancerSourceRanges))
+
+	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+		b.Status.ELBID = info.ID
+		b.Status.LastKnownParams = compositeParams
+		b.Status.Phase = v1alpha1.PhaseProvisioning
+		return nil
+	}); err != nil {
+		logger.Error(err, "patching ELBBinding status with ELB ID")
+		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+
+	// Persist cleanup finalizer on the Service (must stay on Service to
+	// ensure cleanup fires even if the controller is down during deletion).
+	paramsJSON, _ := json.Marshal(compositeParams)
 	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
 		if latest.Annotations == nil {
 			latest.Annotations = make(map[string]string)
@@ -241,7 +327,6 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		logger.Error(err, "ensuring ACL, will retry")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
-
 	// Persist ACL annotations (ensureACL modifies svc.Annotations in-memory).
 	if err := r.patchWithRetry(ctx, client.ObjectKeyFromObject(svc), func(latest *corev1.Service) error {
 		if latest.Annotations == nil {
@@ -263,6 +348,16 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
 	}
 
+	// Also persist ACL state to ELBBinding status.
+	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+		b.Status.ACLID = svc.Annotations[aclIDAnnotation]
+		b.Status.ACLStatus = svc.Annotations[aclStatusAnnotation]
+		b.Status.ACLType = svc.Annotations[aclTypeAnnotation]
+		return nil
+	}); err != nil {
+		logger.Error(err, "patching ELBBinding ACL status")
+	}
+
 	// Write service.status.loadBalancer.ingress.
 	ingressIP := info.VipAddress
 	if info.PublicIP != "" {
@@ -273,6 +368,15 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	}); err != nil {
 		logger.Error(err, "updating Service status")
 		return ctrl.Result{RequeueAfter: serviceRetryRequeue}, nil
+	}
+
+	// Persist ingress IP and final Ready phase to ELBBinding status.
+	if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+		b.Status.IngressIP = ingressIP
+		b.Status.Phase = v1alpha1.PhaseReady
+		return nil
+	}); err != nil {
+		logger.Error(err, "patching ELBBinding final status")
 	}
 
 	logger.Info("ELB fully provisioned", "elbID", info.ID, "ingressIP", ingressIP)

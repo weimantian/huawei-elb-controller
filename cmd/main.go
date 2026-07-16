@@ -82,6 +82,7 @@ func main() {
 		ELBClient:       elbClient,
 		NetworkDetector: networkDetector,
 		Creds:           creds,
+		Scheme:          mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "failed to setup Service Reconciler")
 		os.Exit(1)
