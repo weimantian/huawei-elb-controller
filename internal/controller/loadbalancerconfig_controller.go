@@ -60,9 +60,6 @@ const (
 	availabilityZonesAnnotation   = "huawei-elb.io/availability-zones"
 	autoDetectedAnnotation        = "huawei-elb.io/auto-detected"
 	regionAnnotation              = "huawei-elb.io/region"
-	publicAnnotation              = "huawei-elb.io/public"
-	bandwidthSizeAnnotation       = "huawei-elb.io/bandwidth-size"
-	bandwidthChargeModeAnnotation = "huawei-elb.io/bandwidth-charge-mode"
 	publicIPNetworkTypeAnnotation = "huawei-elb.io/public-ip-network-type"
 
 	// Annotation keys for controller-written status (metadata.annotations).
@@ -73,28 +70,16 @@ const (
 	ccmAutocreateAnnotation = "kubernetes.io/elb.autocreate"
 
 	// Requeue intervals
-	provisioningRequeue = 30 * time.Second // ELB not yet ACTIVE
-	healthyRequeue      = 5 * time.Minute  // periodic health check when ACTIVE
-	errorRequeue        = 5 * time.Minute  // permanent errors (bad params, etc.)
-	retryRequeue        = 10 * time.Second // temporary errors (network, throttling)
+	provisioningRequeue = 30 * time.Second     // ELB not yet ACTIVE
+	healthyRequeue      = sharedHealthyRequeue // periodic health check when ACTIVE
+	errorRequeue        = 5 * time.Minute      // permanent errors (bad params, etc.)
+	retryRequeue        = sharedRetryRequeue   // temporary errors (network, throttling)
 
 	// uiGracePeriod is the minimum age of a LoadBalancerConfig before the
 	// controller modifies it. This gives the OpenEverest UI time to complete
 	// post-create operations (reload, update) without resourceVersion conflicts.
 	uiGracePeriod = 5 * time.Second
 )
-
-// foreignCloudAnnotationPrefixes are spec.annotation key prefixes that
-// indicate the LBC targets a different cloud provider (AWS, GKE, Azure,
-// Alibaba). The controller skips these to avoid creating Huawei Cloud ELBs
-// for LBCs meant for other clouds (e.g. OpenEverest's built-in eks-default).
-var foreignCloudAnnotationPrefixes = []string{
-	"service.beta.kubernetes.io/aws-",
-	"service.beta.kubernetes.io/azure-",
-	"service.beta.kubernetes.io/alibaba-",
-	"cloud.google.com/",
-	"networking.gke.io/",
-}
 
 // lbcGVR is the GroupVersionKind for OpenEverest V1's LoadBalancerConfig CR.
 var lbcGVR = schema.GroupVersionKind{
@@ -479,7 +464,7 @@ func hasForeignCloudAnnotations(lbc *unstructured.Unstructured) bool {
 		return false
 	}
 	for key := range specAnns {
-		for _, prefix := range foreignCloudAnnotationPrefixes {
+		for _, prefix := range ForeignCloudAnnotationPrefixes {
 			if strings.HasPrefix(key, prefix) {
 				return true
 			}
@@ -716,14 +701,14 @@ func parseELBOptions(lbc *unstructured.Unstructured) (*huaweicloud.CreateELBOpti
 
 	// Default to public ELB. Set huawei-elb.io/public: "false" for internal.
 	opt.IsPublic = true
-	if strings.EqualFold(specAnns[publicAnnotation], "false") {
+	if strings.EqualFold(specAnns[huaweicloud.LBCPublicAnnotation], "false") {
 		opt.IsPublic = false
 	}
 	if opt.IsPublic {
-		if bw, err := strconv.Atoi(specAnns[bandwidthSizeAnnotation]); err == nil && bw > 0 {
+		if bw, err := strconv.Atoi(specAnns[huaweicloud.LBCBandwidthSizeAnnotation]); err == nil && bw > 0 {
 			opt.BandwidthSize = int32(bw)
 		}
-		opt.BandwidthChargeMode = specAnns[bandwidthChargeModeAnnotation]
+		opt.BandwidthChargeMode = specAnns[huaweicloud.LBCBandwidthChargeModeAnnotation]
 		opt.PublicIPNetworkType = specAnns[publicIPNetworkTypeAnnotation]
 	}
 

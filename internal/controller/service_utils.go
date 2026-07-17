@@ -3,12 +3,17 @@ package controller
 import (
 	corev1 "k8s.io/api/core/v1"
 	"strings"
+	"time"
 
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
 
 const (
 	serviceLabelManagedBy = "app.kubernetes.io/managed-by"
+
+	// Shared requeue intervals used by both ServiceReconciler and LoadBalancerConfigReconciler.
+	sharedHealthyRequeue = 5 * time.Minute  // periodic requeue when ELB is ACTIVE/Ready
+	sharedRetryRequeue   = 10 * time.Second // temporary errors (network, throttling)
 )
 
 // openeverestOperators lists the managed-by values for all OpenEverest engine operators.
@@ -68,19 +73,24 @@ func isOpenEverestService(svc *corev1.Service) bool {
 	return openeverestOperators[labels[serviceLabelManagedBy]]
 }
 
+// ForeignCloudAnnotationPrefixes are annotation key prefixes that indicate
+// a Service or LBC targets a different cloud provider (AWS, GKE, Azure,
+// Alibaba). The controller skips these to avoid creating Huawei Cloud ELBs
+// for resources meant for other clouds (e.g. OpenEverest's built-in eks-default).
+var ForeignCloudAnnotationPrefixes = []string{
+	"service.beta.kubernetes.io/aws-",
+	"service.beta.kubernetes.io/azure-",
+	"service.beta.kubernetes.io/alibaba-",
+	"cloud.google.com/",
+	"networking.gke.io/",
+}
+
 func hasForeignCloudServiceAnnotations(svc *corev1.Service) bool {
 	if svc.Annotations == nil {
 		return false
 	}
-	prefixes := []string{
-		"service.beta.kubernetes.io/aws-",
-		"service.beta.kubernetes.io/azure-",
-		"service.beta.kubernetes.io/alibaba-",
-		"cloud.google.com/",
-		"networking.gke.io/",
-	}
 	for key := range svc.Annotations {
-		for _, prefix := range prefixes {
+		for _, prefix := range ForeignCloudAnnotationPrefixes {
 			if strings.HasPrefix(key, prefix) {
 				return true
 			}

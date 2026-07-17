@@ -72,8 +72,8 @@ func (r *ServiceReconciler) updateStatusWithRetry(
 
 const (
 	lastKnownParamsAnnotation = "huawei-elb.io/last-known-params"
-	serviceRequeue            = 5 * time.Minute
-	serviceRetryRequeue       = 10 * time.Second
+	serviceRequeue            = sharedHealthyRequeue
+	serviceRetryRequeue       = sharedRetryRequeue
 	elbActiveWaitRequeue      = 5 * time.Second
 	elbProvisionTimeout       = 2 * time.Minute
 
