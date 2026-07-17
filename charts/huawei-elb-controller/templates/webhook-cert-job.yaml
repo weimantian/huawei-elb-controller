@@ -1,0 +1,189 @@
+{{- if .Values.webhook.certManager.enabled }}
+# When cert-manager is available, use a Certificate resource instead of the
+# self-signed cert Job below. This is the recommended approach for production.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "huawei-elb-controller.fullname" . }}-webhook-tls
+  dnsNames:
+    - {{ include "huawei-elb-controller.fullname" . }}-webhook.{{ .Values.namespace }}.svc
+    - {{ include "huawei-elb-controller.fullname" . }}-webhook.{{ .Values.namespace }}.svc.cluster.local
+  issuerRef:
+    name: {{ .Values.webhook.certManager.issuerName }}
+    kind: {{ .Values.webhook.certManager.issuerKind }}
+{{- else }}
+# Self-signed certificate generation Job (Helm post-install/post-upgrade hook).
+# Generates a CA + server cert, creates the TLS Secret, and patches the
+# MutatingWebhookConfiguration caBundle. Equivalent to deploy/gen-webhook-cert.sh.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "huawei-elb-controller.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+      containers:
+        - name: cert-gen
+          image: "{{ .Values.webhook.certImage.repository }}:{{ .Values.webhook.certImage.tag }}"
+          imagePullPolicy: {{ .Values.webhook.certImage.pullPolicy }}
+          env:
+            - name: WEBHOOK_NAME
+              value: {{ include "huawei-elb-controller.fullname" . }}-webhook
+            - name: WEBHOOK_SVC
+              value: {{ include "huawei-elb-controller.fullname" . }}-webhook
+            - name: WEBHOOK_SECRET
+              value: {{ include "huawei-elb-controller.fullname" . }}-webhook-tls
+            - name: NAMESPACE
+              value: {{ .Values.namespace }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              TMPDIR=$(mktemp -d)
+              trap "rm -rf $TMPDIR" EXIT
+
+              # 1. Generate CA
+              openssl genrsa -out $TMPDIR/ca.key 2048
+              openssl req -new -x509 -days 3650 -key $TMPDIR/ca.key -out $TMPDIR/ca.crt \
+                -subj "/CN=huawei-elb-controller-webhook-ca"
+
+              # 2. Generate server cert
+              openssl genrsa -out $TMPDIR/server.key 2048
+              cat > $TMPDIR/server.cnf <<EOF
+              [req]
+              req_extensions = v3_req
+              distinguished_name = req_distinguished_name
+              [req_distinguished_name]
+              [ v3_req ]
+              basicConstraints = CA:FALSE
+              keyUsage = digitalSignature, keyEncipherment
+              extendedKeyUsage = serverAuth
+              subjectAltName = @alt_names
+              [alt_names]
+              DNS.1 = ${WEBHOOK_SVC}
+              DNS.2 = ${WEBHOOK_SVC}.${NAMESPACE}.svc
+              DNS.3 = ${WEBHOOK_SVC}.${NAMESPACE}.svc.cluster.local
+              EOF
+              openssl req -new -key $TMPDIR/server.key -out $TMPDIR/server.csr \
+                -subj "/CN=${WEBHOOK_SVC}.${NAMESPACE}.svc" -config $TMPDIR/server.cnf
+              openssl x509 -req -in $TMPDIR/server.csr -CA $TMPDIR/ca.crt -CAkey $TMPDIR/ca.key \
+                -CAcreateserial -out $TMPDIR/server.crt -days 3650 \
+                -extensions v3_req -extfile $TMPDIR/server.cnf
+
+              # 3. Create TLS Secret
+              kubectl create secret generic "${WEBHOOK_SECRET}" \
+                --namespace "${NAMESPACE}" \
+                --from-file=tls.crt=$TMPDIR/server.crt \
+                --from-file=tls.key=$TMPDIR/server.key \
+                --from-file=ca.crt=$TMPDIR/ca.crt \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              # 4. Patch caBundle into MutatingWebhookConfiguration
+              CA_BUNDLE=$(base64 < $TMPDIR/ca.crt | tr -d '\n')
+              kubectl patch mutatingwebhookconfiguration "${WEBHOOK_NAME}" \
+                --type='json' -p="[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${CA_BUNDLE}\"}]" 2>/dev/null \
+                || kubectl patch mutatingwebhookconfiguration "${WEBHOOK_NAME}" \
+                --type='json' -p="[{\"op\":\"add\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${CA_BUNDLE}\"}]"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "huawei-elb-controller.fullname" . }}-webhook-cert
+    namespace: {{ .Values.namespace }}
+{{- end }}

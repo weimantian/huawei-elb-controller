@@ -54,6 +54,13 @@ spec:
             - name: health
               containerPort: 8082
               protocol: TCP
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -68,6 +75,11 @@ spec:
             periodSeconds: {{ .Values.healthProbe.livenessProbe.periodSeconds }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "huawei-elb-controller.fullname" . }}-webhook-tls
+            defaultMode: 420
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

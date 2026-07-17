@@ -2,7 +2,7 @@
 image:
   repository: huawei-elb-controller
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Image pull secrets for private registries (e.g. SWR)
 imagePullSecrets: []
@@ -53,7 +53,7 @@ healthProbe:
     initialDelaySeconds: 15
     periodSeconds: 20
 
-# Service Reconciler default parameters (Plan 2).
+# Service Reconciler default parameters (Plan B).
 # Used when a Service has no huawei-elb.io/* annotations (auto mode, no LBC).
 defaults:
   public: true
@@ -61,3 +61,17 @@ defaults:
   bandwidthChargeMode: "traffic"
   eipType: "5_bgp"
   bandwidthShareType: "PER"
+
+# Webhook configuration
+webhook:
+  # Use cert-manager for production (recommended). When enabled, a Certificate
+  # resource is created instead of the self-signed cert Job.
+  certManager:
+    enabled: false
+    issuerName: ""
+    issuerKind: "Issuer"
+  # Self-signed cert generation Job image (used when certManager.enabled=false)
+  certImage:
+    repository: bitnami/kubectl
+    tag: latest
+    pullPolicy: IfNotPresent

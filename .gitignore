@@ -15,6 +15,7 @@ test-report-*.png
 测试报告.md
 
 # Dev guides (local only, not published)
+AGENTS.md
 DEVELOPMENT.md
 DEVELOPMENT-zh.md
 test-evidence

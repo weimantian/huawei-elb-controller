@@ -181,6 +181,18 @@ kubectl get dbengine -n everest
 
 ### 步骤 1：部署控制器
 
+选择以下两种安装方式之一：
+
+| 方式 | 说明 | 推荐 |
+|---|---|---|
+| **A. 原生清单** | 逐个 apply YAML 文件 | ✅ 是 |
+| **B. Helm chart** | 通过 `helm install` + values.yaml | 适用于 Helm 用户 |
+
+两种方式结果完全一致。方式 A 透明度高、便于排障，推荐使用；方式 B 适合已在使用 Helm 的团队。
+
+#### 方式 A：原生清单（推荐）
+
+
 ```bash
 # 1. 构建镜像
 #    加 --provenance=false 避免 SWR 报 "Invalid image, fail to parse 'manifest.json'" 错误
@@ -233,6 +245,44 @@ kubectl apply -f deploy/deployment.yaml
 ```
 
 > **部署顺序**：凭据 Secret -> 镜像 -> CRD -> RBAC -> Webhook（含证书）-> Deployment。Webhook 证书脚本 `gen-webhook-cert.sh` 需在 `webhook.yaml` apply 之后运行，它会创建 TLS Secret 并把 CA bundle patch 进 MutatingWebhookConfiguration。
+
+#### 方式 B：Helm Chart
+
+```bash
+# 1. 构建并推送镜像（同方式 A）
+git clone https://github.com/weimantian/huawei-elb-controller.git
+cd huawei-elb-controller
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+
+# 2. 创建包含你的配置的 values 文件
+cat > my-values.yaml <<EOF
+image:
+  repository: <swr-registry>/huawei-elb-controller
+  tag: latest
+  pullPolicy: Always
+
+credentials:
+  ak: "<你的-AK>"
+  sk: "<你的-SK>"
+  projectId: "<你的-ProjectID>"
+  region: "cn-north-4"
+
+namespace: everest-system
+EOF
+
+# 3. 安装 chart
+helm install huawei-elb-controller ./charts/huawei-elb-controller \
+  -f my-values.yaml
+
+# chart 会自动：
+#   - 创建 CRD、RBAC、Deployment、Webhook 配置和 webhook Service
+#   - 生成自签证书（post-install hook Job）并 patch CA bundle
+#   - 生产环境若已安装 cert-manager，可设置 webhook.certManager.enabled=true
+```
+
+> **注意**：Helm chart 的证书 Job 使用 `bitnami/kubectl` 镜像生成自签证书。若集群无法拉取 Docker Hub 镜像，请提前预拉该镜像，或使用 cert-manager（`webhook.certManager.enabled=true`）。
 ### 步骤 2：验证控制器运行状态
 
 ```bash

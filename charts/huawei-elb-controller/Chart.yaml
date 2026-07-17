@@ -1,6 +1,6 @@
 apiVersion: v2
 name: huawei-elb-controller
-description: A Kubernetes controller that watches LoadBalancer Services created by OpenEverest, injects CCE autocreate annotations for automatic Huawei Cloud ELB creation, and handles parameter updates via the ELB v3 API.
+description: A Kubernetes controller that manages Huawei Cloud ELB instances for OpenEverest database clusters via direct ELB v3 API, with ELBBinding CRD state isolation and Mutating Webhook for CCM conflict prevention.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

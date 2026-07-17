@@ -181,6 +181,18 @@ kubectl get dbengine -n everest
 
 ### Step 1: Deploy the Controller
 
+Choose one of two installation methods:
+
+| Method | Description | Recommended |
+|---|---|---|
+| **A. Raw manifests** | Apply YAML files one by one | ✅ Yes |
+| **B. Helm chart** | `helm install` with values.yaml | For Helm users |
+
+Both methods produce the same result. Method A is recommended for transparency and troubleshooting; Method B is for teams already using Helm.
+
+#### Method A: Raw Manifests (Recommended)
+
+
 ```bash
 # 1. Build the image
 #    Use --provenance=false to avoid SWR's "Invalid image, fail to parse 'manifest.json'" error
@@ -233,6 +245,44 @@ kubectl apply -f deploy/deployment.yaml
 ```
 
 > **Install order**: Credentials Secret -> Image -> CRD -> RBAC -> Webhook (with cert) -> Deployment. The cert script `gen-webhook-cert.sh` must run after `webhook.yaml` is applied -- it creates the TLS Secret and patches the CA bundle into the MutatingWebhookConfiguration.
+
+#### Method B: Helm Chart
+
+```bash
+# 1. Build and push the image (same as Method A)
+git clone https://github.com/weimantian/huawei-elb-controller.git
+cd huawei-elb-controller
+docker buildx build --platform linux/amd64 --provenance=false -t huawei-elb-controller:latest .
+docker tag huawei-elb-controller:latest <swr-registry>/huawei-elb-controller:latest
+docker push <swr-registry>/huawei-elb-controller:latest
+
+# 2. Create a values file with your configuration
+cat > my-values.yaml <<EOF
+image:
+  repository: <swr-registry>/huawei-elb-controller
+  tag: latest
+  pullPolicy: Always
+
+credentials:
+  ak: "<your-AK>"
+  sk: "<your-SK>"
+  projectId: "<your-ProjectID>"
+  region: "cn-north-4"
+
+namespace: everest-system
+EOF
+
+# 3. Install the chart
+helm install huawei-elb-controller ./charts/huawei-elb-controller \
+  -f my-values.yaml
+
+# The chart automatically:
+#   - Creates the CRD, RBAC, Deployment, Webhook Configuration, and webhook Service
+#   - Generates a self-signed certificate (post-install hook Job) and patches the CA bundle
+#   - For production with cert-manager, set webhook.certManager.enabled=true
+```
+
+> **Note**: The Helm chart's cert Job uses a `bitnami/kubectl` image to generate the self-signed certificate. If your cluster cannot pull from Docker Hub, either pre-pull this image or use cert-manager (`webhook.certManager.enabled=true`).
 ### Step 2: Verify the Controller is Running
 
 ```bash

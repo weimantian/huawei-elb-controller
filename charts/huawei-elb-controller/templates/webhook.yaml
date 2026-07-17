@@ -1,0 +1,46 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+webhooks:
+  - name: service.elb.huawei-webhook.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["services"]
+        operations: ["CREATE"]
+        scope: "*"
+    # Only intercept Services in the everest namespace (where OpenEverest
+    # creates database LB Services). Other namespaces are unaffected.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: everest
+    clientConfig:
+      service:
+        name: {{ include "huawei-elb-controller.fullname" . }}-webhook
+        namespace: {{ .Values.namespace }}
+        path: /mutate-v1-service
+        port: 443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "huawei-elb-controller.fullname" . }}-webhook
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "huawei-elb-controller.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "huawei-elb-controller.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: 9443
+      protocol: TCP
