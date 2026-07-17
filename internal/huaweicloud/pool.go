@@ -9,9 +9,9 @@ import (
 
 // PoolInfo holds essential information about an ELB backend server group (pool).
 type PoolInfo struct {
-	ID         string
-	Name       string
-	Protocol   string
+	ID          string
+	Name        string
+	Protocol    string
 	LbAlgorithm string
 }
 

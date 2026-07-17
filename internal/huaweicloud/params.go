@@ -13,8 +13,8 @@ const (
 	LBCEIPTypeAnnotation             = "huawei-elb.io/eip-type"
 	LBCBandwidthShareTypeAnnotation  = "huawei-elb.io/bandwidth-share-type"
 	LBCNameAnnotation                = "huawei-elb.io/name"
-	AnnotationELBID                = "huawei-elb.io/elb-id"
-	AnnotationELBCleanupFinalizer  = "huawei-elb.io/elb-cleanup"
+	AnnotationELBID                  = "huawei-elb.io/elb-id"
+	AnnotationELBCleanupFinalizer    = "huawei-elb.io/elb-cleanup"
 )
 
 const (
@@ -26,7 +26,6 @@ const (
 	ipGroupListLimit           = 200
 )
 
-
 // BuildELBName generates the ELB name following EKS/GKE naming conventions:
 // k8s-{ns_8}-{name_8}-{uid_10}
 // Total length ~32 chars, well within Huawei Cloud's 64-char limit.
@@ -34,14 +33,14 @@ const (
 // gets a UID suffix appended to ensure global uniqueness and enable name-based
 // reverse-lookup recovery when annotations are overwritten.
 func BuildELBName(lbcParams map[string]string, namespace, name, uid string) string {
-	uidSuffix := shortStr(uid, 10)
+	uidSuffix := truncateStr(uid, 10)
 	if v, ok := lbcParams[LBCNameAnnotation]; ok && v != "" {
 		// Append UID suffix to custom names too, ensuring global uniqueness so
 		// the reverse-lookup recovery path in reconcileCreate works uniformly.
 		// Truncate the custom name to leave room for "-{uidSuffix}" (≤11 chars).
 		return truncateStr(v, 64-len(uidSuffix)-1) + "-" + uidSuffix
 	}
-	return truncateStr(fmt.Sprintf("k8s-%s-%s-%s", shortStr(namespace, 8), shortStr(name, 8), uidSuffix), 64)
+	return truncateStr(fmt.Sprintf("k8s-%s-%s-%s", truncateStr(namespace, 8), truncateStr(name, 8), uidSuffix), 64)
 }
 
 // IsInternalELB returns true if the params indicate an internal (private) ELB.
@@ -88,15 +87,6 @@ func resolveStringParam(params map[string]string, key, defaultVal string) string
 
 // truncateStr truncates s to maxLen characters (Unicode-safe).
 func truncateStr(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen])
-}
-
-// shortStr truncates s to maxLen characters.
-func shortStr(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s

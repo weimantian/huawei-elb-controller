@@ -373,7 +373,6 @@ func eipResolveChargeMode(mode string) eipv2model.UpdateBandwidthOptionChargeMod
 	return eipv2model.GetUpdateBandwidthOptionChargeModeEnum().TRAFFIC
 }
 
-
 // ELBNamePrefix is prepended to the LoadBalancerConfig name to form the ELB name.
 const ELBNamePrefix = "elb-"
 

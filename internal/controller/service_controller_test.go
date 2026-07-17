@@ -118,15 +118,15 @@ func makeTestService(name string) *corev1.Service {
 
 // elbAPIRouter is a configurable mock ELB API server that routes by method+path.
 type elbAPIRouter struct {
-	createLBResp     string
+	createLBResp       string
 	createListenerResp string
-	createPoolResp   string
-	createMemberResp string
-	createHCResp     string
-	createIPGroupResp string
-	listListenersResp string
-	listPoolsResp    string
-	listMembersResp  string
+	createPoolResp     string
+	createMemberResp   string
+	createHCResp       string
+	createIPGroupResp  string
+	listListenersResp  string
+	listPoolsResp      string
+	listMembersResp    string
 }
 
 func (m *elbAPIRouter) handler() http.Handler {
@@ -185,15 +185,15 @@ func (m *elbAPIRouter) handler() http.Handler {
 
 func defaultRouter() *elbAPIRouter {
 	return &elbAPIRouter{
-		createLBResp:     `{"loadbalancer": {"id": "elb-mock-id", "name": "k8s-default-test", "provisioning_status": "ACTIVE", "vip_address": "192.168.1.10", "eips": [{"ip_address": "1.2.3.4", "id": "eip-1"}]}}`,
+		createLBResp:       `{"loadbalancer": {"id": "elb-mock-id", "name": "k8s-default-test", "provisioning_status": "ACTIVE", "vip_address": "192.168.1.10", "eips": [{"ip_address": "1.2.3.4", "id": "eip-1"}]}}`,
 		createListenerResp: `{"listener": {"id": "listener-1", "name": "test-3306", "protocol": "TCP", "protocol_port": 3306}}`,
-		createPoolResp:   `{"pool": {"id": "pool-1", "name": "pool-test-3306", "protocol": "TCP", "lb_algorithm": "ROUND_ROBIN"}}`,
-		createMemberResp: `{"member": {"id": "member-1", "address": "10.0.0.1", "protocol_port": 30006}}`,
-		createHCResp:     `{"healthmonitor": {"id": "hc-1", "type": "TCP"}}`,
-		createIPGroupResp: `{"ipgroup": {"id": "ipgroup-mock-id"}}`,
-		listListenersResp: `{"listeners": []}`,
-		listPoolsResp:    `{"pools": []}`,
-		listMembersResp:  `{"members": []}`,
+		createPoolResp:     `{"pool": {"id": "pool-1", "name": "pool-test-3306", "protocol": "TCP", "lb_algorithm": "ROUND_ROBIN"}}`,
+		createMemberResp:   `{"member": {"id": "member-1", "address": "10.0.0.1", "protocol_port": 30006}}`,
+		createHCResp:       `{"healthmonitor": {"id": "hc-1", "type": "TCP"}}`,
+		createIPGroupResp:  `{"ipgroup": {"id": "ipgroup-mock-id"}}`,
+		listListenersResp:  `{"listeners": []}`,
+		listPoolsResp:      `{"pools": []}`,
+		listMembersResp:    `{"members": []}`,
 	}
 }
 
@@ -535,7 +535,7 @@ func TestServiceReconciler_UpdatePath_WithManagedELBID(t *testing.T) {
 
 	svc := makeTestService("managed-update-svc")
 	svc.Annotations = map[string]string{
-		huaweicloud.AnnotationELBID:           "elb-123",
+		huaweicloud.AnnotationELBID:            "elb-123",
 		lastKnownParamsAnnotation:              `{"huawei-elb.io/bandwidth-size":"10","source-ranges":"[]"}`,
 		huaweicloud.LBCBandwidthSizeAnnotation: "10",
 		aclStatusAnnotation:                    "off",
@@ -604,8 +604,8 @@ func TestServiceReconciler_DeletePath_RemovesELBAndFinalizer(t *testing.T) {
 	// Finalizer is on ELBBinding, not Service.
 	binding := &v1alpha1.ELBBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "delete-svc", Namespace: "default"},
-		Spec:   v1alpha1.ELBBindingSpec{ServiceName: "delete-svc", ServiceUID: string(svc.UID)},
-		Status: v1alpha1.ELBBindingStatus{ELBID: "elb-to-delete"},
+		Spec:       v1alpha1.ELBBindingSpec{ServiceName: "delete-svc", ServiceUID: string(svc.UID)},
+		Status:     v1alpha1.ELBBindingStatus{ELBID: "elb-to-delete"},
 	}
 	controllerutil.AddFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer)
 
@@ -645,13 +645,13 @@ func TestServiceReconciler_DeletePath_ACLFinalizerCleanup(t *testing.T) {
 	svc.Finalizers = []string{"service.kubernetes.io/load-balancer-cleanup"} // CCM finalizer (not ours)
 	svc.Annotations = map[string]string{
 		huaweicloud.AnnotationELBID: "elb-to-delete",
-		aclIDAnnotation:              "ipgroup-to-delete",
+		aclIDAnnotation:             "ipgroup-to-delete",
 	}
 	// Finalizer + ACL state on ELBBinding, not Service.
 	binding := &v1alpha1.ELBBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "delete-acl-svc", Namespace: "default"},
-		Spec:   v1alpha1.ELBBindingSpec{ServiceName: "delete-acl-svc", ServiceUID: string(svc.UID)},
-		Status: v1alpha1.ELBBindingStatus{ELBID: "elb-to-delete", ACLID: "ipgroup-to-delete"},
+		Spec:       v1alpha1.ELBBindingSpec{ServiceName: "delete-acl-svc", ServiceUID: string(svc.UID)},
+		Status:     v1alpha1.ELBBindingStatus{ELBID: "elb-to-delete", ACLID: "ipgroup-to-delete"},
 	}
 	controllerutil.AddFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer)
 
@@ -927,21 +927,21 @@ func TestServiceReconciler_GetNodeBackends_LocalTrafficPolicy(t *testing.T) {
 	nodeA := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
 		Status: corev1.NodeStatus{
-			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		},
 	}
 	nodeB := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
 		Status: corev1.NodeStatus{
-			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		},
 	}
 	nodeC := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-c"},
 		Status: corev1.NodeStatus{
-			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.3"}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.3"}},
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		},
 	}
@@ -952,7 +952,7 @@ func TestServiceReconciler_GetNodeBackends_LocalTrafficPolicy(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "local-svc", Namespace: "default"},
 		Subsets: []corev1.EndpointSubset{
 			{
-				Addresses: []corev1.EndpointAddress{{NodeName: &nodeAName}},
+				Addresses:         []corev1.EndpointAddress{{NodeName: &nodeAName}},
 				NotReadyAddresses: []corev1.EndpointAddress{{NodeName: &nodeBName}},
 			},
 		},
@@ -992,14 +992,14 @@ func TestServiceReconciler_GetNodeBackends_ClusterTrafficPolicy(t *testing.T) {
 	nodeA := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
 		Status: corev1.NodeStatus{
-			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		},
 	}
 	nodeB := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
 		Status: corev1.NodeStatus{
-			Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		},
 	}
@@ -1007,7 +1007,7 @@ func TestServiceReconciler_GetNodeBackends_ClusterTrafficPolicy(t *testing.T) {
 	nodeAName := "node-a"
 	eps := &corev1.Endpoints{
 		ObjectMeta: metav1.ObjectMeta{Name: "cluster-svc", Namespace: "default"},
-		Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{NodeName: &nodeAName}}}},
+		Subsets:    []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{NodeName: &nodeAName}}}},
 	}
 
 	r := &ServiceReconciler{
@@ -1194,10 +1194,10 @@ func TestServiceReconciler_AdoptsLegacyAnnotations(t *testing.T) {
 	svc := makeTestService("legacy-adopt-svc")
 	svc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
 	svc.Annotations = map[string]string{
-		huaweicloud.AnnotationELBID:                "elb-legacy-123",
-		aclStatusAnnotation:                        "on",
-		aclIDAnnotation:                            "ipgroup-legacy",
-		huaweicloud.AnnotationELBCleanupFinalizer:  "true",
+		huaweicloud.AnnotationELBID:               "elb-legacy-123",
+		aclStatusAnnotation:                       "on",
+		aclIDAnnotation:                           "ipgroup-legacy",
+		huaweicloud.AnnotationELBCleanupFinalizer: "true",
 	}
 	detector := newTestDetector("vpc-test", "subnet-test", []string{"az1"})
 

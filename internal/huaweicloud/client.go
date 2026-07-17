@@ -67,6 +67,7 @@ func NewELBClient(creds *Credentials) (*elb.ElbClient, error) {
 
 	return elb.NewElbClient(hcClient), nil
 }
+
 // NewEIPClient creates a Huawei Cloud EIP v2 client from credentials.
 func NewEIPClient(creds *Credentials) (*eipv2.EipClient, error) {
 	auth := basic.NewCredentialsBuilder().

@@ -85,8 +85,8 @@ const (
 	aclTypeAnnotation   = "huawei-elb.io/acl-type"
 	sourceRangesKey     = "source-ranges"
 
-	tcpProtocol    = "TCP"
-	lbAlgorithmRR  = "ROUND_ROBIN"
+	tcpProtocol   = "TCP"
+	lbAlgorithmRR = "ROUND_ROBIN"
 )
 
 // getBinding returns the ELBBinding for the given Service, or nil if it does not exist.
@@ -129,7 +129,9 @@ func (r *ServiceReconciler) ensureBinding(ctx context.Context, svc *corev1.Servi
 			},
 		}
 		if r.Scheme != nil {
-			_ = controllerutil.SetOwnerReference(svc, binding, r.Scheme)
+			if err := controllerutil.SetOwnerReference(svc, binding, r.Scheme); err != nil {
+				log.FromContext(ctx).Error(err, "setting OwnerReference on ELBBinding")
+			}
 		}
 		// Finalizer on ELBBinding (not Service) so CCE CCM overwriting Service
 		// metadata can never cause an ELB leak. Service deletion cascades to
@@ -142,8 +144,10 @@ func (r *ServiceReconciler) ensureBinding(ctx context.Context, svc *corev1.Servi
 	} else if !controllerutil.ContainsFinalizer(binding, huaweicloud.AnnotationELBCleanupFinalizer) {
 		// Self-heal finalizer on existing bindings (migration from old version
 		// that wrote finalizers to Service instead of ELBBinding).
-		_ = r.patchBindingFinalizer(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace},
-			huaweicloud.AnnotationELBCleanupFinalizer, "")
+		if err := r.patchBindingFinalizer(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace},
+			huaweicloud.AnnotationELBCleanupFinalizer, ""); err != nil {
+			log.FromContext(ctx).Error(err, "self-healing ELBBinding finalizer")
+		}
 	}
 	return binding, nil
 }
@@ -208,7 +212,9 @@ func (r *ServiceReconciler) adoptLegacyAnnotations(ctx context.Context, logger l
 		}
 		if lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]; lastKnownJSON != "" {
 			lastKnownParams := make(map[string]string)
-			_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
+			if err := json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams); err != nil {
+				logger.Error(err, "parsing lastKnownParams annotation during legacy adoption")
+			}
 			b.Status.LastKnownParams = lastKnownParams
 			annotationsToStrip = append(annotationsToStrip, lastKnownParamsAnnotation)
 		}
@@ -325,10 +331,12 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 		if _, err := r.ensureBinding(ctx, svc); err != nil {
 			logger.Error(err, "ensuring ELBBinding during reverse-lookup")
 		}
-		_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+		if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
 			b.Status.ELBID = existing.ID
 			return nil
-		})
+		}); err != nil {
+			logger.Info("could not patch ELBBinding status during reverse-lookup, will recover on next reconcile", "error", err.Error())
+		}
 		// Finalizer is on ELBBinding (added by ensureBinding), not Service.
 		// No Service patch needed - CCE CCM cannot interfere with our cleanup.
 		return ctrl.Result{Requeue: true}, nil
@@ -457,7 +465,6 @@ func (r *ServiceReconciler) reconcileCreate(ctx context.Context, logger logr.Log
 	// detect the empty status, re-read the ELB IP, and rewrite it before CCM
 	// has a chance to interfere again.
 	return ctrl.Result{Requeue: true}, nil
-	return ctrl.Result{RequeueAfter: serviceRequeue}, nil
 }
 
 // createListenerStack creates a listener, pool, healthcheck, and members for one port.
@@ -571,7 +578,9 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 		// Fallback to annotation
 		lastKnownJSON := svc.Annotations[lastKnownParamsAnnotation]
 		if lastKnownJSON != "" {
-			_ = json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams)
+			if err := json.Unmarshal([]byte(lastKnownJSON), &lastKnownParams); err != nil {
+				logger.Error(err, "parsing lastKnownParams annotation during update")
+			}
 		}
 	}
 	delete(lastKnownParams, sourceRangesKey)
@@ -633,13 +642,14 @@ func (r *ServiceReconciler) reconcileUpdate(ctx context.Context, logger logr.Log
 			}
 
 			// Also persist ingress IP to ELBBinding.
-			_ = r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
+			if err := r.patchBindingStatus(ctx, bindingKey, func(b *v1alpha1.ELBBinding) error {
 				b.Status.IngressIP = ingressIP
 				return nil
-			})
+			}); err != nil {
+				logger.Info("could not persist ingress IP to ELBBinding, will retry", "error", err.Error())
+			}
 		}
 	}
-
 
 	// Mark binding as Ready (idempotent). Covers the case where binding was
 	// created via reverse-lookup recovery (which only writes ELBID) and phase
@@ -679,7 +689,7 @@ func (r *ServiceReconciler) syncListenerStacks(ctx context.Context, logger logr.
 		logger.Info("Skipping listener sync: failed to list nodes", "error", err)
 		return nil
 	}
-	
+
 	// Add new ports.
 	for port, svcPort := range desiredPorts {
 		if _, exists := existingPorts[port]; !exists {
@@ -717,7 +727,7 @@ func (r *ServiceReconciler) syncAllPoolMembers(ctx context.Context, logger logr.
 		logger.Info("Skipping pool member sync: failed to list nodes", "error", err)
 		return nil
 	}
-	
+
 	for _, pool := range pools {
 		// Match pool to Service port by name (pool-<svc-name>-<port>).
 		var nodePort int32
@@ -848,7 +858,9 @@ func (r *ServiceReconciler) cleanupBindingResources(
 
 	// Clear Service status (best effort - Service may already be gone).
 	if svc != nil {
-		_ = r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), nil)
+		if err := r.updateStatusWithRetry(ctx, client.ObjectKeyFromObject(svc), nil); err != nil {
+			logger.Info("could not clear Service status (may already be gone)", "error", err.Error())
+		}
 	}
 
 	// Remove finalizer from ELBBinding (not Service). This allows the cascading
@@ -1301,4 +1313,3 @@ func filterValidCIDRs(logger logr.Logger, cidrs []string) []string {
 	}
 	return valid
 }
-

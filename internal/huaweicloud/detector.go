@@ -1,34 +1,35 @@
 package huaweicloud
 
 import (
-"context"
-"fmt"
-"sort"
-"sync"
-"time"
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
 
-corev1 "k8s.io/api/core/v1"
-"sigs.k8s.io/controller-runtime/pkg/client"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // DetectedParams holds the cluster's VPC/subnet/AZ detected from nodes.
 type DetectedParams struct {
 	VPCID     string
-	SubnetID  string            // VIP subnet (first node's subnet, used for ELB VIP)
+	SubnetID  string // VIP subnet (first node's subnet, used for ELB VIP)
 	AZs       []string
-	SubnetMap map[string]string  // virsubnetID -> neutron subnetID (all nodes' subnets)
+	SubnetMap map[string]string // virsubnetID -> neutron subnetID (all nodes' subnets)
 }
+
 const detectorCacheTTL = 1 * time.Hour
 
 // NetworkDetector detects network parameters (VPC, subnet, AZs) from
 // Kubernetes cluster nodes. Result is cached for 1 hour after the first
 // successful detection since all CCE nodes share the same VPC/subnet.
 type NetworkDetector struct {
-Credentials *Credentials
+	Credentials *Credentials
 
-detectMu   sync.Mutex
-detected   *DetectedParams
-detectedAt time.Time
+	detectMu   sync.Mutex
+	detected   *DetectedParams
+	detectedAt time.Time
 }
 
 // NewNetworkDetector creates a NetworkDetector with the given credentials.
@@ -44,8 +45,8 @@ func (d *NetworkDetector) Detect(ctx context.Context, c client.Client) (vpcID, s
 	defer d.detectMu.Unlock()
 
 	if d.detected != nil && time.Since(d.detectedAt) < detectorCacheTTL {
-return d.detected.VPCID, d.detected.SubnetID, d.detected.AZs, nil
-}
+		return d.detected.VPCID, d.detected.SubnetID, d.detected.AZs, nil
+	}
 
 	nodeList := &corev1.NodeList{}
 	if err := c.List(ctx, nodeList); err != nil {
@@ -108,13 +109,13 @@ return d.detected.VPCID, d.detected.SubnetID, d.detected.AZs, nil
 		return "", "", nil, err
 	}
 
-d.detected = &DetectedParams{
-	VPCID:     vpcID,
-	SubnetID:  subnetID,
-	AZs:       azs,
-	SubnetMap: subnetMap,
-}
-d.detectedAt = time.Now()
+	d.detected = &DetectedParams{
+		VPCID:     vpcID,
+		SubnetID:  subnetID,
+		AZs:       azs,
+		SubnetMap: subnetMap,
+	}
+	d.detectedAt = time.Now()
 	return vpcID, subnetID, azs, nil
 }
 

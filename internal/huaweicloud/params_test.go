@@ -6,6 +6,7 @@ import (
 
 	"github.com/weimantian/huawei-elb-controller/internal/huaweicloud"
 )
+
 func TestBuildELBName_DefaultPattern(t *testing.T) {
 	name := huaweicloud.BuildELBName(nil, "default", "my-svc", "abc123def456")
 	// Should be k8s-{ns_8}-{name_8}-{uid_10}

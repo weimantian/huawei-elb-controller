@@ -8,14 +8,14 @@ import (
 )
 
 const (
-serviceLabelManagedBy = "app.kubernetes.io/managed-by"
+	serviceLabelManagedBy = "app.kubernetes.io/managed-by"
 )
 
 // openeverestOperators lists the managed-by values for all OpenEverest engine operators.
 var openeverestOperators = map[string]bool{
-"percona-xtradb-cluster-operator":       true, // MySQL / PXC
-"percona-server-mongodb-operator":       true, // MongoDB / PSMDB
-"percona-postgresql-operator":           true, // PostgreSQL
+	"percona-xtradb-cluster-operator": true, // MySQL / PXC
+	"percona-server-mongodb-operator": true, // MongoDB / PSMDB
+	"percona-postgresql-operator":     true, // PostgreSQL
 }
 
 func isLoadBalancerService(svc *corev1.Service) bool {
@@ -32,7 +32,6 @@ func hasManagedELBID(svc *corev1.Service) bool {
 	return ok
 }
 
-
 func hasLBCParams(svc *corev1.Service) bool {
 	if svc.Annotations == nil {
 		return false
@@ -46,26 +45,26 @@ func hasLBCParams(svc *corev1.Service) bool {
 }
 
 func getLBCParams(svc *corev1.Service) map[string]string {
-params := make(map[string]string)
-if svc.Annotations == nil {
-return params
-}
-controllerKeys := map[string]bool{
-"huawei-elb.io/last-known-params": true,
-}
-for key, value := range svc.Annotations {
-if strings.HasPrefix(key, "huawei-elb.io/") && !controllerKeys[key] {
-params[key] = value
-}
-}
-return params
+	params := make(map[string]string)
+	if svc.Annotations == nil {
+		return params
+	}
+	controllerKeys := map[string]bool{
+		"huawei-elb.io/last-known-params": true,
+	}
+	for key, value := range svc.Annotations {
+		if strings.HasPrefix(key, "huawei-elb.io/") && !controllerKeys[key] {
+			params[key] = value
+		}
+	}
+	return params
 }
 
 func isOpenEverestService(svc *corev1.Service) bool {
-labels := svc.GetLabels()
-if labels == nil {
-return false
-}
+	labels := svc.GetLabels()
+	if labels == nil {
+		return false
+	}
 	return openeverestOperators[labels[serviceLabelManagedBy]]
 }
 

@@ -19,8 +19,8 @@ type MemberTarget struct {
 
 // MemberInfo holds essential information about an existing pool member.
 type MemberInfo struct {
-	ID          string
-	Address     string
+	ID           string
+	Address      string
 	ProtocolPort int32
 }
 
@@ -32,10 +32,10 @@ func AddMember(client *elb.ElbClient, poolID, address string, protocolPort int32
 	subnet := subnetCID
 
 	option := model.CreateMemberOption{
-		Address:       address,
-		ProtocolPort:  &port,
-		SubnetCidrId:  &subnet,
-		AdminStateUp:  &adminStateUp,
+		Address:      address,
+		ProtocolPort: &port,
+		SubnetCidrId: &subnet,
+		AdminStateUp: &adminStateUp,
 	}
 
 	req := model.CreateMemberRequest{
