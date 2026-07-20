@@ -48,15 +48,15 @@ flowchart TB
         Client["DB Client<br/>psql / mysql / mongosh"]
     end
 
-    subgraph HWCloud["Huawei Cloud (cn-north-4)"]
+    subgraph HWCloud["Huawei Cloud"]
         subgraph VPC["VPC / Subnet"]
-            subgraph AZA["AZ cn-north-4a"]
+            subgraph AZA["AZ-A"]
                 Node1["CCE Node 1<br/>192.168.0.x"]
                 Node2["CCE Node 2<br/>192.168.0.x"]
                 Node3["CCE Node 3<br/>192.168.0.x"]
                 Node4["CCE Node 4<br/>192.168.0.x"]
             end
-            subgraph AZB["AZ cn-north-4b"]
+            subgraph AZB["AZ-B"]
                 Node5["CCE Node 5<br/>192.168.0.x"]
             end
         end
@@ -66,7 +66,7 @@ flowchart TB
         ELBAPI["Huawei Cloud APIs<br/>ELB v3 / EIP v2 / ECS VPC"]
     end
 
-    subgraph CCE["CCE Cluster (K8s v1.35)"]
+    subgraph CCE["CCE Cluster"]
         subgraph EverSys["Namespace: everest-system"]
             OP["everest-operator<br/>everest-server<br/>(OpenEverest)"]
             CTL["huawei-elb-controller Pod<br/>image: SWR/huawei-elb-controller:latest<br/>ports: 8081 metrics / 8082 health / 9443 webhook<br/>env: AK/SK/ProjectID/Region (from Secret)<br/>volume: webhook TLS cert"]

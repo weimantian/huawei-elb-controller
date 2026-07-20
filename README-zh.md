@@ -48,15 +48,15 @@ flowchart TB
         Client["数据库客户端<br/>psql / mysql / mongosh"]
     end
 
-    subgraph HWCloud["华为云（cn-north-4）"]
+    subgraph HWCloud["华为云"]
         subgraph VPC["VPC / 子网"]
-            subgraph AZA["可用区 cn-north-4a"]
+            subgraph AZA["可用区 A"]
                 Node1["CCE 节点 1<br/>192.168.0.x"]
                 Node2["CCE 节点 2<br/>192.168.0.x"]
                 Node3["CCE 节点 3<br/>192.168.0.x"]
                 Node4["CCE 节点 4<br/>192.168.0.x"]
             end
-            subgraph AZB["可用区 cn-north-4b"]
+            subgraph AZB["可用区 B"]
                 Node5["CCE 节点 5<br/>192.168.0.x"]
             end
         end
@@ -66,7 +66,7 @@ flowchart TB
         ELBAPI["华为云 API<br/>ELB v3 / EIP v2 / ECS VPC"]
     end
 
-    subgraph CCE["CCE 集群（K8s v1.35）"]
+    subgraph CCE["CCE 集群"]
         subgraph EverSys["命名空间：everest-system"]
             OP["everest-operator<br/>everest-server<br/>（OpenEverest）"]
             CTL["huawei-elb-controller Pod<br/>镜像：SWR/huawei-elb-controller:latest<br/>端口：8081 指标 / 8082 健康 / 9443 webhook<br/>环境变量：AK/SK/ProjectID/Region（来自 Secret）<br/>卷挂载：webhook TLS 证书"]
