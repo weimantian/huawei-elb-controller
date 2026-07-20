@@ -40,6 +40,93 @@
 
 ---
 
+## 部署架构
+
+```mermaid
+flowchart TB
+    subgraph Internet["互联网 / 客户端"]
+        Client["数据库客户端<br/>psql / mysql / mongosh"]
+    end
+
+    subgraph HWCloud["华为云"]
+        subgraph VPC["VPC / 子网"]
+            subgraph AZA["可用区 A"]
+                Node1["CCE 节点 1<br/>192.168.0.x"]
+                Node2["CCE 节点 2<br/>192.168.0.x"]
+                Node3["CCE 节点 3<br/>192.168.0.x"]
+                Node4["CCE 节点 4<br/>192.168.0.x"]
+            end
+            subgraph AZB["可用区 B"]
+                Node5["CCE 节点 5<br/>192.168.0.x"]
+            end
+        end
+
+        EIP["EIP 弹性公网 IP<br/><external-ip>"]
+        ELB["ELB 实例<br/>监听器 + 后端服务器组 + 成员 + 健康检查"]
+        ELBAPI["华为云 API<br/>ELB v3 / EIP v2 / ECS VPC"]
+    end
+
+    subgraph CCE["CCE 集群"]
+        subgraph EverSys["命名空间：everest-system"]
+            OP["everest-operator<br/>everest-server<br/>（OpenEverest）"]
+            CTL["huawei-elb-controller Pod<br/>镜像：SWR/huawei-elb-controller:latest<br/>端口：8081 指标 / 8082 健康 / 9443 webhook<br/>环境变量：AK/SK/ProjectID/Region（来自 Secret）<br/>卷挂载：webhook TLS 证书"]
+            WH["MutatingWebhookConfiguration<br/>namespaceSelector: everest<br/>path: /mutate-v1-service<br/>Service: 443 -> 9443"]
+            TLSSecret["Secret：webhook-tls<br/>（CA + tls.crt + tls.key）"]
+            CredSecret["Secret：huawei-cloud-credentials<br/>ak / sk / project-id / region"]
+        end
+
+        subgraph Ever["命名空间：everest"]
+            DBC["DatabaseCluster CR<br/>（PostgreSQL / PSMDB / PXC）"]
+            DBPod["数据库 Pod<br/>（pgbouncer + postgresql）"]
+            SVC["LoadBalancer Service<br/>spec.loadBalancerClass:<br/>huawei-elb.io/direct-api"]
+            Binding["ELBBinding CR<br/>spec：serviceName + serviceUID<br/>status：elbID + ingressIP + phase<br/>finalizer：elb-cleanup"]
+        end
+
+        CRD["CRD：elbbindings.huawei-elb.io"]
+        RBAC["ClusterRole / SA / Binding"]
+        CCM["CCE CCM<br/>（跳过 loadBalancerClass<br/>不匹配的 Service）"]
+    end
+
+    Client -->|5432/3306/27017| EIP
+    EIP --> ELB
+    ELB -->|NodePort| Node1 & Node2 & Node3 & Node4 & Node5
+    Node1 & Node2 & Node3 & Node4 & Node5 --> DBPod
+
+    DBC -->|创建| SVC
+    SVC -->|CREATE 触发| WH
+    WH -->|注入 loadBalancerClass| SVC
+    WH -->|HTTPS :9443 服务| CTL
+    TLSSecret -->|挂载| CTL
+    WH -.->|caBundle 来自| TLSSecret
+    CredSecret -->|env| CTL
+
+    SVC -->|watch| CTL
+    CTL -->|创建| Binding
+    CTL -->|自动探测 VPC/子网/AZ| Node1
+    CTL -->|创建 ELB+EIP+监听器+服务器组+成员| ELBAPI
+    ELBAPI --> ELB
+    ELBAPI --> EIP
+    CTL -->|写入 status| Binding
+    CTL -->|写入 ingress IP| SVC
+
+    SVC -.->|loadBalancerClass 不匹配| CCM
+
+    CRD -->|定义| Binding
+    RBAC -->|授权| CTL
+
+    classDef hw fill:#e6f3ff,stroke:#0073e6,color:#000
+    classDef k8s fill:#fff4e6,stroke:#ff9900,color:#000
+    classDef ctrl fill:#e6ffe6,stroke:#009900,color:#000
+    class EIP,ELB,ELBAPI,VPC,AZA,AZB hw
+    class DBC,DBPod,SVC,Binding,CRD,RBAC,CCM,EverSys,Ever,CCE k8s
+    class CTL,WH,TLSSecret,CredSecret,OP ctrl
+```
+
+**图例**：蓝色 = 华为云资源，橙色 = Kubernetes 资源，绿色 = Controller 与 Webhook 组件。
+
+---
+
+## 工作流程
 ## 工作流程
 
 ### Webhook 注入（Service 创建时）
