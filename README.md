@@ -40,6 +40,93 @@ The controller directly calls the Huawei Cloud ELB v3 API to create the full ELB
 
 ---
 
+## Deployment Architecture
+
+```mermaid
+flowchart TB
+    subgraph Internet["Internet / Client"]
+        Client["DB Client<br/>psql / mysql / mongosh"]
+    end
+
+    subgraph HWCloud["Huawei Cloud (cn-north-4)"]
+        subgraph VPC["VPC / Subnet"]
+            subgraph AZA["AZ cn-north-4a"]
+                Node1["CCE Node 1<br/>192.168.0.139"]
+                Node2["CCE Node 2<br/>192.168.0.153"]
+                Node3["CCE Node 3<br/>192.168.0.17"]
+                Node4["CCE Node 4<br/>192.168.0.189"]
+            end
+            subgraph AZB["AZ cn-north-4b"]
+                Node5["CCE Node 5<br/>192.168.0.5"]
+            end
+        end
+
+        EIP["EIP<br/>121.36.97.223"]
+        ELB["ELB Instance<br/>Listener + Pool + Members + HealthCheck"]
+        ELBAPI["Huawei Cloud APIs<br/>ELB v3 / EIP v2 / ECS VPC"]
+    end
+
+    subgraph CCE["CCE Cluster (K8s v1.35)"]
+        subgraph EverSys["Namespace: everest-system"]
+            OP["everest-operator<br/>everest-server<br/>(OpenEverest)"]
+            CTL["huawei-elb-controller Pod<br/>image: SWR/huawei-elb-controller:latest<br/>ports: 8081 metrics / 8082 health / 9443 webhook<br/>env: AK/SK/ProjectID/Region (from Secret)<br/>volume: webhook TLS cert"]
+            WH["MutatingWebhookConfiguration<br/>namespaceSelector: everest<br/>path: /mutate-v1-service<br/>Service: 443 -> 9443"]
+            TLSSecret["Secret: webhook-tls<br/>(CA + tls.crt + tls.key)"]
+            CredSecret["Secret: huawei-cloud-credentials<br/>ak / sk / project-id / region"]
+        end
+
+        subgraph Ever["Namespace: everest"]
+            DBC["DatabaseCluster CR<br/>(PostgreSQL / PSMDB / PXC)"]
+            DBPod["DB Pods<br/>(pgbouncer + postgresql)"]
+            SVC["LoadBalancer Service<br/>spec.loadBalancerClass:<br/>huawei-elb.io/direct-api"]
+            Binding["ELBBinding CR<br/>spec: serviceName + serviceUID<br/>status: elbID + ingressIP + phase<br/>finalizer: elb-cleanup"]
+        end
+
+        CRD["CRD: elbbindings.huawei-elb.io"]
+        RBAC["ClusterRole / SA / Binding"]
+        CCM["CCE CCM<br/>(skips Services with<br/>non-matching loadBalancerClass)"]
+    end
+
+    Client -->|5432/3306/27017| EIP
+    EIP --> ELB
+    ELB -->|NodePort| Node1 & Node2 & Node3 & Node4 & Node5
+    Node1 & Node2 & Node3 & Node4 & Node5 --> DBPod
+
+    DBC -->|creates| SVC
+    SVC -->|CREATE triggers| WH
+    WH -->|injects loadBalancerClass| SVC
+    WH -->|serves HTTPS on :9443| CTL
+    TLSSecret -->|mounted| CTL
+    WH -.->|caBundle patched from| TLSSecret
+    CredSecret -->|env| CTL
+
+    SVC -->|watched by| CTL
+    CTL -->|creates| Binding
+    CTL -->|auto-detect VPC/Subnet/AZ| Node1
+    CTL -->|create ELB+EIP+Listener+Pool+Members| ELBAPI
+    ELBAPI --> ELB
+    ELBAPI --> EIP
+    CTL -->|writes status| Binding
+    CTL -->|writes ingress IP| SVC
+
+    SVC -.->|loadBalancerClass mismatch| CCM
+
+    CRD -->|defines| Binding
+    RBAC -->|authorizes| CTL
+
+    classDef hw fill:#e6f3ff,stroke:#0073e6,color:#000
+    classDef k8s fill:#fff4e6,stroke:#ff9900,color:#000
+    classDef ctrl fill:#e6ffe6,stroke:#009900,color:#000
+    class EIP,ELB,ELBAPI,VPC,AZA,AZB hw
+    class DBC,DBPod,SVC,Binding,CRD,RBAC,CCM,EverSys,Ever,CCE k8s
+    class CTL,WH,TLSSecret,CredSecret,OP ctrl
+```
+
+**Legend**: Blue = Huawei Cloud resources, Orange = Kubernetes resources, Green = Controller & Webhook components.
+
+---
+
+## How It Works
 ## How It Works
 
 ### Webhook injection (on Service creation)
