@@ -51,17 +51,17 @@ flowchart TB
     subgraph HWCloud["Huawei Cloud (cn-north-4)"]
         subgraph VPC["VPC / Subnet"]
             subgraph AZA["AZ cn-north-4a"]
-                Node1["CCE Node 1<br/>192.168.0.139"]
-                Node2["CCE Node 2<br/>192.168.0.153"]
-                Node3["CCE Node 3<br/>192.168.0.17"]
-                Node4["CCE Node 4<br/>192.168.0.189"]
+                Node1["CCE Node 1<br/>192.168.0.x"]
+                Node2["CCE Node 2<br/>192.168.0.x"]
+                Node3["CCE Node 3<br/>192.168.0.x"]
+                Node4["CCE Node 4<br/>192.168.0.x"]
             end
             subgraph AZB["AZ cn-north-4b"]
-                Node5["CCE Node 5<br/>192.168.0.5"]
+                Node5["CCE Node 5<br/>192.168.0.x"]
             end
         end
 
-        EIP["EIP<br/>121.36.97.223"]
+        EIP["EIP<br/><external-ip>"]
         ELB["ELB Instance<br/>Listener + Pool + Members + HealthCheck"]
         ELBAPI["Huawei Cloud APIs<br/>ELB v3 / EIP v2 / ECS VPC"]
     end

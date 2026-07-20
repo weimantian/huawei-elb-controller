@@ -51,17 +51,17 @@ flowchart TB
     subgraph HWCloud["华为云（cn-north-4）"]
         subgraph VPC["VPC / 子网"]
             subgraph AZA["可用区 cn-north-4a"]
-                Node1["CCE 节点 1<br/>192.168.0.139"]
-                Node2["CCE 节点 2<br/>192.168.0.153"]
-                Node3["CCE 节点 3<br/>192.168.0.17"]
-                Node4["CCE 节点 4<br/>192.168.0.189"]
+                Node1["CCE 节点 1<br/>192.168.0.x"]
+                Node2["CCE 节点 2<br/>192.168.0.x"]
+                Node3["CCE 节点 3<br/>192.168.0.x"]
+                Node4["CCE 节点 4<br/>192.168.0.x"]
             end
             subgraph AZB["可用区 cn-north-4b"]
-                Node5["CCE 节点 5<br/>192.168.0.5"]
+                Node5["CCE 节点 5<br/>192.168.0.x"]
             end
         end
 
-        EIP["EIP 弹性公网 IP<br/>121.36.97.223"]
+        EIP["EIP 弹性公网 IP<br/><external-ip>"]
         ELB["ELB 实例<br/>监听器 + 后端服务器组 + 成员 + 健康检查"]
         ELBAPI["华为云 API<br/>ELB v3 / EIP v2 / ECS VPC"]
     end
