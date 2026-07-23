@@ -15,7 +15,7 @@ webhooks:
       - apiGroups: [""]
         apiVersions: ["v1"]
         resources: ["services"]
-        operations: ["CREATE"]
+        operations: ["CREATE", "UPDATE"]
         scope: "*"
     # Only intercept Services in the everest namespace (where OpenEverest
     # creates database LB Services). Other namespaces are unaffected.
