@@ -33,46 +33,71 @@ const (
 // completely skips the Service (verified: 0 events, no status clearing).
 //
 // Constraint: loadBalancerClass can only be set at Service CREATE time
-// (K8s API server rejects patches from nil to a value). PSMDB operator
-// creates Services without it. This webhook injects it at creation time.
+// (K8s API server rejects patches from nil to a value). DB operators
+// (PSMDB, PXC) create Services without it. This webhook injects it at
+// creation time.
+//
+// Update protection: some DB operators (PXC upgrade, PSMDB
+// ensureExternalServices) construct Service objects from templates that
+// don't include loadBalancerClass, then call Update -- which submits
+// loadBalancerClass=null and is rejected ("may not change once set"). The
+// webhook also intercepts UPDATE and restores the injected class so the
+// operator's Update succeeds (allowing sourceRanges and other spec
+// changes to apply). PostgreSQL operator preserves loadBalancerClass on
+// Update, so it is unaffected.
 type ServiceMutator struct{}
 
 // Handle implements admission.Handler.
 func (m *ServiceMutator) Handle(_ context.Context, req admission.Request) admission.Response {
-	// Only mutate CREATE operations.
-	if req.Operation != admissionv1.Create {
-		return admission.Allowed("not a create operation")
-	}
-
-	// Decode the Service from the raw admission request.
+	// Decode the new Service from the raw admission request.
 	svc := &corev1.Service{}
 	if err := json.Unmarshal(req.Object.Raw, svc); err != nil {
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf("decoding service: %w", err))
 	}
 
-	// Only inject for LoadBalancer type.
+	// Only care about LoadBalancer type Services.
 	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		return admission.Allowed("not a LoadBalancer service")
 	}
 
-	// Skip if already has a loadBalancerClass.
-	if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != "" {
-		return admission.Allowed("already has loadBalancerClass")
-	}
-
-	// Skip CCM-managed services (they have kubernetes.io/elb.* annotations).
-	if svc.Annotations != nil {
-		if _, ok := svc.Annotations[ccmAutocreateAnnotation]; ok {
-			return admission.Allowed("CCM-managed service (has elb.autocreate)")
+	switch req.Operation {
+	case admissionv1.Create:
+		// Skip if already has a loadBalancerClass.
+		if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != "" {
+			return admission.Allowed("already has loadBalancerClass")
 		}
-		if _, ok := svc.Annotations[ccmELBIDAnnotation]; ok {
-			return admission.Allowed("CCM-managed service (has elb.id)")
+		// Skip CCM-managed services (they have kubernetes.io/elb.* annotations).
+		if hasCCMAnnotations(svc.Annotations) {
+			return admission.Allowed("CCM-managed service")
 		}
-	}
+		// Inject loadBalancerClass so CCM completely skips this Service.
+		lbClass := LoadBalancerClassValue
+		svc.Spec.LoadBalancerClass = &lbClass
 
-	// Inject loadBalancerClass so CCM completely skips this Service.
-	lbClass := LoadBalancerClassValue
-	svc.Spec.LoadBalancerClass = &lbClass
+	case admissionv1.Update:
+		// If the operator preserved loadBalancerClass, nothing to do.
+		if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != "" {
+			return admission.Allowed("loadBalancerClass preserved")
+		}
+		// Check if the old Service had our loadBalancerClass injected.
+		// DB operators (PXC, PSMDB) construct Service objects from templates
+		// that don't include loadBalancerClass, then call Update -- which
+		// submits loadBalancerClass=null and is rejected by the API server
+		// ("may not change once set"). We restore the value so the Update
+		// succeeds, allowing sourceRanges and other spec changes to apply.
+		oldSvc := &corev1.Service{}
+		if err := json.Unmarshal(req.OldObject.Raw, oldSvc); err != nil {
+			return admission.Errored(http.StatusBadRequest, fmt.Errorf("decoding old service: %w", err))
+		}
+		if oldSvc.Spec.LoadBalancerClass == nil || *oldSvc.Spec.LoadBalancerClass != LoadBalancerClassValue {
+			return admission.Allowed("old service did not have our loadBalancerClass")
+		}
+		lbClass := LoadBalancerClassValue
+		svc.Spec.LoadBalancerClass = &lbClass
+
+	default:
+		return admission.Allowed("not a create or update operation")
+	}
 
 	marshaled, err := json.Marshal(svc)
 	if err != nil {
@@ -80,4 +105,19 @@ func (m *ServiceMutator) Handle(_ context.Context, req admission.Request) admiss
 	}
 
 	return admission.PatchResponseFromRaw(req.Object.Raw, marshaled)
+}
+
+// hasCCMAnnotations returns true if the Service has CCM-managed annotations
+// (kubernetes.io/elb.autocreate or kubernetes.io/elb.id).
+func hasCCMAnnotations(annotations map[string]string) bool {
+	if annotations == nil {
+		return false
+	}
+	if _, ok := annotations[ccmAutocreateAnnotation]; ok {
+		return true
+	}
+	if _, ok := annotations[ccmELBIDAnnotation]; ok {
+		return true
+	}
+	return false
 }
