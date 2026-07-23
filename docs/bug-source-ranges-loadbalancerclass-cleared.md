@@ -189,8 +189,55 @@ PG operator 保留式 Update 是 PG 不受影响的根本原因。修复后 webh
 | `charts/huawei-elb-controller/templates/webhook.yaml` | 同上（Helm chart 同步） |
 | `internal/webhook/service_mutator.go` | Handle 增加 UPDATE 分支恢复 class + `hasCCMAnnotations` 辅助函数 |
 | `internal/webhook/service_mutator_test.go` | 新增 8 个单元测试 |
+| `internal/controller/service_controller.go` | UpdateFunc 改用 `reflect.DeepEqual(Spec)` 替代失效的 generation 比较 |
+| `internal/webhook/service_mutator_test.go` | 新增 8 个单元测试 |
 
-## 已知问题：ACL 更新有 5 分钟延迟（单独处理）
+## 已修复问题：ACL 更新有 5 分钟延迟
+
+### 现象
+
+用户编辑 Source Range 保存后，Service spec 立即更新，但 ELB ACL IP group 最长等 5 分钟才同步。
+
+### 根因
+
+Service 是 K8s 少数**没有 `metadata.generation` 字段**的核心资源（其 REST strategy 没有递增 generation 的逻辑），所以 Service 的 generation 始终为 0。
+
+UpdateFunc 用 generation 判断 spec 变更：
+
+```go
+if svcNew.Generation == svcOld.Generation {  // 0 == 0 永远 true
+    return false  // 所有 spec 变更都被过滤
+}
+```
+
+导致 sourceRanges 变更被过滤，不触发即时 reconcile，只能等 5 分钟周期兜底 requeue。
+
+### 修复
+
+改用 `reflect.DeepEqual(svcOld.Spec, svcNew.Spec)` 直接比较 spec 内容：
+
+```go
+if reflect.DeepEqual(svcOld.Spec, svcNew.Spec) {
+    return false
+}
+```
+
+DeepEqual 只比较 spec，不比较 metadata（annotation/label），所以：
+- ✅ spec 变更（sourceRanges 等）立即触发 reconcile
+- ✅ controller 自己写 annotation 不触发（避免死循环）
+- ✅ 外部 annotation/label 变更不触发（减少噪声）
+
+### 验证
+
+手动 patch sourceRanges，观察 controller 日志：
+
+```bash
+kubectl patch svc postgresql-8ax-pgbouncer -n everest --type=merge \
+  -p '{"spec":{"loadBalancerSourceRanges":["192.168.0.0/16","10.0.0.0/8"]}}'
+```
+
+修复前：patch 后 30 秒内无 reconcile 日志（等 5 分钟周期）。
+修复后：patch 后几秒内触发 reconcile，ACL 即时更新。
 
 ### 现象
 

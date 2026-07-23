@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -1168,12 +1169,18 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !svcNew.DeletionTimestamp.IsZero() {
 				return shouldReconcileService(svcNew)
 			}
-			// Only reconcile on spec changes (generation bump). Annotation-only
-			// updates (e.g. our own writes, operator annotation syncs) do not
-			// change generation and should not trigger reconcilation.
+			// Only reconcile on spec changes. Service is one of the K8s core
+			// resources that does NOT increment metadata.generation on spec
+			// changes (its REST strategy has no generation bump logic), so
+			// comparing Generation is always 0==0 and filters out ALL spec
+			// updates -- including loadBalancerSourceRanges edits, which then
+			// only get applied on the 5-minute periodic requeue. Compare the
+			// Spec directly with reflect.DeepEqual instead; this still skips
+			// annotation/label-only updates (our own writes, operator syncs)
+			// to avoid reconcile loops, while catching real spec changes.
 			// Service type changes (e.g. ClusterIP->LoadBalancer) are caught
 			// by shouldReconcileService on both old and new.
-			if svcNew.Generation == svcOld.Generation {
+			if reflect.DeepEqual(svcOld.Spec, svcNew.Spec) {
 				return false
 			}
 			return shouldReconcileService(svcOld) || shouldReconcileService(svcNew)
