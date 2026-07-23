@@ -8,6 +8,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -49,14 +50,21 @@ type ServiceMutator struct{}
 
 // Handle implements admission.Handler.
 func (m *ServiceMutator) Handle(_ context.Context, req admission.Request) admission.Response {
+	logger := log.Log.WithName("service-mutator").WithValues(
+		"namespace", req.Namespace,
+		"name", req.Name,
+		"operation", req.Operation)
+
 	// Decode the new Service from the raw admission request.
 	svc := &corev1.Service{}
 	if err := json.Unmarshal(req.Object.Raw, svc); err != nil {
+		logger.Error(err, "decoding service")
 		return admission.Errored(http.StatusBadRequest, fmt.Errorf("decoding service: %w", err))
 	}
 
 	// Only care about LoadBalancer type Services.
 	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		logger.Info("allowed: not a LoadBalancer service")
 		return admission.Allowed("not a LoadBalancer service")
 	}
 
@@ -64,19 +72,23 @@ func (m *ServiceMutator) Handle(_ context.Context, req admission.Request) admiss
 	case admissionv1.Create:
 		// Skip if already has a loadBalancerClass.
 		if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != "" {
+			logger.Info("allowed: already has loadBalancerClass", "loadBalancerClass", *svc.Spec.LoadBalancerClass)
 			return admission.Allowed("already has loadBalancerClass")
 		}
 		// Skip CCM-managed services (they have kubernetes.io/elb.* annotations).
 		if hasCCMAnnotations(svc.Annotations) {
+			logger.Info("allowed: CCM-managed service")
 			return admission.Allowed("CCM-managed service")
 		}
 		// Inject loadBalancerClass so CCM completely skips this Service.
 		lbClass := LoadBalancerClassValue
 		svc.Spec.LoadBalancerClass = &lbClass
+		logger.Info("injecting loadBalancerClass on CREATE", "loadBalancerClass", lbClass)
 
 	case admissionv1.Update:
 		// If the operator preserved loadBalancerClass, nothing to do.
 		if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != "" {
+			logger.Info("allowed: loadBalancerClass preserved", "loadBalancerClass", *svc.Spec.LoadBalancerClass)
 			return admission.Allowed("loadBalancerClass preserved")
 		}
 		// Check if the old Service had our loadBalancerClass injected.
@@ -87,23 +99,29 @@ func (m *ServiceMutator) Handle(_ context.Context, req admission.Request) admiss
 		// succeeds, allowing sourceRanges and other spec changes to apply.
 		oldSvc := &corev1.Service{}
 		if err := json.Unmarshal(req.OldObject.Raw, oldSvc); err != nil {
+			logger.Error(err, "decoding old service")
 			return admission.Errored(http.StatusBadRequest, fmt.Errorf("decoding old service: %w", err))
 		}
 		if oldSvc.Spec.LoadBalancerClass == nil || *oldSvc.Spec.LoadBalancerClass != LoadBalancerClassValue {
+			logger.Info("allowed: old service did not have our loadBalancerClass")
 			return admission.Allowed("old service did not have our loadBalancerClass")
 		}
 		lbClass := LoadBalancerClassValue
 		svc.Spec.LoadBalancerClass = &lbClass
+		logger.Info("restoring loadBalancerClass on UPDATE", "loadBalancerClass", lbClass)
 
 	default:
+		logger.Info("allowed: not a create or update operation")
 		return admission.Allowed("not a create or update operation")
 	}
 
 	marshaled, err := json.Marshal(svc)
 	if err != nil {
+		logger.Error(err, "marshaling service")
 		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("marshaling service: %w", err))
 	}
 
+	logger.Info("patching service to apply loadBalancerClass")
 	return admission.PatchResponseFromRaw(req.Object.Raw, marshaled)
 }
 
